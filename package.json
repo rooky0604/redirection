@@ -1,0 +1,9 @@
+{
+  "name": "simple-url-redirector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Petite application pour gerer des redirections URL 301 avec interface web protegee.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
