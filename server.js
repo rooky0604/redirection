@@ -5,8 +5,10 @@ const crypto = require("crypto");
 const { URL } = require("url");
 
 const ROOT_DIR = __dirname;
-const DATA_DIR = path.join(ROOT_DIR, "data");
-const REDIRECTS_FILE = path.join(DATA_DIR, "redirects.json");
+const STORAGE_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(ROOT_DIR, "data");
+const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -154,8 +156,8 @@ function loadEnv(filePath) {
 }
 
 function ensureDataFile() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(STORAGE_DIR)) {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
   }
 
   if (!fs.existsSync(REDIRECTS_FILE)) {
@@ -656,4 +658,3 @@ function escapeHtml(value) {
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
-

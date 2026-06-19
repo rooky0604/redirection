@@ -1,4 +1,4 @@
-FROM node:20-alpine
+﻿FROM node:20-alpine
 
 WORKDIR /app
 
@@ -9,6 +9,9 @@ COPY data ./data
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV DATA_DIR=/app/data
+
+VOLUME ["/app/data"]
 
 EXPOSE 3000
 
