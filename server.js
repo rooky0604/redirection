@@ -21,7 +21,8 @@ ensureDataFile();
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    const pathname = normalizeRoute(url.pathname);
+    const pathname = normalizePath(url.pathname);
+    const requestHost = normalizeHost(req.headers.host || "");
     const method = req.method || "GET";
 
     if (pathname === "/login" && method === "GET") {
@@ -68,7 +69,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const form = await parseForm(req);
-      const source = normalizeRoute(form.source || "");
+      const source = normalizeSource(form.source || "");
       const target = (form.target || "").trim();
 
       const error = validateRedirectInput(source, target);
@@ -97,21 +98,26 @@ const server = http.createServer(async (req, res) => {
       }
 
       const form = await parseForm(req);
-      const source = normalizeRoute(form.source || "");
+      const source = normalizeSource(form.source || "");
       const redirects = readRedirects().filter((item) => item.source !== source);
       writeRedirects(redirects);
       redirect(res, "/admin?success=Redirection%20supprimee");
       return;
     }
 
-    const match = readRedirects().find((item) => item.source === pathname);
+    const redirects = readRedirects();
+    const fullSource = formatSource(requestHost, pathname);
+    const match =
+      redirects.find((item) => item.source === fullSource) ||
+      redirects.find((item) => item.source === pathname);
+
     if (match) {
       res.writeHead(301, { Location: match.target });
       res.end();
       return;
     }
 
-    renderNotFound(res, pathname);
+    renderNotFound(res, requestHost, pathname);
   } catch (error) {
     res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
     res.end(renderPage("Erreur", `<p>Erreur interne: ${escapeHtml(error.message)}</p>`));
@@ -172,23 +178,60 @@ function writeRedirects(redirects) {
   fs.writeFileSync(REDIRECTS_FILE, `${JSON.stringify(redirects, null, 2)}\n`, "utf8");
 }
 
-function normalizeRoute(input) {
+function normalizePath(input) {
   const trimmed = (input || "").trim();
   if (!trimmed || trimmed === "/") {
     return "/";
   }
 
-  const withoutDomain = trimmed.replace(/^https?:\/\/[^/]+/i, "");
-  const withLeadingSlash = withoutDomain.startsWith("/") ? withoutDomain : `/${withoutDomain}`;
-  return withLeadingSlash.replace(/\/+$/, "") || "/";
+  const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return withLeadingSlash.replace(/\/+$/g, "") || "/";
+}
+
+function normalizeHost(input) {
+  const trimmed = (input || "").trim().toLowerCase();
+  return trimmed.replace(/:\d+$/, "");
+}
+
+function formatSource(host, pathname) {
+  return host ? `${host}${pathname}` : pathname;
+}
+
+function normalizeSource(input) {
+  const trimmed = (input || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    const parsed = new URL(trimmed);
+    return formatSource(normalizeHost(parsed.host), normalizePath(parsed.pathname));
+  }
+
+  if (trimmed.startsWith("/")) {
+    return normalizePath(trimmed);
+  }
+
+  if (trimmed.includes(".")) {
+    const parsed = new URL(`http://${trimmed}`);
+    return formatSource(normalizeHost(parsed.host), normalizePath(parsed.pathname));
+  }
+
+  return normalizePath(trimmed);
 }
 
 function validateRedirectInput(source, target) {
   if (!source) {
-    return "Le chemin source est requis.";
+    return "La source est requise.";
   }
 
-  if (source === "/admin" || source.startsWith("/admin/") || source === "/login" || source === "/logout") {
+  const sourcePath = extractSourcePath(source);
+  if (
+    sourcePath === "/admin" ||
+    sourcePath.startsWith("/admin/") ||
+    sourcePath === "/login" ||
+    sourcePath === "/logout"
+  ) {
     return "Ce chemin est reserve a l'administration.";
   }
 
@@ -206,6 +249,11 @@ function validateRedirectInput(source, target) {
   }
 
   return "";
+}
+
+function extractSourcePath(source) {
+  const slashIndex = source.indexOf("/");
+  return slashIndex === -1 ? "/" : normalizePath(source.slice(slashIndex));
 }
 
 function isLocalTarget(parsedUrl) {
@@ -366,7 +414,7 @@ function renderAdmin(res, redirects, flash) {
     <header class="topbar">
       <div>
         <h1>Redirections URL</h1>
-        <p>Ajoutez une source, une cible, et l'application renverra un code 301.</p>
+        <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible reste une URL externe en 301.</p>
       </div>
       <a href="/logout" class="link-button">Deconnexion</a>
     </header>
@@ -376,7 +424,7 @@ function renderAdmin(res, redirects, flash) {
       <form method="post" action="/admin/redirects" class="form-grid">
         <label>
           <span>URL souhaitee</span>
-          <input type="text" name="source" placeholder="/mon-chemin" required />
+          <input type="text" name="source" placeholder="promo.monsite.com/mon-chemin ou /mon-chemin" required />
         </label>
         <label>
           <span>Cible externe</span>
@@ -409,7 +457,8 @@ function renderAdmin(res, redirects, flash) {
   res.end(renderPage("Administration", content));
 }
 
-function renderNotFound(res, pathname) {
+function renderNotFound(res, requestHost, pathname) {
+  const requestedSource = formatSource(requestHost, pathname);
   res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
   res.end(
     renderPage(
@@ -417,7 +466,7 @@ function renderNotFound(res, pathname) {
       `
         <section class="card auth-card">
           <h1>404</h1>
-          <p>Aucune redirection definie pour <code>${escapeHtml(pathname)}</code>.</p>
+          <p>Aucune redirection definie pour <code>${escapeHtml(requestedSource)}</code>.</p>
           <p><a href="/admin">Acceder a l'administration</a></p>
         </section>
       `
@@ -604,7 +653,7 @@ function escapeHtml(value) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
+    .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
 
