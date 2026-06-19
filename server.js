@@ -1,4 +1,4 @@
-const http = require("http");
+﻿const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -197,11 +197,25 @@ function validateRedirectInput(source, target) {
     if (!["http:", "https:"].includes(parsed.protocol)) {
       return "La cible doit utiliser http ou https.";
     }
+
+    if (isLocalTarget(parsed)) {
+      return "La cible doit etre un site externe.";
+    }
   } catch {
     return "La cible doit etre une URL absolue valide.";
   }
 
   return "";
+}
+
+function isLocalTarget(parsedUrl) {
+  const hostname = (parsedUrl.hostname || "").toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".local")
+  );
 }
 
 function isAuthenticated(req) {
@@ -365,7 +379,7 @@ function renderAdmin(res, redirects, flash) {
           <input type="text" name="source" placeholder="/mon-chemin" required />
         </label>
         <label>
-          <span>Cible</span>
+          <span>Cible externe</span>
           <input type="url" name="target" placeholder="https://exemple.com/page" required />
         </label>
         <label>
@@ -593,3 +607,4 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
