@@ -165,6 +165,22 @@ function ensureDataFile() {
   }
 }
 
+function logStorageStatus() {
+  const storageExists = fs.existsSync(STORAGE_DIR);
+  const fileExists = fs.existsSync(REDIRECTS_FILE);
+  let writable = false;
+
+  try {
+    fs.accessSync(STORAGE_DIR, fs.constants.R_OK | fs.constants.W_OK);
+    writable = true;
+  } catch {
+    writable = false;
+  }
+
+  console.log(`[storage] DATA_DIR=${STORAGE_DIR}`);
+  console.log(`[storage] directory_exists=${storageExists} file_exists=${fileExists} read_write=${writable}`);
+}
+
 function readRedirects() {
   ensureDataFile();
   try {
@@ -658,3 +674,5 @@ function escapeHtml(value) {
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+
