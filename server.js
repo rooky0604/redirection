@@ -1,4 +1,4 @@
-﻿const http = require("http");
+const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -61,7 +61,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       const redirects = readRedirects();
-      return renderAdmin(res, redirects, getFlashMessage(url));
+      const editSource = normalizeSource(url.searchParams.get("edit") || "");
+      const editingRedirect = editSource
+        ? redirects.find((item) => item.source === editSource) || null
+        : null;
+      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect);
     }
 
     if (pathname === "/admin/redirects" && method === "POST") {
@@ -71,25 +75,29 @@ const server = http.createServer(async (req, res) => {
       }
 
       const form = await parseForm(req);
+      const originalSource = normalizeSource(form.originalSource || form.source || "");
       const source = normalizeSource(form.source || "");
       const target = (form.target || "").trim();
+      const existingRedirects = readRedirects().filter((item) => item.source !== originalSource);
 
-      const error = validateRedirectInput(source, target);
+      const error = validateRedirectInput(source, target, existingRedirects);
       if (error) {
         redirect(res, `/admin?error=${encodeURIComponent(error)}`);
         return;
       }
 
-      const redirects = readRedirects().filter((item) => item.source !== source);
-      redirects.push({
+      existingRedirects.push({
         source,
         target,
         code: 301,
         updatedAt: new Date().toISOString()
       });
-      redirects.sort((a, b) => a.source.localeCompare(b.source));
-      writeRedirects(redirects);
-      redirect(res, "/admin?success=Redirection%20enregistree");
+      existingRedirects.sort((a, b) => a.source.localeCompare(b.source));
+      writeRedirects(existingRedirects);
+      redirect(
+        res,
+        `/admin?success=${encodeURIComponent(originalSource ? "Redirection modifiee" : "Redirection enregistree")}`
+      );
       return;
     }
 
@@ -114,7 +122,19 @@ const server = http.createServer(async (req, res) => {
       redirects.find((item) => item.source === pathname);
 
     if (match) {
-      res.writeHead(301, { Location: match.target });
+      const resolvedTarget = resolveRedirectTarget(match.target, redirects, new Set([match.source]));
+      if (!resolvedTarget) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          renderPage(
+            "Erreur",
+            `<p>La redirection pour <code>${escapeHtml(match.source)}</code> forme une boucle ou pointe vers une cible inexistante.</p>`
+          )
+        );
+        return;
+      }
+
+      res.writeHead(301, { Location: resolvedTarget });
       res.end();
       return;
     }
@@ -238,7 +258,7 @@ function normalizeSource(input) {
   return normalizePath(trimmed);
 }
 
-function validateRedirectInput(source, target) {
+function validateRedirectInput(source, target, redirects = []) {
   if (!source) {
     return "La source est requise.";
   }
@@ -253,17 +273,40 @@ function validateRedirectInput(source, target) {
     return "Ce chemin est reserve a l'administration.";
   }
 
-  try {
-    const parsed = new URL(target);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return "La cible doit utiliser http ou https.";
-    }
+  if (!target) {
+    return "La cible est requise.";
+  }
 
-    if (isLocalTarget(parsed)) {
+  const parsedTarget = parseAbsoluteTarget(target);
+  if (parsedTarget) {
+    if (isLocalTarget(parsedTarget)) {
       return "La cible doit etre un site externe.";
     }
+    return "";
+  }
+
+  let normalizedTarget = "";
+  try {
+    normalizedTarget = normalizeSource(target);
   } catch {
-    return "La cible doit etre une URL absolue valide.";
+    return "La cible doit etre une URL absolue valide ou une source existante.";
+  }
+
+  if (!normalizedTarget) {
+    return "La cible doit etre une URL absolue valide ou une source existante.";
+  }
+
+  if (normalizedTarget === source) {
+    return "La cible ne peut pas pointer vers elle-meme.";
+  }
+
+  const redirectMap = new Map(redirects.map((item) => [item.source, item.target]));
+  if (!redirectMap.has(normalizedTarget)) {
+    return "La cible interne doit correspondre a une source deja enregistree.";
+  }
+
+  if (!resolveRedirectTarget(normalizedTarget, redirects, new Set([source]))) {
+    return "Cette cible interne cree une boucle de redirection.";
   }
 
   return "";
@@ -282,6 +325,41 @@ function isLocalTarget(parsedUrl) {
     hostname === "::1" ||
     hostname.endsWith(".local")
   );
+}
+
+function parseAbsoluteTarget(target) {
+  try {
+    const parsed = new URL(target);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRedirectTarget(target, redirects, visited = new Set()) {
+  const parsedTarget = parseAbsoluteTarget(target);
+  if (parsedTarget) {
+    return parsedTarget.toString();
+  }
+
+  let normalizedTarget = "";
+  try {
+    normalizedTarget = normalizeSource(target);
+  } catch {
+    return "";
+  }
+
+  if (!normalizedTarget || visited.has(normalizedTarget)) {
+    return "";
+  }
+
+  const nextRedirect = redirects.find((item) => item.source === normalizedTarget);
+  if (!nextRedirect) {
+    return "";
+  }
+
+  visited.add(normalizedTarget);
+  return resolveRedirectTarget(nextRedirect.target, redirects, visited);
 }
 
 function isAuthenticated(req) {
@@ -406,17 +484,20 @@ function renderLogin(res, flash) {
   res.end(renderPage("Connexion", content));
 }
 
-function renderAdmin(res, redirects, flash) {
+function renderAdmin(res, redirects, flash, editingRedirect = null) {
   const messages = renderMessages(flash);
+  const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
+  const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
   const rows = redirects.length
     ? redirects
         .map(
           (item) => `
             <tr>
               <td><code>${escapeHtml(item.source)}</code></td>
-              <td><a href="${escapeHtml(item.target)}" target="_blank" rel="noreferrer">${escapeHtml(item.target)}</a></td>
+              <td>${renderTargetCell(item.target)}</td>
               <td>${item.code}</td>
-              <td>
+              <td class="actions-cell">
+                <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
                 <form method="post" action="/admin/redirects/delete">
                   <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
                   <button type="submit" class="danger">Supprimer</button>
@@ -432,27 +513,32 @@ function renderAdmin(res, redirects, flash) {
     <header class="topbar">
       <div>
         <h1>Redirections URL</h1>
-        <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible reste une URL externe en 301.</p>
+        <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible peut etre une URL externe ou une autre source deja enregistree.</p>
       </div>
       <a href="/logout" class="link-button">Deconnexion</a>
     </header>
     ${messages}
     <section class="card">
-      <h2>Nouvelle redirection</h2>
+      <h2>${formTitle}</h2>
       <form method="post" action="/admin/redirects" class="form-grid">
+        <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <label>
           <span>URL souhaitee</span>
-          <input type="text" name="source" placeholder="promo.monsite.com/mon-chemin ou /mon-chemin" required />
+          <input type="text" name="source" placeholder="promo.monsite.com/mon-chemin ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
         </label>
         <label>
-          <span>Cible externe</span>
-          <input type="url" name="target" placeholder="https://exemple.com/page" required />
+          <span>Cible</span>
+          <input type="text" name="target" placeholder="https://exemple.com/page ou rooky.fr" value="${escapeHtml(editingRedirect ? editingRedirect.target : "")}" required />
         </label>
         <label>
           <span>Code</span>
           <input type="text" value="301" disabled />
         </label>
-        <button type="submit">Enregistrer</button>
+        <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
+        <div class="form-actions">
+          <button type="submit">${submitLabel}</button>
+          ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
+        </div>
       </form>
     </section>
     <section class="card">
@@ -600,6 +686,23 @@ function renderPage(title, content) {
         .danger {
           background: var(--danger);
         }
+        .secondary {
+          background: #e9dfd4;
+          color: var(--ink);
+        }
+        .secondary:hover {
+          background: #d9ccbe;
+        }
+        .form-actions,
+        .actions-cell {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .actions-cell form {
+          margin: 0;
+        }
         .message {
           padding: 12px 14px;
           border-radius: 12px;
@@ -675,4 +778,11 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function renderTargetCell(target) {
+  const parsedTarget = parseAbsoluteTarget(target);
+  if (parsedTarget) {
+    return `<a href="${escapeHtml(parsedTarget.toString())}" target="_blank" rel="noreferrer">${escapeHtml(target)}</a>`;
+  }
 
+  return `<code>${escapeHtml(target)}</code>`;
+}
