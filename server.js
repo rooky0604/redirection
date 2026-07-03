@@ -150,7 +150,7 @@ const requestListener = async (req, res) => {
       }
 
       try {
-        await runCommand(CERTBOT_BIN, buildCertbotArgs([requestedDomain]));
+        await runCommand(CERTBOT_BIN, buildCertbotArgs([requestedDomain], requestedDomain));
         redirect(res, `/admin?success=${encodeURIComponent(`Certificat demande pour ${requestedDomain}`)}`);
       } catch (error) {
         redirect(res, `/admin?error=${encodeURIComponent(error.message)}`);
@@ -335,7 +335,7 @@ function isTruthy(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
-function buildCertbotArgs(domains) {
+function buildCertbotArgs(domains, certName = "") {
   const configDir = path.join(CERTBOT_DIR, "config");
   const workDir = path.join(CERTBOT_DIR, "work");
   const logsDir = path.join(CERTBOT_DIR, "logs");
@@ -362,6 +362,10 @@ function buildCertbotArgs(domains) {
     LETSENCRYPT_EMAIL
   ];
 
+  if (certName) {
+    args.push("--cert-name", certName);
+  }
+
   if (LETSENCRYPT_STAGING) {
     args.push("--test-cert");
   }
@@ -373,8 +377,8 @@ function buildCertbotArgs(domains) {
   return args;
 }
 
-function buildCertbotCommand(domains) {
-  return [CERTBOT_BIN, ...buildCertbotArgs(domains)]
+function buildCertbotCommand(domains, certName = "") {
+  return [CERTBOT_BIN, ...buildCertbotArgs(domains, certName)]
     .map((part) => (/\s/.test(part) ? `"${part}"` : part))
     .join(" ");
 }
@@ -753,7 +757,7 @@ function buildTlsDomainStatuses(redirects) {
 
     return {
       domain,
-      command: LETSENCRYPT_EMAIL ? buildCertbotCommand([domain]) : "",
+      command: LETSENCRYPT_EMAIL ? buildCertbotCommand([domain], domain) : "",
       hasCertificate: Boolean(certificateInfo),
       expiresAt: certificateInfo ? formatCertificateDate(certificateInfo.expiresAt) : "Aucun certificat detecte"
     };
