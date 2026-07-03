@@ -25,6 +25,7 @@ const LETSENCRYPT_DOMAINS = parseDomainList(process.env.LETSENCRYPT_DOMAINS || "
 const LETSENCRYPT_STAGING = isTruthy(process.env.LETSENCRYPT_STAGING);
 const CERTBOT_BIN = (process.env.CERTBOT_BIN || "certbot").trim() || "certbot";
 const CERTBOT_DIR = path.join(STORAGE_DIR, "letsencrypt");
+const TLS_CONFIG_FILE = path.join(STORAGE_DIR, "tls-config.json");
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -78,7 +79,22 @@ const requestListener = async (req, res) => {
       const editingRedirect = editSource
         ? redirects.find((item) => item.source === editSource) || null
         : null;
-      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect);
+      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect, getTlsSettings());
+    }
+
+    if (pathname === "/admin/tls/config" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      writeTlsConfig({
+        email: String(form.email || "").trim(),
+        staging: String(form.staging || "") === "on"
+      });
+      redirect(res, "/admin?success=Configuration%20TLS%20enregistree");
+      return;
     }
 
     if (pathname === "/admin/redirects" && method === "POST") {
@@ -139,7 +155,8 @@ const requestListener = async (req, res) => {
       const requestedDomain = normalizeHost(form.domain || "");
       const availableDomains = collectTlsDomains(redirects);
 
-      if (!LETSENCRYPT_EMAIL) {
+      const tlsSettings = getTlsSettings();
+    if (!tlsSettings.email) {
         redirect(res, "/admin?error=LETSENCRYPT_EMAIL%20est%20requis");
         return;
       }
@@ -150,7 +167,7 @@ const requestListener = async (req, res) => {
       }
 
       try {
-        await runCommand(CERTBOT_BIN, buildCertbotArgs([requestedDomain], requestedDomain));
+        await runCommand(tlsSettings.certbotBin, buildCertbotArgs([requestedDomain], requestedDomain, tlsSettings));
         redirect(res, `/admin?success=${encodeURIComponent(`Certificat demande pour ${requestedDomain}`)}`);
       } catch (error) {
         redirect(res, `/admin?error=${encodeURIComponent(error.message)}`);
@@ -225,6 +242,39 @@ function ensureDataFile() {
   if (!fs.existsSync(REDIRECTS_FILE)) {
     fs.writeFileSync(REDIRECTS_FILE, "[]\n", "utf8");
   }
+
+  if (!fs.existsSync(TLS_CONFIG_FILE)) {
+    fs.writeFileSync(TLS_CONFIG_FILE, "{}\n", "utf8");
+  }
+}
+
+function readTlsConfig() {
+  ensureDataFile();
+  try {
+    const raw = fs.readFileSync(TLS_CONFIG_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeTlsConfig(nextConfig) {
+  const current = readTlsConfig();
+  const merged = {
+    ...current,
+    ...nextConfig
+  };
+  fs.writeFileSync(TLS_CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+}
+
+function getTlsSettings() {
+  const config = readTlsConfig();
+  return {
+    email: String(config.email || LETSENCRYPT_EMAIL || "").trim(),
+    staging: typeof config.staging === "boolean" ? config.staging : LETSENCRYPT_STAGING,
+    certbotBin: String(config.certbotBin || CERTBOT_BIN || "certbot").trim() || "certbot"
+  };
 }
 
 function logStorageStatus() {
@@ -248,7 +298,8 @@ async function startServer() {
 
   const tlsDomains = collectTlsDomains(readRedirects());
   if (tlsDomains.length > 0) {
-    if (!LETSENCRYPT_EMAIL) {
+    const tlsSettings = getTlsSettings();
+    if (!tlsSettings.email) {
       console.warn("[tls] LETSENCRYPT_EMAIL est absent. Les demandes TLS depuis l'admin seront indisponibles.");
     } else {
       const primaryDomain = tlsDomains[0];
@@ -323,7 +374,7 @@ function isTruthy(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
-function buildCertbotArgs(domains, certName = "") {
+function buildCertbotArgs(domains, certName = "", tlsSettings = getTlsSettings()) {
   const configDir = path.join(CERTBOT_DIR, "config");
   const workDir = path.join(CERTBOT_DIR, "work");
   const logsDir = path.join(CERTBOT_DIR, "logs");
@@ -347,14 +398,14 @@ function buildCertbotArgs(domains, certName = "") {
     "--logs-dir",
     logsDir,
     "-m",
-    LETSENCRYPT_EMAIL
+    tlsSettings.email
   ];
 
   if (certName) {
     args.push("--cert-name", certName);
   }
 
-  if (LETSENCRYPT_STAGING) {
+  if (tlsSettings.staging) {
     args.push("--test-cert");
   }
 
@@ -365,8 +416,8 @@ function buildCertbotArgs(domains, certName = "") {
   return args;
 }
 
-function buildCertbotCommand(domains, certName = "") {
-  return [CERTBOT_BIN, ...buildCertbotArgs(domains, certName)]
+function buildCertbotCommand(domains, certName = "", tlsSettings = getTlsSettings()) {
+  return [tlsSettings.certbotBin, ...buildCertbotArgs(domains, certName, tlsSettings)]
     .map((part) => (/\s/.test(part) ? `"${part}"` : part))
     .join(" ");
 }
@@ -726,7 +777,7 @@ function redirect(res, location) {
   res.end();
 }
 
-function buildTlsDomainStatuses(redirects) {
+function buildTlsDomainStatuses(redirects, tlsSettings = getTlsSettings()) {
   const domains = collectTlsDomains(redirects);
   if (!domains.length) {
     return [];
@@ -745,7 +796,7 @@ function buildTlsDomainStatuses(redirects) {
 
     return {
       domain,
-      command: LETSENCRYPT_EMAIL ? buildCertbotCommand([domain], domain) : "",
+      command: tlsSettings.email ? buildCertbotCommand([domain], domain, tlsSettings) : "",
       hasCertificate: Boolean(certificateInfo),
       expiresAt: certificateInfo ? formatCertificateDate(certificateInfo.expiresAt) : "Aucun certificat detecte"
     };
@@ -791,7 +842,7 @@ function formatCertificateDate(value) {
   });
 }
 
-function renderTlsStatusSection(statuses) {
+function renderTlsStatusSection(statuses, tlsSettings) {
   if (!statuses.length) {
     return "";
   }
@@ -804,7 +855,7 @@ function renderTlsStatusSection(statuses) {
           <td>${item.hasCertificate ? `<span class="status-ok">Actif</span>` : `<span class="status-missing">Manquant</span>`}</td>
           <td>${escapeHtml(item.expiresAt)}</td>
           <td class="command-cell">
-            <code class="command-text">${escapeHtml(item.command || "Renseignez LETSENCRYPT_EMAIL pour generer la commande.")}</code>
+            <code class="command-text">${escapeHtml(item.command || "Renseignez l'email TLS ci-dessus pour generer la commande.")}</code>
           </td>
           <td class="actions-cell">
             <form method="post" action="/admin/tls/request">
@@ -864,12 +915,12 @@ function renderLogin(res, flash) {
   res.end(renderPage("Connexion", content));
 }
 
-function renderAdmin(res, redirects, flash, editingRedirect = null) {
+function renderAdmin(res, redirects, flash, editingRedirect = null, tlsSettings = getTlsSettings()) {
   const messages = renderMessages(flash);
   const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
   const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
-  const tlsStatuses = buildTlsDomainStatuses(redirects);
-  const tlsSection = renderTlsStatusSection(tlsStatuses);
+  const tlsStatuses = buildTlsDomainStatuses(redirects, tlsSettings);
+  const tlsSection = renderTlsStatusSection(tlsStatuses, tlsSettings);
   const rows = redirects.length
     ? redirects
         .map(
@@ -901,6 +952,22 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
       <a href="/logout" class="link-button">Deconnexion</a>
     </header>
     ${messages}
+    <section class="card">
+      <h2>Configuration TLS</h2>
+      <form method="post" action="/admin/tls/config" class="form-grid">
+        <label>
+          <span>Email Let's Encrypt</span>
+          <input type="email" name="email" placeholder="contact@rooky.fr" value="${escapeHtml(tlsSettings.email || "")}" />
+        </label>
+        <label>
+          <span>Mode test</span>
+          <input type="checkbox" name="staging" ${tlsSettings.staging ? "checked" : ""} />
+        </label>
+        <div class="form-actions">
+          <button type="submit">Enregistrer TLS</button>
+        </div>
+      </form>
+    </section>
     <section class="card">
       <h2>${formTitle}</h2>
       <form method="post" action="/admin/redirects" class="form-grid">
