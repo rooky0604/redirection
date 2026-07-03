@@ -1,7 +1,9 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 const { URL } = require("url");
 
 const ROOT_DIR = __dirname;
@@ -13,14 +15,22 @@ const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 loadEnv(path.join(ROOT_DIR, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
+const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
+const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
+const LETSENCRYPT_EMAIL = (process.env.LETSENCRYPT_EMAIL || "").trim();
+const LETSENCRYPT_DOMAINS = parseDomainList(process.env.LETSENCRYPT_DOMAINS || "");
+const LETSENCRYPT_STAGING = isTruthy(process.env.LETSENCRYPT_STAGING);
+const CERTBOT_BIN = (process.env.CERTBOT_BIN || "certbot").trim() || "certbot";
+const CERTBOT_DIR = path.join(STORAGE_DIR, "letsencrypt");
 const sessions = new Map();
+let useSecureCookies = false;
 
 ensureDataFile();
 
-const server = http.createServer(async (req, res) => {
+const requestListener = async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const pathname = normalizePath(url.pathname);
@@ -39,7 +49,10 @@ const server = http.createServer(async (req, res) => {
       ) {
         const token = createSessionToken();
         sessions.set(token, { createdAt: Date.now() });
-        setCookie(res, "session", signToken(token), { httpOnly: true });
+        setCookie(res, "session", signToken(token), {
+          httpOnly: true,
+          secure: useSecureCookies
+        });
         redirect(res, "/admin");
         return;
       }
@@ -144,10 +157,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
     res.end(renderPage("Erreur", `<p>Erreur interne: ${escapeHtml(error.message)}</p>`));
   }
-});
+};
 
-server.listen(PORT, () => {
-  console.log(`Application disponible sur http://localhost:${PORT}`);
+startServer().catch((error) => {
+  console.error(`[startup] ${error.message}`);
+  process.exit(1);
 });
 
 function loadEnv(filePath) {
@@ -199,6 +213,193 @@ function logStorageStatus() {
 
   console.log(`[storage] DATA_DIR=${STORAGE_DIR}`);
   console.log(`[storage] directory_exists=${storageExists} file_exists=${fileExists} read_write=${writable}`);
+}
+
+async function startServer() {
+  logStorageStatus();
+
+  const tlsDomains = collectTlsDomains(readRedirects());
+  if (tlsDomains.length > 0) {
+    if (!LETSENCRYPT_EMAIL) {
+      console.warn("[tls] LETSENCRYPT_EMAIL est absent. Demarrage en HTTP simple.");
+    } else {
+      const primaryDomain = tlsDomains[0];
+      if (hasTlsCertificate(primaryDomain)) {
+        const tlsOptions = loadTlsOptions(primaryDomain);
+        useSecureCookies = true;
+
+        https.createServer(tlsOptions, requestListener).listen(HTTPS_PORT, () => {
+          console.log(`[https] Application disponible sur https://localhost:${HTTPS_PORT}`);
+          console.log(`[https] Certificat charge pour: ${tlsDomains.join(", ")}`);
+        });
+
+        http.createServer(redirectHttpToHttps).listen(HTTP_PORT, () => {
+          console.log(`[http] Redirection HTTP->HTTPS active sur le port ${HTTP_PORT}`);
+        });
+        return;
+      }
+
+      console.warn("[tls] Aucun certificat present. Demarrage en HTTP simple.");
+      console.warn(`[tls] Lance manuellement cette commande: ${buildCertbotCommand(tlsDomains)}`);
+    }
+  }
+
+  http.createServer(requestListener).listen(PORT, () => {
+    console.log(`Application disponible sur http://localhost:${PORT}`);
+  });
+}
+
+function collectTlsDomains(redirects) {
+  const domains = new Set(LETSENCRYPT_DOMAINS);
+  for (const redirect of redirects) {
+    const host = extractSourceHost(redirect.source);
+    if (host) {
+      domains.add(host);
+    }
+  }
+
+  const validDomains = [];
+  for (const domain of domains) {
+    if (domain.startsWith("*.")) {
+      console.warn(`[tls] Domaine ignore: ${domain}. Les wildcards Let's Encrypt exigent un challenge DNS.`);
+      continue;
+    }
+    if (!isDnsHostname(domain)) {
+      console.warn(`[tls] Domaine ignore: ${domain}. Nom de domaine invalide.`);
+      continue;
+    }
+    validDomains.push(domain);
+  }
+
+  return validDomains.sort();
+}
+
+function parseDomainList(input) {
+  return Array.from(
+    new Set(
+      String(input || "")
+        .split(/[,\s]+/)
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+}
+
+function extractSourceHost(source) {
+  try {
+    const normalized = normalizeSource(source || "");
+    const slashIndex = normalized.indexOf("/");
+    if (slashIndex <= 0) {
+      return "";
+    }
+    const candidate = normalized.slice(0, slashIndex).toLowerCase();
+    return candidate.includes(".") ? candidate : "";
+  } catch {
+    return "";
+  }
+}
+
+function isDnsHostname(host) {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(host);
+}
+
+function isTruthy(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function buildCertbotArgs(domains) {
+  const configDir = path.join(CERTBOT_DIR, "config");
+  const workDir = path.join(CERTBOT_DIR, "work");
+  const logsDir = path.join(CERTBOT_DIR, "logs");
+
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(workDir, { recursive: true });
+  fs.mkdirSync(logsDir, { recursive: true });
+
+  const args = [
+    "certonly",
+    "--standalone",
+    "--non-interactive",
+    "--agree-tos",
+    "--keep-until-expiring",
+    "--preferred-challenges",
+    "http",
+    "--config-dir",
+    configDir,
+    "--work-dir",
+    workDir,
+    "--logs-dir",
+    logsDir,
+    "-m",
+    LETSENCRYPT_EMAIL
+  ];
+
+  if (LETSENCRYPT_STAGING) {
+    args.push("--test-cert");
+  }
+
+  for (const domain of domains) {
+    args.push("-d", domain);
+  }
+
+  return args;
+}
+
+function buildCertbotCommand(domains) {
+  return [CERTBOT_BIN, ...buildCertbotArgs(domains)]
+    .map((part) => (/\s/.test(part) ? `"${part}"` : part))
+    .join(" ");
+}
+
+function hasTlsCertificate(primaryDomain) {
+  const liveDir = path.join(CERTBOT_DIR, "config", "live", primaryDomain);
+  const keyPath = path.join(liveDir, "privkey.pem");
+  const certPath = path.join(liveDir, "fullchain.pem");
+  return fs.existsSync(keyPath) && fs.existsSync(certPath);
+}
+
+function loadTlsOptions(primaryDomain) {
+  const liveDir = path.join(CERTBOT_DIR, "config", "live", primaryDomain);
+  const keyPath = path.join(liveDir, "privkey.pem");
+  const certPath = path.join(liveDir, "fullchain.pem");
+
+  if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+    throw new Error(`Certificat introuvable apres execution de certbot pour ${primaryDomain}.`);
+  }
+
+  return {
+    key: fs.readFileSync(keyPath, "utf8"),
+    cert: fs.readFileSync(certPath, "utf8")
+  };
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: ROOT_DIR,
+      stdio: "inherit"
+    });
+
+    child.on("error", (error) => {
+      reject(new Error(`Impossible de lancer ${command}: ${error.message}`));
+    });
+
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${command} a echoue avec le code ${code}.`));
+    });
+  });
+}
+
+function redirectHttpToHttps(req, res) {
+  const host = normalizeHost(req.headers.host || "") || "localhost";
+  const targetHost = HTTPS_PORT === 443 ? host : `${host}:${HTTPS_PORT}`;
+  const location = `https://${targetHost}${req.url || "/"}`;
+  res.writeHead(301, { Location: location });
+  res.end();
 }
 
 function readRedirects() {
@@ -389,11 +590,15 @@ function setCookie(res, name, value, options = {}) {
   if (options.httpOnly) {
     parts.push("HttpOnly");
   }
+  if (options.secure) {
+    parts.push("Secure");
+  }
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
 function clearCookie(res, name) {
-  res.setHeader("Set-Cookie", `${name}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly`);
+  const secureFlag = useSecureCookies ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${name}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly${secureFlag}`);
 }
 
 function signToken(token) {
