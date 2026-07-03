@@ -249,26 +249,14 @@ async function startServer() {
   const tlsDomains = collectTlsDomains(readRedirects());
   if (tlsDomains.length > 0) {
     if (!LETSENCRYPT_EMAIL) {
-      console.warn("[tls] LETSENCRYPT_EMAIL est absent. Demarrage en HTTP simple.");
+      console.warn("[tls] LETSENCRYPT_EMAIL est absent. Les demandes TLS depuis l'admin seront indisponibles.");
     } else {
       const primaryDomain = tlsDomains[0];
       if (hasTlsCertificate(primaryDomain)) {
-        const tlsOptions = loadTlsOptions(primaryDomain);
-        useSecureCookies = true;
-
-        https.createServer(tlsOptions, requestListener).listen(HTTPS_PORT, () => {
-          console.log(`[https] Application disponible sur https://localhost:${HTTPS_PORT}`);
-          console.log(`[https] Certificat charge pour: ${tlsDomains.join(", ")}`);
-        });
-
-        http.createServer(redirectHttpToHttps).listen(HTTP_PORT, () => {
-          console.log(`[http] Redirection HTTP->HTTPS active sur le port ${HTTP_PORT}`);
-        });
-        return;
+        console.log(`[tls] Certificat detecte pour: ${tlsDomains.join(", ")}`);
+      } else {
+        console.warn("[tls] Aucun certificat present pour les domaines configures.");
       }
-
-      console.warn("[tls] Aucun certificat present. Demarrage en HTTP simple.");
-      console.warn(`[tls] Lance manuellement cette commande: ${buildCertbotCommand(tlsDomains)}`);
     }
   }
 
