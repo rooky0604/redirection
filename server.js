@@ -128,6 +128,36 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    if (pathname === "/admin/tls/request" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const redirects = readRedirects();
+      const form = await parseForm(req);
+      const requestedDomain = normalizeHost(form.domain || "");
+      const availableDomains = collectTlsDomains(redirects);
+
+      if (!LETSENCRYPT_EMAIL) {
+        redirect(res, "/admin?error=LETSENCRYPT_EMAIL%20est%20requis");
+        return;
+      }
+
+      if (!requestedDomain || !availableDomains.includes(requestedDomain)) {
+        redirect(res, "/admin?error=Domaine%20TLS%20invalide");
+        return;
+      }
+
+      try {
+        await runCommand(CERTBOT_BIN, buildCertbotArgs([requestedDomain]));
+        redirect(res, `/admin?success=${encodeURIComponent(`Certificat demande pour ${requestedDomain}`)}`);
+      } catch (error) {
+        redirect(res, `/admin?error=${encodeURIComponent(error.message)}`);
+      }
+      return;
+    }
+
     const redirects = readRedirects();
     const sourceCandidates = buildSourceCandidates(requestHost, pathname);
     const match = redirects.find((item) => sourceCandidates.includes(item.source));
@@ -710,7 +740,6 @@ function buildTlsDomainStatuses(redirects) {
     return [];
   }
 
-  const command = LETSENCRYPT_EMAIL ? buildCertbotCommand(domains) : "";
   const primaryInfo = readCertificateInfo(domains[0]);
 
   return domains.map((domain) => {
@@ -724,7 +753,7 @@ function buildTlsDomainStatuses(redirects) {
 
     return {
       domain,
-      command,
+      command: LETSENCRYPT_EMAIL ? buildCertbotCommand([domain]) : "",
       hasCertificate: Boolean(certificateInfo),
       expiresAt: certificateInfo ? formatCertificateDate(certificateInfo.expiresAt) : "Aucun certificat detecte"
     };
@@ -785,7 +814,11 @@ function renderTlsStatusSection(statuses) {
           <td class="command-cell">
             <code class="command-text">${escapeHtml(item.command || "Renseignez LETSENCRYPT_EMAIL pour generer la commande.")}</code>
           </td>
-          <td>
+          <td class="actions-cell">
+            <form method="post" action="/admin/tls/request">
+              <input type="hidden" name="domain" value="${escapeHtml(item.domain)}" />
+              <button type="submit" ${item.command ? "" : "disabled"}>${item.hasCertificate ? "Renouveler" : "Demander"}</button>
+            </form>
             <button type="button" class="secondary copy-button" data-copy="${escapeHtml(item.command)}" ${item.command ? "" : "disabled"}>Copier</button>
           </td>
         </tr>
@@ -797,6 +830,7 @@ function renderTlsStatusSection(statuses) {
     <section class="card">
       <h2>Certificats TLS</h2>
       <p>Le certificat reste liste par host exact. Le routage essaie aussi automatiquement les variantes avec et sans <code>www</code>.</p>
+      <p>Le bouton lance directement la demande depuis l'application. La commande reste visible pour debug.</p>
       <table>
         <thead>
           <tr>
