@@ -129,10 +129,8 @@ const requestListener = async (req, res) => {
     }
 
     const redirects = readRedirects();
-    const fullSource = formatSource(requestHost, pathname);
-    const match =
-      redirects.find((item) => item.source === fullSource) ||
-      redirects.find((item) => item.source === pathname);
+    const sourceCandidates = buildSourceCandidates(requestHost, pathname);
+    const match = redirects.find((item) => sourceCandidates.includes(item.source));
 
     if (match) {
       const resolvedTarget = resolveRedirectTarget(match.target, redirects, new Set([match.source]));
@@ -436,6 +434,48 @@ function formatSource(host, pathname) {
   return host ? `${host}${pathname}` : pathname;
 }
 
+function buildSourceCandidates(host, pathname) {
+  const candidates = [];
+  const seen = new Set();
+
+  for (const candidateHost of buildHostVariants(host)) {
+    const candidate = formatSource(candidateHost, pathname);
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    candidates.push(candidate);
+  }
+
+  if (!seen.has(pathname)) {
+    candidates.push(pathname);
+  }
+
+  return candidates;
+}
+
+function buildHostVariants(host) {
+  const normalizedHost = normalizeHost(host);
+  if (!normalizedHost) {
+    return [""];
+  }
+
+  const variants = [normalizedHost];
+  if (shouldAllowWwwAlias(normalizedHost)) {
+    if (normalizedHost.startsWith("www.")) {
+      variants.push(normalizedHost.slice(4));
+    } else {
+      variants.push(`www.${normalizedHost}`);
+    }
+  }
+
+  return Array.from(new Set(variants.filter(Boolean)));
+}
+
+function shouldAllowWwwAlias(host) {
+  return host.includes(".") && host !== "localhost" && !host.endsWith(".local");
+}
+
 function normalizeSource(input) {
   const trimmed = (input || "").trim();
   if (!trimmed) {
@@ -664,6 +704,115 @@ function redirect(res, location) {
   res.end();
 }
 
+function buildTlsDomainStatuses(redirects) {
+  const domains = collectTlsDomains(redirects);
+  if (!domains.length) {
+    return [];
+  }
+
+  const command = LETSENCRYPT_EMAIL ? buildCertbotCommand(domains) : "";
+  const primaryInfo = readCertificateInfo(domains[0]);
+
+  return domains.map((domain) => {
+    const domainInfo = readCertificateInfo(domain);
+    const certificateInfo =
+      domainInfo && domainInfo.coversDomain(domain)
+        ? domainInfo
+        : primaryInfo && primaryInfo.coversDomain(domain)
+          ? primaryInfo
+          : null;
+
+    return {
+      domain,
+      command,
+      hasCertificate: Boolean(certificateInfo),
+      expiresAt: certificateInfo ? formatCertificateDate(certificateInfo.expiresAt) : "Aucun certificat detecte"
+    };
+  });
+}
+
+function readCertificateInfo(domain) {
+  const liveDir = path.join(CERTBOT_DIR, "config", "live", domain);
+  const certPath = path.join(liveDir, "fullchain.pem");
+  if (!fs.existsSync(certPath)) {
+    return null;
+  }
+
+  try {
+    const pem = fs.readFileSync(certPath, "utf8");
+    const certificate = new crypto.X509Certificate(pem);
+    const expiresAt = new Date(certificate.validTo);
+
+    return {
+      expiresAt,
+      coversDomain(hostname) {
+        try {
+          return Boolean(certificate.checkHost(hostname));
+        } catch {
+          return false;
+        }
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatCertificateDate(value) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    return "Date inconnue";
+  }
+
+  return value.toLocaleString("fr-FR", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Europe/Paris"
+  });
+}
+
+function renderTlsStatusSection(statuses) {
+  if (!statuses.length) {
+    return "";
+  }
+
+  const rows = statuses
+    .map(
+      (item) => `
+        <tr>
+          <td><code>${escapeHtml(item.domain)}</code></td>
+          <td>${item.hasCertificate ? `<span class="status-ok">Actif</span>` : `<span class="status-missing">Manquant</span>`}</td>
+          <td>${escapeHtml(item.expiresAt)}</td>
+          <td class="command-cell">
+            <code class="command-text">${escapeHtml(item.command || "Renseignez LETSENCRYPT_EMAIL pour generer la commande.")}</code>
+          </td>
+          <td>
+            <button type="button" class="secondary copy-button" data-copy="${escapeHtml(item.command)}" ${item.command ? "" : "disabled"}>Copier</button>
+          </td>
+        </tr>
+      `
+    )
+    .join("");
+
+  return `
+    <section class="card">
+      <h2>Certificats TLS</h2>
+      <p>Le certificat reste liste par host exact. Le routage essaie aussi automatiquement les variantes avec et sans <code>www</code>.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Domaine</th>
+            <th>Etat</th>
+            <th>Expiration</th>
+            <th>Commande</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>
+  `;
+}
+
 function renderLogin(res, flash) {
   const messages = renderMessages(flash);
   const content = `
@@ -693,6 +842,8 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
   const messages = renderMessages(flash);
   const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
   const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
+  const tlsStatuses = buildTlsDomainStatuses(redirects);
+  const tlsSection = renderTlsStatusSection(tlsStatuses);
   const rows = redirects.length
     ? redirects
         .map(
@@ -719,6 +870,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
       <div>
         <h1>Redirections URL</h1>
         <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible peut etre une URL externe ou une autre source deja enregistree.</p>
+        <p>L'application essaie d'abord le host exact, puis les variantes usuelles avec et sans <code>www</code>. Si les deux existent, la redirection exacte reste prioritaire.</p>
       </div>
       <a href="/logout" class="link-button">Deconnexion</a>
     </header>
@@ -729,7 +881,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <label>
           <span>URL souhaitee</span>
-          <input type="text" name="source" placeholder="promo.monsite.com/mon-chemin ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
+          <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
         </label>
         <label>
           <span>Cible</span>
@@ -746,6 +898,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         </div>
       </form>
     </section>
+    ${tlsSection}
     <section class="card">
       <h2>Liste des redirections</h2>
       <table>
@@ -921,6 +1074,26 @@ function renderPage(title, content) {
           background: #deefe4;
           color: #184b2b;
         }
+        .status-ok {
+          color: var(--success);
+          font-weight: 700;
+        }
+        .status-missing {
+          color: var(--danger);
+          font-weight: 700;
+        }
+        .command-cell {
+          min-width: 320px;
+        }
+        .command-text {
+          display: inline-block;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        .copy-button[disabled] {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
         table {
           width: 100%;
           border-collapse: collapse;
@@ -970,6 +1143,30 @@ function renderPage(title, content) {
     </head>
     <body>
       <main class="shell">${content}</main>
+      <script>
+        document.addEventListener("click", async (event) => {
+          const button = event.target.closest(".copy-button");
+          if (!button || button.disabled) {
+            return;
+          }
+
+          const text = button.dataset.copy || "";
+          if (!text) {
+            return;
+          }
+
+          try {
+            await navigator.clipboard.writeText(text);
+            const previous = button.textContent;
+            button.textContent = "Copie";
+            setTimeout(() => {
+              button.textContent = previous;
+            }, 1200);
+          } catch {
+            button.textContent = "Echec";
+          }
+        });
+      </script>
     </body>
   </html>`;
 }
