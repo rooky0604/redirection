@@ -1,9 +1,7 @@
 const http = require("http");
-const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { spawn } = require("child_process");
 const { URL } = require("url");
 
 const ROOT_DIR = __dirname;
@@ -15,17 +13,9 @@ const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 loadEnv(path.join(ROOT_DIR, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
-const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
-const LETSENCRYPT_EMAIL = (process.env.LETSENCRYPT_EMAIL || "").trim();
-const LETSENCRYPT_DOMAINS = parseDomainList(process.env.LETSENCRYPT_DOMAINS || "");
-const LETSENCRYPT_STAGING = isTruthy(process.env.LETSENCRYPT_STAGING);
-const CERTBOT_BIN = (process.env.CERTBOT_BIN || "certbot").trim() || "certbot";
-const CERTBOT_DIR = path.join(STORAGE_DIR, "letsencrypt");
-const TLS_CONFIG_FILE = path.join(STORAGE_DIR, "tls-config.json");
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -81,22 +71,7 @@ const requestListener = async (req, res) => {
       const editingRedirect = editSource
         ? redirects.find((item) => item.source === editSource) || null
         : null;
-      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect, getTlsSettings());
-    }
-
-    if (pathname === "/admin/tls/config" && method === "POST") {
-      if (!isAuthenticated(req)) {
-        redirect(res, "/login");
-        return;
-      }
-
-      const form = await parseForm(req);
-      writeTlsConfig({
-        email: String(form.email || "").trim(),
-        staging: String(form.staging || "") === "on"
-      });
-      redirect(res, "/admin?success=Configuration%20TLS%20enregistree");
-      return;
+      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect);
     }
 
     if (pathname === "/admin/redirects" && method === "POST") {
@@ -148,7 +123,9 @@ const requestListener = async (req, res) => {
 
     const redirects = readRedirects();
     const sourceCandidates = buildSourceCandidates(requestHost, pathname);
-    const match = redirects.find((item) => sourceCandidates.includes(item.source));
+    const match =
+      redirects.find((item) => sourceCandidates.includes(item.source)) ||
+      redirects.find((item) => matchesWildcardSource(item.source, requestHost, pathname));
 
     if (match) {
       const resolvedTarget = resolveRedirectTarget(match.target, redirects, new Set([match.source]));
@@ -166,6 +143,10 @@ const requestListener = async (req, res) => {
       res.writeHead(301, { Location: resolvedTarget });
       res.end();
       return;
+    }
+
+    if (pathname === "/") {
+      return renderHome(res);
     }
 
     renderNotFound(res, requestHost, pathname);
@@ -213,39 +194,6 @@ function ensureDataFile() {
   if (!fs.existsSync(REDIRECTS_FILE)) {
     fs.writeFileSync(REDIRECTS_FILE, "[]\n", "utf8");
   }
-
-  if (!fs.existsSync(TLS_CONFIG_FILE)) {
-    fs.writeFileSync(TLS_CONFIG_FILE, "{}\n", "utf8");
-  }
-}
-
-function readTlsConfig() {
-  ensureDataFile();
-  try {
-    const raw = fs.readFileSync(TLS_CONFIG_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeTlsConfig(nextConfig) {
-  const current = readTlsConfig();
-  const merged = {
-    ...current,
-    ...nextConfig
-  };
-  fs.writeFileSync(TLS_CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-}
-
-function getTlsSettings() {
-  const config = readTlsConfig();
-  return {
-    email: String(config.email || LETSENCRYPT_EMAIL || "").trim(),
-    staging: typeof config.staging === "boolean" ? config.staging : LETSENCRYPT_STAGING,
-    certbotBin: String(config.certbotBin || CERTBOT_BIN || "certbot").trim() || "certbot"
-  };
 }
 
 function logStorageStatus() {
@@ -267,160 +215,13 @@ function logStorageStatus() {
 async function startServer() {
   logStorageStatus();
 
-  const tlsDomains = collectTlsDomains(readRedirects());
-  if (tlsDomains.length > 0) {
-    const tlsSettings = getTlsSettings();
-    if (!tlsSettings.email) {
-      console.warn("[tls] LETSENCRYPT_EMAIL est absent. Les demandes TLS depuis l'admin seront indisponibles.");
-    } else {
-      const primaryDomain = tlsDomains[0];
-      if (hasTlsCertificate(primaryDomain)) {
-        console.log(`[tls] Certificat detecte pour: ${tlsDomains.join(", ")}`);
-      } else {
-        console.warn("[tls] Aucun certificat present pour les domaines configures.");
-      }
-    }
-  }
-
   http.createServer(requestListener).listen(PORT, () => {
     console.log(`Application disponible sur http://localhost:${PORT}`);
   });
 }
 
-function collectTlsDomains(redirects) {
-  const domains = new Set(LETSENCRYPT_DOMAINS);
-  for (const redirect of redirects) {
-    const host = extractSourceHost(redirect.source);
-    if (host) {
-      domains.add(host);
-    }
-  }
-
-  const validDomains = [];
-  for (const domain of domains) {
-    if (domain.startsWith("*.")) {
-      console.warn(`[tls] Domaine ignore: ${domain}. Les wildcards Let's Encrypt exigent un challenge DNS.`);
-      continue;
-    }
-    if (!isDnsHostname(domain)) {
-      console.warn(`[tls] Domaine ignore: ${domain}. Nom de domaine invalide.`);
-      continue;
-    }
-    validDomains.push(domain);
-  }
-
-  return validDomains.sort();
-}
-
-function parseDomainList(input) {
-  return Array.from(
-    new Set(
-      String(input || "")
-        .split(/[,\s]+/)
-        .map((item) => item.trim().toLowerCase())
-        .filter(Boolean)
-    )
-  );
-}
-
-function extractSourceHost(source) {
-  try {
-    const normalized = normalizeSource(source || "");
-    const slashIndex = normalized.indexOf("/");
-    if (slashIndex <= 0) {
-      return "";
-    }
-    const candidate = normalized.slice(0, slashIndex).toLowerCase();
-    return candidate.includes(".") ? candidate : "";
-  } catch {
-    return "";
-  }
-}
-
 function isDnsHostname(host) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(host);
-}
-
-function isTruthy(value) {
-  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
-}
-
-function buildCertbotArgs(domains, certName = "", tlsSettings = getTlsSettings()) {
-  const configDir = path.join(CERTBOT_DIR, "config");
-  const workDir = path.join(CERTBOT_DIR, "work");
-  const logsDir = path.join(CERTBOT_DIR, "logs");
-
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(workDir, { recursive: true });
-  fs.mkdirSync(logsDir, { recursive: true });
-
-  const args = [
-    "certonly",
-    "--standalone",
-    "--non-interactive",
-    "--agree-tos",
-    "--keep-until-expiring",
-    "--preferred-challenges",
-    "http",
-    "--config-dir",
-    configDir,
-    "--work-dir",
-    workDir,
-    "--logs-dir",
-    logsDir,
-    "-m",
-    tlsSettings.email
-  ];
-
-  if (certName) {
-    args.push("--cert-name", certName);
-  }
-
-  if (tlsSettings.staging) {
-    args.push("--test-cert");
-  }
-
-  for (const domain of domains) {
-    args.push("-d", domain);
-  }
-
-  return args;
-}
-
-function buildCertbotCommand(domains, certName = "", tlsSettings = getTlsSettings()) {
-  return [tlsSettings.certbotBin, ...buildCertbotArgs(domains, certName, tlsSettings)]
-    .map((part) => (/\s/.test(part) ? `"${part}"` : part))
-    .join(" ");
-}
-
-function hasTlsCertificate(primaryDomain) {
-  const liveDir = path.join(CERTBOT_DIR, "config", "live", primaryDomain);
-  const keyPath = path.join(liveDir, "privkey.pem");
-  const certPath = path.join(liveDir, "fullchain.pem");
-  return fs.existsSync(keyPath) && fs.existsSync(certPath);
-}
-
-function loadTlsOptions(primaryDomain) {
-  const liveDir = path.join(CERTBOT_DIR, "config", "live", primaryDomain);
-  const keyPath = path.join(liveDir, "privkey.pem");
-  const certPath = path.join(liveDir, "fullchain.pem");
-
-  if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-    throw new Error(`Certificat introuvable apres execution de certbot pour ${primaryDomain}.`);
-  }
-
-  return {
-    key: fs.readFileSync(keyPath, "utf8"),
-    cert: fs.readFileSync(certPath, "utf8")
-  };
-}
-
-function redirectHttpToHttps(req, res) {
-  const host = normalizeHost(req.headers.host || "") || "localhost";
-  const targetHost = HTTPS_PORT === 443 ? host : `${host}:${HTTPS_PORT}`;
-  const location = `https://${targetHost}${req.url || "/"}`;
-  res.writeHead(301, { Location: location });
-  res.end();
 }
 
 function readRedirects() {
@@ -499,6 +300,22 @@ function shouldAllowWwwAlias(host) {
   return host.includes(".") && host !== "localhost" && !host.endsWith(".local");
 }
 
+function matchesWildcardSource(source, requestHost, pathname) {
+  const slashIndex = source.indexOf("/");
+  const hostPart = slashIndex === -1 ? source : source.slice(0, slashIndex);
+  if (!hostPart.startsWith("*.")) {
+    return false;
+  }
+
+  const baseDomain = hostPart.slice(2);
+  if (!baseDomain || !requestHost || !requestHost.endsWith(`.${baseDomain}`)) {
+    return false;
+  }
+
+  const sourcePath = slashIndex === -1 ? "/" : normalizePath(source.slice(slashIndex));
+  return sourcePath === pathname;
+}
+
 function normalizeSource(input) {
   const trimmed = (input || "").trim();
   if (!trimmed) {
@@ -535,6 +352,12 @@ function validateRedirectInput(source, target, redirects = []) {
     sourcePath === "/logout"
   ) {
     return "Ce chemin est reserve a l'administration.";
+  }
+
+  const sourceSlashIndex = source.indexOf("/");
+  const sourceHostPart = sourceSlashIndex === -1 ? source : source.slice(0, sourceSlashIndex);
+  if (sourceHostPart.startsWith("*.") && !isDnsHostname(sourceHostPart.slice(2))) {
+    return "Le domaine wildcard doit etre au format *.exemple.fr.";
   }
 
   if (!target) {
@@ -727,115 +550,6 @@ function redirect(res, location) {
   res.end();
 }
 
-function buildTlsDomainStatuses(redirects, tlsSettings = getTlsSettings()) {
-  const domains = collectTlsDomains(redirects);
-  if (!domains.length) {
-    return [];
-  }
-
-  const primaryInfo = readCertificateInfo(domains[0]);
-
-  return domains.map((domain) => {
-    const domainInfo = readCertificateInfo(domain);
-    const certificateInfo =
-      domainInfo && domainInfo.coversDomain(domain)
-        ? domainInfo
-        : primaryInfo && primaryInfo.coversDomain(domain)
-          ? primaryInfo
-          : null;
-
-    return {
-      domain,
-      command: tlsSettings.email ? buildCertbotCommand([domain], domain, tlsSettings) : "",
-      hasCertificate: Boolean(certificateInfo),
-      expiresAt: certificateInfo ? formatCertificateDate(certificateInfo.expiresAt) : "Aucun certificat detecte"
-    };
-  });
-}
-
-function readCertificateInfo(domain) {
-  const liveDir = path.join(CERTBOT_DIR, "config", "live", domain);
-  const certPath = path.join(liveDir, "fullchain.pem");
-  if (!fs.existsSync(certPath)) {
-    return null;
-  }
-
-  try {
-    const pem = fs.readFileSync(certPath, "utf8");
-    const certificate = new crypto.X509Certificate(pem);
-    const expiresAt = new Date(certificate.validTo);
-
-    return {
-      expiresAt,
-      coversDomain(hostname) {
-        try {
-          return Boolean(certificate.checkHost(hostname));
-        } catch {
-          return false;
-        }
-      }
-    };
-  } catch {
-    return null;
-  }
-}
-
-function formatCertificateDate(value) {
-  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
-    return "Date inconnue";
-  }
-
-  return value.toLocaleString("fr-FR", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Europe/Paris"
-  });
-}
-
-function renderTlsStatusSection(statuses, tlsSettings) {
-  if (!statuses.length) {
-    return "";
-  }
-
-  const rows = statuses
-    .map(
-      (item) => `
-        <tr>
-          <td><code>${escapeHtml(item.domain)}</code></td>
-          <td>${item.hasCertificate ? `<span class="status-ok">Actif</span>` : `<span class="status-missing">Manquant</span>`}</td>
-          <td>${escapeHtml(item.expiresAt)}</td>
-          <td class="command-cell">
-            <code class="command-text">${escapeHtml(item.command || "Renseignez l'email TLS ci-dessus pour generer la commande.")}</code>
-          </td>
-          <td class="actions-cell">
-            <button type="button" class="secondary copy-button" data-copy="${escapeHtml(item.command)}" ${item.command ? "" : "disabled"}>Copier</button>
-          </td>
-        </tr>
-      `
-    )
-    .join("");
-
-  return `
-    <section class="card">
-      <h2>Certificats TLS</h2>
-      <p>Le certificat reste liste par host exact. Le routage essaie aussi automatiquement les variantes avec et sans <code>www</code>.</p>
-      <p>Le bouton lance directement la demande depuis l'application. La commande reste visible pour debug.</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Domaine</th>
-            <th>Etat</th>
-            <th>Expiration</th>
-            <th>Commande</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </section>
-  `;
-}
-
 function renderLogin(res, flash) {
   const messages = renderMessages(flash);
   const content = `
@@ -861,12 +575,10 @@ function renderLogin(res, flash) {
   res.end(renderPage("Connexion", content));
 }
 
-function renderAdmin(res, redirects, flash, editingRedirect = null, tlsSettings = getTlsSettings()) {
+function renderAdmin(res, redirects, flash, editingRedirect = null) {
   const messages = renderMessages(flash);
   const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
   const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
-  const tlsStatuses = buildTlsDomainStatuses(redirects, tlsSettings);
-  const tlsSection = renderTlsStatusSection(tlsStatuses, tlsSettings);
   const rows = redirects.length
     ? redirects
         .map(
@@ -899,28 +611,12 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, tlsSettings 
     </header>
     ${messages}
     <section class="card">
-      <h2>Configuration TLS</h2>
-      <form method="post" action="/admin/tls/config" class="form-grid">
-        <label>
-          <span>Email Let's Encrypt</span>
-          <input type="email" name="email" placeholder="contact@rooky.fr" value="${escapeHtml(tlsSettings.email || "")}" />
-        </label>
-        <label>
-          <span>Mode test</span>
-          <input type="checkbox" name="staging" ${tlsSettings.staging ? "checked" : ""} />
-        </label>
-        <div class="form-actions">
-          <button type="submit">Enregistrer TLS</button>
-        </div>
-      </form>
-    </section>
-    <section class="card">
       <h2>${formTitle}</h2>
       <form method="post" action="/admin/redirects" class="form-grid">
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <label>
           <span>URL souhaitee</span>
-          <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
+          <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou *.exemple.fr ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
         </label>
         <label>
           <span>Cible</span>
@@ -937,7 +633,6 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, tlsSettings 
         </div>
       </form>
     </section>
-    ${tlsSection}
     <section class="card">
       <h2>Liste des redirections</h2>
       <table>
@@ -956,6 +651,23 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, tlsSettings 
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   res.end(renderPage("Administration", content));
+}
+
+function renderHome(res) {
+  const content = `
+    <section class="hero">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <span class="hero-badge">Redirections 301</span>
+      <h1>Rooky Redirect</h1>
+      <p>Une passerelle sobre pour vos domaines et sous-domaines : chaque URL trouve sa destination, sans fioriture.</p>
+      <div class="hero-actions">
+        <a href="/admin" class="link-button">Accéder à l'administration</a>
+      </div>
+    </section>
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(renderPage("Rooky Redirect", content));
 }
 
 function renderNotFound(res, requestHost, pathname) {
@@ -1030,6 +742,79 @@ function renderPage(title, content) {
         .auth-card {
           max-width: 460px;
           margin: 80px auto;
+        }
+        .hero {
+          position: relative;
+          overflow: hidden;
+          max-width: 640px;
+          margin: 110px auto;
+          padding: 48px 40px;
+          text-align: center;
+          background: rgba(255, 253, 249, 0.9);
+          border: 1px solid var(--line);
+          border-radius: 24px;
+          box-shadow: 0 20px 45px rgba(81, 51, 34, 0.1);
+          animation: hero-rise 0.6s ease-out;
+        }
+        .hero-glow {
+          position: absolute;
+          inset: -60% -40% auto -40%;
+          height: 260px;
+          background: radial-gradient(circle, rgba(176, 74, 47, 0.25), transparent 70%);
+          filter: blur(10px);
+          animation: hero-glow-move 8s ease-in-out infinite;
+          pointer-events: none;
+        }
+        .hero-badge {
+          position: relative;
+          display: inline-block;
+          padding: 6px 14px;
+          border-radius: 999px;
+          background: #f5e2d6;
+          color: var(--accent-dark);
+          font-size: 12px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          margin-bottom: 18px;
+        }
+        .hero h1 {
+          position: relative;
+          font-size: 2.4rem;
+          margin-bottom: 12px;
+        }
+        .hero p {
+          position: relative;
+          max-width: 440px;
+          margin: 0 auto 28px;
+        }
+        .hero-actions {
+          position: relative;
+          display: flex;
+          justify-content: center;
+        }
+        @keyframes hero-rise {
+          from {
+            opacity: 0;
+            transform: translateY(12px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        @keyframes hero-glow-move {
+          0%, 100% {
+            transform: translateX(-8%) scale(1);
+          }
+          50% {
+            transform: translateX(8%) scale(1.15);
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .hero,
+          .hero-glow {
+            animation: none;
+          }
         }
         h1, h2, p {
           margin-top: 0;
@@ -1113,26 +898,6 @@ function renderPage(title, content) {
           background: #deefe4;
           color: #184b2b;
         }
-        .status-ok {
-          color: var(--success);
-          font-weight: 700;
-        }
-        .status-missing {
-          color: var(--danger);
-          font-weight: 700;
-        }
-        .command-cell {
-          min-width: 320px;
-        }
-        .command-text {
-          display: inline-block;
-          white-space: pre-wrap;
-          word-break: break-word;
-        }
-        .copy-button[disabled] {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
         table {
           width: 100%;
           border-collapse: collapse;
@@ -1182,30 +947,6 @@ function renderPage(title, content) {
     </head>
     <body>
       <main class="shell">${content}</main>
-      <script>
-        document.addEventListener("click", async (event) => {
-          const button = event.target.closest(".copy-button");
-          if (!button || button.disabled) {
-            return;
-          }
-
-          const text = button.dataset.copy || "";
-          if (!text) {
-            return;
-          }
-
-          try {
-            await navigator.clipboard.writeText(text);
-            const previous = button.textContent;
-            button.textContent = "Copie";
-            setTimeout(() => {
-              button.textContent = previous;
-            }, 1200);
-          } catch {
-            button.textContent = "Echec";
-          }
-        });
-      </script>
     </body>
   </html>`;
 }
