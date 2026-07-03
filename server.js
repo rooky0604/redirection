@@ -146,37 +146,6 @@ const requestListener = async (req, res) => {
       return;
     }
 
-    if (pathname === "/admin/tls/request" && method === "POST") {
-      if (!isAuthenticated(req)) {
-        redirect(res, "/login");
-        return;
-      }
-
-      const redirects = readRedirects();
-      const form = await parseForm(req);
-      const requestedDomain = normalizeHost(form.domain || "");
-      const availableDomains = collectTlsDomains(redirects);
-
-      const tlsSettings = getTlsSettings();
-    if (!tlsSettings.email) {
-        redirect(res, "/admin?error=LETSENCRYPT_EMAIL%20est%20requis");
-        return;
-      }
-
-      if (!requestedDomain || !availableDomains.includes(requestedDomain)) {
-        redirect(res, "/admin?error=Domaine%20TLS%20invalide");
-        return;
-      }
-
-      try {
-        await runCommand(tlsSettings.certbotBin, buildCertbotArgs([requestedDomain], requestedDomain, tlsSettings));
-        redirect(res, `/admin?success=${encodeURIComponent(`Certificat demande pour ${requestedDomain}`)}`);
-      } catch (error) {
-        redirect(res, `/admin?error=${encodeURIComponent(error.message)}`);
-      }
-      return;
-    }
-
     const redirects = readRedirects();
     const sourceCandidates = buildSourceCandidates(requestHost, pathname);
     const match = redirects.find((item) => sourceCandidates.includes(item.source));
@@ -444,34 +413,6 @@ function loadTlsOptions(primaryDomain) {
     key: fs.readFileSync(keyPath, "utf8"),
     cert: fs.readFileSync(certPath, "utf8")
   };
-}
-
-function runCommand(command, args, timeoutMs = 90000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT_DIR,
-      stdio: "inherit"
-    });
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`${command} a depasse ${timeoutMs / 1000}s (validation ACME injoignable ?) et a ete arrete.`));
-    }, timeoutMs);
-
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new Error(`Impossible de lancer ${command}: ${error.message}`));
-    });
-
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} a echoue avec le code ${code}.`));
-    });
-  });
 }
 
 function redirectHttpToHttps(req, res) {
@@ -867,10 +808,6 @@ function renderTlsStatusSection(statuses, tlsSettings) {
             <code class="command-text">${escapeHtml(item.command || "Renseignez l'email TLS ci-dessus pour generer la commande.")}</code>
           </td>
           <td class="actions-cell">
-            <form method="post" action="/admin/tls/request">
-              <input type="hidden" name="domain" value="${escapeHtml(item.domain)}" />
-              <button type="submit" ${item.command ? "" : "disabled"}>${item.hasCertificate ? "Renouveler" : "Demander"}</button>
-            </form>
             <button type="button" class="secondary copy-button" data-copy="${escapeHtml(item.command)}" ${item.command ? "" : "disabled"}>Copier</button>
           </td>
         </tr>
