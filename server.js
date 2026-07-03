@@ -38,6 +38,8 @@ const requestListener = async (req, res) => {
     const requestHost = normalizeHost(req.headers.host || "");
     const method = req.method || "GET";
 
+    console.log(`[request] ${method} host=${requestHost || "(none)"} path=${pathname}`);
+
     if (pathname === "/login" && method === "GET") {
       return renderLogin(res, getFlashMessage(url));
     }
@@ -444,18 +446,25 @@ function loadTlsOptions(primaryDomain) {
   };
 }
 
-function runCommand(command, args) {
+function runCommand(command, args, timeoutMs = 90000) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: ROOT_DIR,
       stdio: "inherit"
     });
 
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${command} a depasse ${timeoutMs / 1000}s (validation ACME injoignable ?) et a ete arrete.`));
+    }, timeoutMs);
+
     child.on("error", (error) => {
+      clearTimeout(timer);
       reject(new Error(`Impossible de lancer ${command}: ${error.message}`));
     });
 
     child.on("exit", (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve();
         return;
