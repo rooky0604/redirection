@@ -138,6 +138,7 @@ const requestListener = async (req, res) => {
       }
 
       const spotifyMeta = isSpotifyUrl(target) ? await fetchSpotifyOEmbed(target) : null;
+      const steamMeta = isSteamUrl(target) ? await fetchSteamAppDetails(target) : null;
 
       const savedRedirect = {
         source,
@@ -149,7 +150,9 @@ const requestListener = async (req, res) => {
         group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
         useFinalLink,
         spotifyTitle: spotifyMeta ? spotifyMeta.title : "",
-        spotifyImage: spotifyMeta ? spotifyMeta.thumbnailUrl : ""
+        spotifyImage: spotifyMeta ? spotifyMeta.thumbnailUrl : "",
+        steamTitle: steamMeta ? steamMeta.title : "",
+        steamImage: steamMeta ? steamMeta.imageUrl : ""
       };
 
       if (editIndex === -1) {
@@ -684,6 +687,66 @@ function fetchSpotifyOEmbed(spotifyUrl, timeoutMs = 5000) {
   });
 }
 
+function isSteamUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "store.steampowered.com" || hostname.endsWith(".steampowered.com");
+  } catch {
+    return false;
+  }
+}
+
+function extractSteamAppId(value) {
+  const match = value.match(/\/app\/(\d+)/);
+  return match ? match[1] : "";
+}
+
+function fetchSteamAppDetails(steamUrl, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const appId = extractSteamAppId(steamUrl);
+    if (!appId) {
+      resolve(null);
+      return;
+    }
+
+    const apiUrl = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=french`;
+
+    const req = https.get(apiUrl, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+
+      let body = "";
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          const entry = parsed[appId];
+          if (!entry || !entry.success || !entry.data) {
+            resolve(null);
+            return;
+          }
+          resolve({
+            title: String(entry.data.name || "").trim(),
+            imageUrl: String(entry.data.header_image || "").trim()
+          });
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy();
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
 function parseForm(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -1044,6 +1107,14 @@ const PLATFORMS = [
     keyword: "github",
     icon:
       '<svg viewBox="0 0 24 24" fill="white"><path d="M12 2.5a9.5 9.5 0 0 0-3 18.5c.5.1.6-.2.6-.5v-1.7c-2.7.6-3.2-1.2-3.2-1.2-.4-1.1-1-1.4-1-1.4-.9-.6.1-.6.1-.6.9.1 1.4 1 1.4 1 .9 1.5 2.3 1.1 2.8.8.1-.6.3-1.1.6-1.3-2.2-.2-4.4-1.1-4.4-4.9 0-1.1.4-1.9 1-2.6-.1-.2-.4-1.2.1-2.6 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 4.9 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.6.6.7 1 1.5 1 2.6 0 3.8-2.2 4.7-4.4 4.9.3.3.6.8.6 1.7v2.5c0 .3.1.6.6.5A9.5 9.5 0 0 0 12 2.5z"/></svg>'
+  },
+  {
+    name: "Steam",
+    color: "#171a21",
+    hosts: ["store.steampowered.com", "steamcommunity.com"],
+    keyword: "steam",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M12 2a10 10 0 0 0-10 9.7l5.4 2.2a2.8 2.8 0 0 1 1.6-.5l2.4-3.5v-.1a3.6 3.6 0 1 1 3.6 3.6h-.1l-3.4 2.4a2.8 2.8 0 0 1-5.5.7l-3.9-1.6A10 10 0 1 0 12 2zm-2.4 15.3-1.2-.5a2.1 2.1 0 0 0 3.9-.4l-1.1-.5a1.2 1.2 0 0 1-1.6 1.4zm6.7-6.9a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8zm0-.9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>'
   }
 ];
 
@@ -1081,7 +1152,9 @@ function buildPublicLinks(redirects) {
         group: (item.group || "").trim(),
         platform,
         spotifyTitle: item.spotifyTitle || "",
-        spotifyImage: item.spotifyImage || ""
+        spotifyImage: item.spotifyImage || "",
+        steamTitle: item.steamTitle || "",
+        steamImage: item.steamImage || ""
       };
     });
 }
@@ -1124,6 +1197,18 @@ function renderLinkRow(link) {
             <span class="spotify-track-title">${escapeHtml(link.spotifyTitle)}</span>
             <span class="spotify-subtitle">Ecouter sur Spotify</span>
           </span>
+        </span>
+      </a>
+    `;
+  }
+
+  if (link.platform.name === "Steam" && link.steamTitle) {
+    return `
+      <a class="link-row steam-card" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+        ${link.steamImage ? `<img class="steam-cover" src="${escapeHtml(link.steamImage)}" alt="" />` : ""}
+        <span class="steam-text">
+          <span class="steam-title">${escapeHtml(link.steamTitle)}</span>
+          <span class="steam-subtitle">Voir sur Steam</span>
         </span>
       </a>
     `;
@@ -1445,6 +1530,33 @@ function renderPage(title, content) {
           font-weight: 600;
           letter-spacing: 0.02em;
           color: #1db954;
+        }
+        .steam-cover {
+          width: 100%;
+          aspect-ratio: 460 / 215;
+          border-radius: 10px;
+          object-fit: cover;
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+          transition: transform 0.2s ease;
+        }
+        .link-row:hover .steam-cover {
+          transform: scale(1.02);
+        }
+        .steam-text {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .steam-title {
+          font-size: 16px;
+          font-weight: 700;
+          color: var(--ink);
+        }
+        .steam-subtitle {
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          color: #66c0f4;
         }
         .link-row:hover {
           transform: translateY(-2px) scale(1.01);
