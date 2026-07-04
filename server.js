@@ -259,6 +259,44 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    if (pathname === "/admin/redirects/reorder" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const order = (form.order || "")
+        .split("||")
+        .map((value) => normalizeSource(value))
+        .filter(Boolean);
+      const orderSet = new Set(order);
+      const redirects = readRedirects();
+      const itemsBySource = new Map(redirects.map((item) => [item.source, item]));
+
+      const reordered = [];
+      let inserted = false;
+      for (const item of redirects) {
+        if (!orderSet.has(item.source)) {
+          reordered.push(item);
+          continue;
+        }
+        if (!inserted) {
+          for (const source of order) {
+            const orderedItem = itemsBySource.get(source);
+            if (orderedItem) {
+              reordered.push(orderedItem);
+            }
+          }
+          inserted = true;
+        }
+      }
+
+      writeRedirects(reordered);
+      redirect(res, "/admin?success=Ordre%20mis%20a%20jour");
+      return;
+    }
+
     const redirects = readRedirects();
     const sourceCandidates = buildSourceCandidates(requestHost, pathname);
     const match =
@@ -901,7 +939,8 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
   ].join("");
 
   const renderRow = (item, index) => `
-    <tr>
+    <tr data-source="${escapeHtml(item.source)}" class="draggable-row">
+      <td class="drag-handle" draggable="true" title="Glisser pour reordonner">&#8942;&#8942;</td>
       <td><code>${escapeHtml(item.source)}</code></td>
       <td>${renderTargetCell(item.target)}</td>
       <td>${isPubliclyVisible(item) ? "Oui" : "Non"}</td>
@@ -929,6 +968,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
     <table>
       <thead>
         <tr>
+          <th></th>
           <th>Source</th>
           <th>Cible</th>
           <th>Public</th>
@@ -1029,6 +1069,59 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
     </section>
     <h2 class="section-title">Menus et redirections</h2>
     ${groupSections}
+    <script>
+      (function () {
+        let draggedRow = null;
+
+        document.querySelectorAll(".drag-handle").forEach((handle) => {
+          handle.addEventListener("dragstart", () => {
+            draggedRow = handle.closest("tr");
+            draggedRow.classList.add("dragging");
+          });
+
+          handle.addEventListener("dragend", () => {
+            if (draggedRow) {
+              draggedRow.classList.remove("dragging");
+            }
+            draggedRow = null;
+          });
+        });
+
+        document.querySelectorAll("tr.draggable-row").forEach((row) => {
+          row.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            if (!draggedRow || draggedRow === row || row.parentNode !== draggedRow.parentNode) {
+              return;
+            }
+            const rect = row.getBoundingClientRect();
+            const before = event.clientY - rect.top < rect.height / 2;
+            row.parentNode.insertBefore(draggedRow, before ? row : row.nextSibling);
+          });
+
+          row.addEventListener("drop", (event) => {
+            event.preventDefault();
+            if (!draggedRow) {
+              return;
+            }
+            const table = row.closest("table");
+            const sources = Array.from(table.querySelectorAll("tr.draggable-row")).map(
+              (r) => r.dataset.source
+            );
+
+            const form = document.createElement("form");
+            form.method = "post";
+            form.action = "/admin/redirects/reorder";
+            const input = document.createElement("input");
+            input.type = "hidden";
+            input.name = "order";
+            input.value = sources.join("||");
+            form.appendChild(input);
+            document.body.appendChild(form);
+            form.submit();
+          });
+        });
+      })();
+    </script>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -1887,6 +1980,16 @@ function renderPage(title, content) {
         .clicks-cell {
           font-weight: 700;
           font-variant-numeric: tabular-nums;
+        }
+        .drag-handle {
+          width: 20px;
+          cursor: grab;
+          color: var(--muted);
+          letter-spacing: -2px;
+          user-select: none;
+        }
+        .draggable-row.dragging {
+          opacity: 0.4;
         }
         .move-button[disabled] {
           opacity: 0.35;
