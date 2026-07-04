@@ -276,7 +276,7 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      res.writeHead(301, { Location: resolvedTarget });
+      res.writeHead(301, { Location: resolvedTarget, "Cache-Control": "no-store" });
       res.end();
       registerClick(match.source);
       return;
