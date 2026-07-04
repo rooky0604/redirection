@@ -1643,11 +1643,19 @@ function buildPublicLinks(redirects) {
     .map((item) => {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
       const platform = detectPlatform(item.source, resolvedTarget);
+      let targetHostname = "";
+      try {
+        targetHostname = new URL(resolvedTarget).hostname;
+      } catch {
+        targetHostname = "";
+      }
+
       return {
         href: `/go?to=${encodeURIComponent(item.source)}`,
         label: item.publicLabel || platform.name,
         group: (item.group || "").trim(),
         platform,
+        targetHostname,
         spotifyTitle: item.spotifyTitle || "",
         spotifyImage: item.spotifyImage || "",
         steamTitle: item.steamTitle || "",
@@ -1690,10 +1698,24 @@ function groupPublicLinks(publicLinks) {
 }
 
 function renderLinkRow(link) {
+  const isUnknownPlatform = link.platform === DEFAULT_PLATFORM;
+  const iconContent =
+    isUnknownPlatform && link.targetHostname
+      ? `
+        <span class="fallback-icon">${link.platform.icon}</span>
+        <img
+          class="favicon-img"
+          src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(link.targetHostname)}"
+          alt=""
+          onerror="this.remove()"
+        />
+      `
+      : link.platform.icon;
+
   const header = `
     <span class="link-row-main">
       <span class="link-row-icon" style="background:${link.platform.gradient || link.platform.color}">
-        ${link.platform.icon}
+        ${iconContent}
       </span>
       <span class="link-row-label">${escapeHtml(link.label)}</span>
       <span class="link-row-arrow" aria-hidden="true">&rsaquo;</span>
@@ -2086,6 +2108,7 @@ function renderPage(title, content, { wide = false } = {}) {
           border-color: var(--accent);
         }
         .link-row-icon {
+          position: relative;
           flex: 0 0 auto;
           width: 38px;
           height: 38px;
@@ -2093,6 +2116,17 @@ function renderPage(title, content, { wide = false } = {}) {
           display: flex;
           align-items: center;
           justify-content: center;
+          overflow: hidden;
+        }
+        .favicon-img {
+          position: absolute;
+          inset: 0;
+          margin: auto;
+          width: 20px;
+          height: 20px;
+          border-radius: 4px;
+          object-fit: cover;
+          background: #fff;
         }
         .link-row-icon svg {
           width: 20px;
