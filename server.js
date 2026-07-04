@@ -994,18 +994,20 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
   };
 
   const renderGroupTable = (items, tabLabel) => `
-    <table data-tab="${escapeHtml(tabLabel)}">
-      <thead>
-        <tr>
-          <th></th>
-          <th>Source</th>
-          <th>Cible</th>
-          <th>Public</th>
-          <th>Ordre / Action</th>
-        </tr>
-      </thead>
-      <tbody>${items.map((item) => renderRow(item, redirects.indexOf(item), tabLabel)).join("")}</tbody>
-    </table>
+    <div class="table-scroll">
+      <table data-tab="${escapeHtml(tabLabel)}">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Source</th>
+            <th>Cible</th>
+            <th>Public</th>
+            <th>Ordre / Action</th>
+          </tr>
+        </thead>
+        <tbody>${items.map((item) => renderRow(item, redirects.indexOf(item), tabLabel)).join("")}</tbody>
+      </table>
+    </div>
   `;
 
   const groupSections = (() => {
@@ -1163,7 +1165,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Administration", content));
+  res.end(renderPage("Administration", content, { wide: true }));
 }
 
 function renderSiteSettings(res, flash, siteConfig) {
@@ -1255,23 +1257,25 @@ function renderStats(res, redirects, flash) {
     </header>
     ${messages}
     <section class="card">
-      <table>
-        <thead>
-          <tr>
-            <th>Label</th>
-            <th>Source</th>
-            <th>Cible</th>
-            <th>Clics</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Source</th>
+              <th>Cible</th>
+              <th>Clics</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
     </section>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Statistiques", content));
+  res.end(renderPage("Statistiques", content, { wide: true }));
 }
 
 const ICON_LINK =
@@ -1613,7 +1617,7 @@ function renderMessages(flash) {
   return parts.join("");
 }
 
-function renderPage(title, content) {
+function renderPage(title, content, { wide = false } = {}) {
   return `<!doctype html>
   <html lang="fr">
     <head>
@@ -1645,6 +1649,9 @@ function renderPage(title, content) {
         .shell {
           width: min(980px, calc(100% - 32px));
           margin: 40px auto;
+        }
+        .shell-wide {
+          width: min(1400px, calc(100% - 48px));
         }
         .card {
           background: rgba(255, 253, 249, 0.95);
@@ -2011,7 +2018,8 @@ function renderPage(title, content) {
           display: flex;
           gap: 10px;
           align-items: center;
-          flex-wrap: wrap;
+          flex-wrap: nowrap;
+          white-space: nowrap;
         }
         .actions-cell form {
           margin: 0;
@@ -2050,6 +2058,9 @@ function renderPage(title, content) {
         .message.success {
           background: #deefe4;
           color: #184b2b;
+        }
+        .table-scroll {
+          overflow-x: auto;
         }
         table {
           width: 100%;
@@ -2099,7 +2110,7 @@ function renderPage(title, content) {
       </style>
     </head>
     <body>
-      <main class="shell">${content}</main>
+      <main class="shell${wide ? " shell-wide" : ""}">${content}</main>
     </body>
   </html>`;
 }
