@@ -951,9 +951,9 @@ function renderHome(res, redirects) {
   const content = `
     <section class="profile-card">
       <div class="hero-glow" aria-hidden="true"></div>
-      <span class="hero-badge">Redirections 301</span>
-      <h1>Rooky Redirect</h1>
-      <p>Une passerelle sobre pour vos domaines et sous-domaines : chaque URL trouve sa destination, sans fioriture.</p>
+      <span class="hero-badge">Liens officiels</span>
+      <h1>Rooky</h1>
+      <p>Retrouvez ici tous mes liens et comptes officiels, reunis au meme endroit.</p>
       ${linksList}
     </section>
     <footer class="site-footer">
@@ -962,7 +962,7 @@ function renderHome(res, redirects) {
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(renderPage("Rooky Redirect", content));
+  res.end(renderPage("Rooky - Mes liens officiels", content));
 }
 
 function renderNotFound(res, requestHost, pathname) {
