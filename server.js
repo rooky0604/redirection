@@ -127,11 +127,18 @@ const requestListener = async (req, res) => {
         return;
       }
 
+      const faviconUrl = (form.faviconUrl || "").trim();
+      if (faviconUrl && !parseAbsoluteTarget(faviconUrl)) {
+        redirect(res, "/admin/site?error=URL%20du%20favicon%20invalide");
+        return;
+      }
+
       writeSiteConfig({
         title: (form.title || "").trim(),
         badge: (form.badge || "").trim(),
         tagline: (form.tagline || "").trim(),
-        logoUrl
+        logoUrl,
+        faviconUrl
       });
       redirect(res, "/admin/site?success=Personnalisation%20enregistree");
       return;
@@ -500,6 +507,7 @@ function getSiteConfig() {
     badge: String(config.badge || "").trim() || DEFAULT_SITE_CONFIG.badge,
     tagline: String(config.tagline || "").trim() || DEFAULT_SITE_CONFIG.tagline,
     logoUrl: String(config.logoUrl || "").trim(),
+    faviconUrl: String(config.faviconUrl || "").trim(),
     groupOrder: Array.isArray(config.groupOrder) ? config.groupOrder.filter((v) => typeof v === "string") : []
   };
 }
@@ -1371,6 +1379,10 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
           <input type="text" name="logoUrl" placeholder="https://exemple.com/mon-logo.png" value="${escapeHtml(siteConfig.logoUrl)}" />
         </label>
         <label>
+          <span>Favicon du site (URL d'une image, optionnel)</span>
+          <input type="text" name="faviconUrl" placeholder="https://exemple.com/favicon.png" value="${escapeHtml(siteConfig.faviconUrl)}" />
+        </label>
+        <label>
           <span>Petit badge au-dessus du titre</span>
           <input type="text" name="badge" placeholder="Liens officiels" value="${escapeHtml(siteConfig.badge)}" />
         </label>
@@ -1870,12 +1882,14 @@ function renderMessages(flash) {
 }
 
 function renderPage(title, content, { wide = false } = {}) {
+  const faviconUrl = getSiteConfig().faviconUrl;
   return `<!doctype html>
   <html lang="fr">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${escapeHtml(title)}</title>
+      ${faviconUrl ? `<link rel="icon" href="${escapeHtml(faviconUrl)}" />` : ""}
       <style>
         :root {
           --bg: #f4efe8;
