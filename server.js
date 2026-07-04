@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -136,6 +137,8 @@ const requestListener = async (req, res) => {
         return;
       }
 
+      const spotifyMeta = isSpotifyUrl(target) ? await fetchSpotifyOEmbed(target) : null;
+
       const savedRedirect = {
         source,
         target,
@@ -144,7 +147,9 @@ const requestListener = async (req, res) => {
         public: form.public === "on",
         publicLabel: (form.publicLabel || "").trim(),
         group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
-        useFinalLink
+        useFinalLink,
+        spotifyTitle: spotifyMeta ? spotifyMeta.title : "",
+        spotifyImage: spotifyMeta ? spotifyMeta.thumbnailUrl : ""
       };
 
       if (editIndex === -1) {
@@ -635,6 +640,50 @@ function generatePlaceholderSource() {
   return `/_link-${crypto.randomBytes(4).toString("hex")}`;
 }
 
+function isSpotifyUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "open.spotify.com" || hostname.endsWith(".spotify.com");
+  } catch {
+    return false;
+  }
+}
+
+function fetchSpotifyOEmbed(spotifyUrl, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(spotifyUrl)}`;
+
+    const req = https.get(oembedUrl, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+
+      let body = "";
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          resolve({
+            title: String(parsed.title || "").trim(),
+            thumbnailUrl: String(parsed.thumbnail_url || "").trim()
+          });
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy();
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
 function parseForm(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -1030,7 +1079,9 @@ function buildPublicLinks(redirects) {
         href: resolvedTarget,
         label: item.publicLabel || platform.name,
         group: (item.group || "").trim(),
-        platform
+        platform,
+        spotifyTitle: item.spotifyTitle || "",
+        spotifyImage: item.spotifyImage || ""
       };
     });
 }
@@ -1054,13 +1105,31 @@ function groupPublicLinks(publicLinks) {
 }
 
 function renderLinkRow(link) {
-  return `
-    <a class="link-row" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+  const header = `
+    <span class="link-row-main">
       <span class="link-row-icon" style="background:${link.platform.gradient || link.platform.color}">
         ${link.platform.icon}
       </span>
       <span class="link-row-label">${escapeHtml(link.label)}</span>
       <span class="link-row-arrow" aria-hidden="true">&rsaquo;</span>
+    </span>
+  `;
+
+  if (link.platform.name === "Spotify" && link.spotifyTitle) {
+    return `
+      <a class="link-row spotify-card" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+        ${header}
+        <span class="spotify-preview">
+          ${link.spotifyImage ? `<img class="spotify-cover" src="${escapeHtml(link.spotifyImage)}" alt="" />` : ""}
+          <span class="spotify-track-title">${escapeHtml(link.spotifyTitle)}</span>
+        </span>
+      </a>
+    `;
+  }
+
+  return `
+    <a class="link-row" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+      ${header}
     </a>
   `;
 }
@@ -1319,8 +1388,8 @@ function renderPage(title, content) {
         }
         .link-row {
           display: flex;
-          align-items: center;
-          gap: 14px;
+          flex-direction: column;
+          gap: 10px;
           padding: 12px 16px;
           border-radius: 16px;
           background: #fff;
@@ -1328,6 +1397,28 @@ function renderPage(title, content) {
           text-decoration: none;
           color: var(--ink);
           transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        }
+        .link-row-main {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+        }
+        .spotify-preview {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding-left: 52px;
+        }
+        .spotify-cover {
+          flex: 0 0 auto;
+          width: 40px;
+          height: 40px;
+          border-radius: 6px;
+          object-fit: cover;
+        }
+        .spotify-track-title {
+          font-size: 13px;
+          color: var(--muted);
         }
         .link-row:hover {
           transform: translateY(-2px) scale(1.01);
