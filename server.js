@@ -143,7 +143,8 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      return renderStats(res, readRedirects().filter(isPubliclyVisible), getFlashMessage(url));
+      const statsTab = url.searchParams.get("tab") || "";
+      return renderStats(res, readRedirects().filter(isPubliclyVisible), getFlashMessage(url), statsTab);
     }
 
     if (pathname === "/admin/stats/reset" && method === "POST") {
@@ -154,13 +155,18 @@ const requestListener = async (req, res) => {
 
       const form = await parseForm(req);
       const source = normalizeSource(form.source || "");
+      const tab = (form.tab || "").trim();
       const redirects = readRedirects();
       const item = redirects.find((entry) => entry.source === source);
       if (item) {
         item.clicks = 0;
         writeRedirects(redirects);
       }
-      redirect(res, "/admin/stats?success=Compteur%20remis%20a%20zero");
+      const query = new URLSearchParams({ success: "Compteur remis a zero" });
+      if (tab) {
+        query.set("tab", tab);
+      }
+      redirect(res, `/admin/stats?${query.toString()}`);
       return;
     }
 
@@ -1055,8 +1061,8 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
       </div>
     </header>
     ${messages}
-    <section class="card">
-      <h2>${formTitle}</h2>
+    <details class="card add-redirect" ${editingRedirect ? "open" : ""}>
+      <summary class="add-redirect-summary">${editingRedirect ? "Modifier la redirection" : "Ajouter une redirection"}</summary>
       <form method="post" action="/admin/redirects" class="form-grid">
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <input type="hidden" name="tab" value="${escapeHtml(activeTab)}" />
@@ -1101,7 +1107,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
           ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
         </div>
       </form>
-    </section>
+    </details>
     <h2 class="section-title">Menus et redirections</h2>
     ${groupSections}
     <script>
@@ -1214,34 +1220,79 @@ function renderSiteSettings(res, flash, siteConfig) {
   res.end(renderPage("Personnalisation", content));
 }
 
-function renderStats(res, redirects, flash) {
+function renderStats(res, redirects, flash, activeTab = "") {
   const messages = renderMessages(flash);
   const sorted = [...redirects].sort((a, b) => (b.clicks || 0) - (a.clicks || 0));
 
-  const rows = sorted.length
-    ? sorted
-        .map((item) => {
-          const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
-          const platform = detectPlatform(item.source, resolvedTarget);
-          const label = item.publicLabel || (item.source.startsWith("*.") ? "" : platform.name);
+  const renderRow = (item, tabLabel) => {
+    const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
+    const platform = detectPlatform(item.source, resolvedTarget);
+    const label = item.publicLabel || (item.source.startsWith("*.") ? "" : platform.name);
 
-          return `
-            <tr>
-              <td>${label ? `<strong>${escapeHtml(label)}</strong>` : "—"}</td>
-              <td><code>${escapeHtml(item.source)}</code></td>
-              <td>${renderTargetCell(item.target)}</td>
-              <td class="clicks-cell">${item.clicks || 0}</td>
-              <td class="actions-cell">
-                <form method="post" action="/admin/stats/reset">
-                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
-                  <button type="submit" class="secondary" ${item.clicks ? "" : "disabled"}>Remettre a zero</button>
-                </form>
-              </td>
-            </tr>
-          `;
+    return `
+      <tr>
+        <td>${label ? `<strong>${escapeHtml(label)}</strong>` : "—"}</td>
+        <td><code>${escapeHtml(item.source)}</code></td>
+        <td>${renderTargetCell(item.target)}</td>
+        <td class="clicks-cell">${item.clicks || 0}</td>
+        <td class="actions-cell">
+          <form method="post" action="/admin/stats/reset">
+            <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+            <input type="hidden" name="tab" value="${escapeHtml(tabLabel)}" />
+            <button type="submit" class="secondary" ${item.clicks ? "" : "disabled"}>Remettre a zero</button>
+          </form>
+        </td>
+      </tr>
+    `;
+  };
+
+  const renderTable = (items, tabLabel) => `
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Source</th>
+            <th>Cible</th>
+            <th>Clics</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${
+          items.length ? items.map((item) => renderRow(item, tabLabel)).join("") : `<tr><td colspan="5">Aucune redirection enregistree.</td></tr>`
+        }</tbody>
+      </table>
+    </div>
+  `;
+
+  let tableSection;
+  if (!sorted.length) {
+    tableSection = renderTable([], "");
+  } else {
+    const byGroup = new Map();
+    const order = [];
+    for (const item of sorted) {
+      const key = (item.group || "").trim();
+      if (!byGroup.has(key)) {
+        byGroup.set(key, []);
+        order.push(key);
+      }
+      byGroup.get(key).push(item);
+    }
+
+    if (order.length <= 1) {
+      tableSection = renderTable(sorted, "");
+    } else {
+      const tabs = [
+        { label: "Tous", content: renderTable(sorted, "Tous") },
+        ...order.map((key) => {
+          const label = key ? key : "Sans groupe";
+          return { label, content: renderTable(byGroup.get(key), label) };
         })
-        .join("")
-    : `<tr><td colspan="5">Aucune redirection enregistree.</td></tr>`;
+      ];
+      tableSection = renderCssTabs(tabs, "stats-tab", activeTab || "Tous");
+    }
+  }
 
   const content = `
     <header class="topbar">
@@ -1256,22 +1307,7 @@ function renderStats(res, redirects, flash) {
       </div>
     </header>
     ${messages}
-    <section class="card">
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Source</th>
-              <th>Cible</th>
-              <th>Clics</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </section>
+    <section class="card">${tableSection}</section>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -1956,6 +1992,36 @@ function renderPage(title, content, { wide = false } = {}) {
           padding-bottom: 10px;
           border-bottom: 1px solid var(--line);
           color: var(--accent-dark);
+        }
+        .add-redirect-summary {
+          cursor: pointer;
+          font-size: 1.1rem;
+          font-weight: 700;
+          color: var(--accent-dark);
+          list-style: none;
+        }
+        .add-redirect-summary::-webkit-details-marker {
+          display: none;
+        }
+        .add-redirect-summary::before {
+          content: "+";
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 22px;
+          height: 22px;
+          margin-right: 8px;
+          border-radius: 50%;
+          background: var(--accent);
+          color: #fff;
+          font-size: 16px;
+          transition: transform 0.15s ease;
+        }
+        .add-redirect[open] .add-redirect-summary::before {
+          content: "\\2212";
+        }
+        .add-redirect .form-grid {
+          margin-top: 20px;
         }
         .form-grid {
           display: grid;
