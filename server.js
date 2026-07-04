@@ -116,7 +116,15 @@ const requestListener = async (req, res) => {
       const form = await parseForm(req);
       const rawOriginalSource = (form.originalSource || "").trim();
       const originalSource = rawOriginalSource ? normalizeSource(rawOriginalSource) : "";
-      const source = normalizeSource(form.source || "");
+      const useFinalLink = form.useFinalLink === "on";
+      const rawSource = (form.source || "").trim();
+
+      if (!rawSource && !useFinalLink) {
+        redirect(res, "/admin?error=La%20source%20est%20requise.");
+        return;
+      }
+
+      const source = rawSource ? normalizeSource(rawSource) : generatePlaceholderSource();
       const target = (form.target || "").trim();
       const allRedirects = readRedirects();
       const editIndex = originalSource ? allRedirects.findIndex((item) => item.source === originalSource) : -1;
@@ -136,7 +144,7 @@ const requestListener = async (req, res) => {
         public: form.public === "on",
         publicLabel: (form.publicLabel || "").trim(),
         group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
-        useSourceLink: form.useSourceLink === "on"
+        useFinalLink
       };
 
       if (editIndex === -1) {
@@ -623,6 +631,10 @@ function createSessionToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function generatePlaceholderSource() {
+  return `/_link-${crypto.randomBytes(4).toString("hex")}`;
+}
+
 function parseForm(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -781,8 +793,8 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
       <form method="post" action="/admin/redirects" class="form-grid">
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <label>
-          <span>URL souhaitee</span>
-          <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou *.exemple.fr ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" required />
+          <span>URL souhaitee (facultative si "Utiliser le lien final" est coche)</span>
+          <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou *.exemple.fr ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         </label>
         <label>
           <span>Cible</span>
@@ -809,11 +821,11 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <span>Afficher ce lien sur la page d'accueil publique</span>
         </label>
         <label class="checkbox-label">
-          <input type="checkbox" name="useSourceLink" ${editingRedirect && editingRedirect.useSourceLink ? "checked" : ""} />
-          <span>Utiliser le lien source (au lieu de la cible finale) pour ce lien public</span>
+          <input type="checkbox" name="useFinalLink" ${editingRedirect && editingRedirect.useFinalLink ? "checked" : ""} />
+          <span>Utiliser le lien final pour ce lien</span>
         </label>
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
-        <p>Par defaut, le lien affiche sur la page publique pointe directement vers la destination finale, meme si le sous-domaine source n'est pas encore configure. Cochez la case ci-dessus pour forcer le passage par votre lien source a la place.</p>
+        <p>Cochez "Utiliser le lien final pour ce lien" si vous n'avez pas besoin d'une redirection source fonctionnelle : l'URL souhaitee devient facultative, et seule la cible finale sera utilisee sur la page publique.</p>
         <p>Chaque menu/groupe cree devient un onglet sur la page d'accueil publique, et les liens que vous y ajoutez apparaissent a l'interieur. Utilisez les fleches dans les listes ci-dessous pour changer l'ordre d'affichage.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
@@ -1008,16 +1020,6 @@ function detectPlatform(source, resolvedTarget) {
   return byKeyword || DEFAULT_PLATFORM;
 }
 
-function buildSourceHref(source) {
-  const slashIndex = source.indexOf("/");
-  const host = slashIndex === -1 ? source : source.slice(0, slashIndex);
-  const linkPath = slashIndex === -1 ? "/" : source.slice(slashIndex);
-  if (!host) {
-    return linkPath;
-  }
-  return `https://${host}${linkPath}`;
-}
-
 function buildPublicLinks(redirects) {
   return redirects
     .filter((item) => item.public && !item.source.startsWith("*."))
@@ -1025,7 +1027,7 @@ function buildPublicLinks(redirects) {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
       const platform = detectPlatform(item.source, resolvedTarget);
       return {
-        href: item.useSourceLink ? buildSourceHref(item.source) : resolvedTarget,
+        href: resolvedTarget,
         label: item.publicLabel || platform.name,
         group: (item.group || "").trim(),
         platform
