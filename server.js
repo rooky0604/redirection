@@ -30,8 +30,6 @@ const requestListener = async (req, res) => {
     const requestHost = normalizeHost(req.headers.host || "");
     const method = req.method || "GET";
 
-    console.log(`[request] ${method} host=${requestHost || "(none)"} path=${pathname}`);
-
     if (pathname === "/login" && method === "GET") {
       return renderLogin(res, getFlashMessage(url));
     }
@@ -105,6 +103,33 @@ const requestListener = async (req, res) => {
         logoUrl
       });
       redirect(res, "/admin/site?success=Personnalisation%20enregistree");
+      return;
+    }
+
+    if (pathname === "/admin/stats" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      return renderStats(res, readRedirects(), getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/stats/reset" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const source = normalizeSource(form.source || "");
+      const redirects = readRedirects();
+      const item = redirects.find((entry) => entry.source === source);
+      if (item) {
+        item.clicks = 0;
+        writeRedirects(redirects);
+      }
+      redirect(res, "/admin/stats?success=Compteur%20remis%20a%20zero");
       return;
     }
 
@@ -225,6 +250,7 @@ const requestListener = async (req, res) => {
 
       res.writeHead(301, { Location: resolvedTarget });
       res.end();
+      registerClick(match.source);
       return;
     }
 
@@ -358,6 +384,16 @@ function readRedirects() {
 
 function writeRedirects(redirects) {
   fs.writeFileSync(REDIRECTS_FILE, `${JSON.stringify(redirects, null, 2)}\n`, "utf8");
+}
+
+function registerClick(source) {
+  const redirects = readRedirects();
+  const item = redirects.find((entry) => entry.source === source);
+  if (!item) {
+    return;
+  }
+  item.clicks = (item.clicks || 0) + 1;
+  writeRedirects(redirects);
 }
 
 function normalizePath(input) {
@@ -895,6 +931,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         <p>L'application essaie d'abord le host exact, puis les variantes usuelles avec et sans <code>www</code>. Si les deux existent, la redirection exacte reste prioritaire.</p>
       </div>
       <div class="topbar-actions">
+        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
@@ -964,6 +1001,7 @@ function renderSiteSettings(res, flash, siteConfig) {
       </div>
       <div class="topbar-actions">
         <a href="/admin" class="link-button secondary">Redirections</a>
+        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -997,6 +1035,62 @@ function renderSiteSettings(res, flash, siteConfig) {
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Personnalisation", content));
+}
+
+function renderStats(res, redirects, flash) {
+  const messages = renderMessages(flash);
+  const sorted = [...redirects].sort((a, b) => (b.clicks || 0) - (a.clicks || 0));
+
+  const rows = sorted.length
+    ? sorted
+        .map(
+          (item) => `
+            <tr>
+              <td><code>${escapeHtml(item.source)}</code></td>
+              <td>${renderTargetCell(item.target)}</td>
+              <td class="clicks-cell">${item.clicks || 0}</td>
+              <td class="actions-cell">
+                <form method="post" action="/admin/stats/reset">
+                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+                  <button type="submit" class="secondary" ${item.clicks ? "" : "disabled"}>Remettre a zero</button>
+                </form>
+              </td>
+            </tr>
+          `
+        )
+        .join("")
+    : `<tr><td colspan="4">Aucune redirection enregistree.</td></tr>`;
+
+  const content = `
+    <header class="topbar">
+      <div>
+        <h1>Statistiques</h1>
+        <p>Nombre de fois ou chaque lien a effectivement redirige un visiteur, depuis la derniere remise a zero.</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/admin" class="link-button secondary">Redirections</a>
+        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/logout" class="link-button">Deconnexion</a>
+      </div>
+    </header>
+    ${messages}
+    <section class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Cible</th>
+            <th>Clics</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Statistiques", content));
 }
 
 const ICON_LINK =
@@ -1739,6 +1833,10 @@ function renderPage(title, content) {
         .move-button {
           padding: 8px 12px;
           min-width: 36px;
+        }
+        .clicks-cell {
+          font-weight: 700;
+          font-variant-numeric: tabular-nums;
         }
         .move-button[disabled] {
           opacity: 0.35;
