@@ -824,7 +824,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
     <tr>
       <td><code>${escapeHtml(item.source)}</code></td>
       <td>${renderTargetCell(item.target)}</td>
-      <td>${item.public ? "Oui" : "Non"}</td>
+      <td>${isPubliclyVisible(item) ? "Oui" : "Non"}</td>
       <td class="actions-cell">
         <form method="post" action="/admin/redirects/move">
           <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
@@ -939,6 +939,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
         <p>Cochez "Utiliser le lien final pour ce lien" si vous n'avez pas besoin d'une redirection source fonctionnelle : l'URL souhaitee devient facultative, et seule la cible finale sera utilisee sur la page publique.</p>
         <p>Chaque menu/groupe cree devient un onglet sur la page d'accueil publique, et les liens que vous y ajoutez apparaissent a l'interieur. Utilisez les fleches dans les listes ci-dessous pour changer l'ordre d'affichage.</p>
+        <p>Note: une source generique <code>*.domaine.fr</code> ne peut jamais apparaitre comme lien public individuel, meme si la case est cochee. La colonne "Public" reflete l'etat reel sur la page d'accueil.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
           ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
@@ -1140,9 +1141,13 @@ function detectPlatform(source, resolvedTarget) {
   return byKeyword || DEFAULT_PLATFORM;
 }
 
+function isPubliclyVisible(item) {
+  return Boolean(item.public) && !item.source.startsWith("*.");
+}
+
 function buildPublicLinks(redirects) {
   return redirects
-    .filter((item) => item.public && !item.source.startsWith("*."))
+    .filter(isPubliclyVisible)
     .map((item) => {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
       const platform = detectPlatform(item.source, resolvedTarget);
