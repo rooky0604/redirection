@@ -755,13 +755,10 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
       return `<section class="card group-card">${renderGroupTable(redirects)}</section>`;
     }
 
-    const tabs = [
-      { label: "Tous", content: renderGroupTable(redirects) },
-      ...order.map((key) => ({
-        label: key ? key : "Sans groupe",
-        content: renderGroupTable(byGroup.get(key))
-      }))
-    ];
+    const tabs = order.map((key) => ({
+      label: key ? key : "Sans groupe",
+      content: renderGroupTable(byGroup.get(key))
+    }));
 
     return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab")}</section>`;
   })();
@@ -1112,7 +1109,7 @@ function renderLinksSection(publicLinks) {
     return `<div class="links-list">${publicLinks.map(renderLinkRow).join("")}</div>`;
   }
 
-  const tabs = [{ label: "Tous", links: publicLinks }, ...groups].map((tab) => ({
+  const tabs = groups.map((tab) => ({
     label: tab.label,
     content: `<div class="links-list">${tab.links.map(renderLinkRow).join("")}</div>`
   }));
