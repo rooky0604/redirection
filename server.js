@@ -809,8 +809,8 @@ function buildPublicLinkHref(source) {
   return `https://${host}${linkPath}`;
 }
 
-function renderPublicLinks(redirects) {
-  const publicLinks = redirects
+function buildPublicLinks(redirects) {
+  return redirects
     .filter((item) => item.public && !item.source.startsWith("*."))
     .map((item) => {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
@@ -821,45 +821,44 @@ function renderPublicLinks(redirects) {
         platform
       };
     });
+}
 
+function renderLinksList(publicLinks) {
   if (!publicLinks.length) {
     return "";
   }
 
-  const cards = publicLinks
+  const rows = publicLinks
     .map(
       (link) => `
-        <a class="public-link" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
-          <span class="public-link-icon" style="background:${link.platform.gradient || link.platform.color}">
+        <a class="link-row" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+          <span class="link-row-icon" style="background:${link.platform.gradient || link.platform.color}">
             ${link.platform.icon}
           </span>
-          <span class="public-link-label">${escapeHtml(link.label)}</span>
+          <span class="link-row-label">${escapeHtml(link.label)}</span>
+          <span class="link-row-arrow" aria-hidden="true">&rsaquo;</span>
         </a>
       `
     )
     .join("");
 
-  return `
-    <section class="public-links">
-      <h2>Mes liens</h2>
-      <div class="public-links-grid">${cards}</div>
-    </section>
-  `;
+  return `<div class="links-list">${rows}</div>`;
 }
 
 function renderHome(res, redirects) {
-  const publicLinksSection = renderPublicLinks(redirects);
+  const publicLinks = buildPublicLinks(redirects);
+  const linksList = renderLinksList(publicLinks);
   const content = `
-    <section class="hero">
+    <section class="profile-card">
       <div class="hero-glow" aria-hidden="true"></div>
       <span class="hero-badge">Redirections 301</span>
       <h1>Rooky Redirect</h1>
       <p>Une passerelle sobre pour vos domaines et sous-domaines : chaque URL trouve sa destination, sans fioriture.</p>
-      <div class="hero-actions">
-        <a href="/admin" class="link-button">Accéder à l'administration</a>
-      </div>
+      ${linksList}
     </section>
-    ${publicLinksSection}
+    <footer class="site-footer">
+      <a href="/admin" class="footer-link">Administration</a>
+    </footer>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -939,17 +938,17 @@ function renderPage(title, content) {
           max-width: 460px;
           margin: 80px auto;
         }
-        .hero {
+        .profile-card {
           position: relative;
           overflow: hidden;
-          max-width: 640px;
-          margin: 110px auto;
-          padding: 48px 40px;
+          max-width: 480px;
+          margin: 90px auto 24px;
+          padding: 44px 36px;
           text-align: center;
-          background: rgba(255, 253, 249, 0.9);
+          background: rgba(255, 253, 249, 0.92);
           border: 1px solid var(--line);
-          border-radius: 24px;
-          box-shadow: 0 20px 45px rgba(81, 51, 34, 0.1);
+          border-radius: 28px;
+          box-shadow: 0 24px 50px rgba(81, 51, 34, 0.12);
           animation: hero-rise 0.6s ease-out;
         }
         .hero-glow {
@@ -973,20 +972,14 @@ function renderPage(title, content) {
           text-transform: uppercase;
           margin-bottom: 18px;
         }
-        .hero h1 {
+        .profile-card h1 {
           position: relative;
-          font-size: 2.4rem;
-          margin-bottom: 12px;
+          font-size: 2.1rem;
+          margin-bottom: 10px;
         }
-        .hero p {
+        .profile-card p {
           position: relative;
-          max-width: 440px;
-          margin: 0 auto 28px;
-        }
-        .hero-actions {
-          position: relative;
-          display: flex;
-          justify-content: center;
+          margin: 0 auto 8px;
         }
         @keyframes hero-rise {
           from {
@@ -1007,59 +1000,77 @@ function renderPage(title, content) {
           }
         }
         @media (prefers-reduced-motion: reduce) {
-          .hero,
+          .profile-card,
           .hero-glow {
             animation: none;
           }
         }
-        .public-links {
-          max-width: 640px;
-          margin: 0 auto 40px;
-          text-align: center;
-          animation: hero-rise 0.6s ease-out;
-        }
-        .public-links h2 {
-          font-size: 1.2rem;
-          margin-bottom: 18px;
-        }
-        .public-links-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-          gap: 16px;
-        }
-        .public-link {
+        .links-list {
+          position: relative;
           display: flex;
           flex-direction: column;
+          gap: 12px;
+          margin-top: 28px;
+          text-align: left;
+        }
+        .link-row {
+          display: flex;
           align-items: center;
-          gap: 10px;
-          padding: 16px 10px;
+          gap: 14px;
+          padding: 12px 16px;
           border-radius: 16px;
-          background: rgba(255, 253, 249, 0.9);
+          background: #fff;
           border: 1px solid var(--line);
           text-decoration: none;
           color: var(--ink);
-          transition: transform 0.15s ease, box-shadow 0.15s ease;
+          transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
         }
-        .public-link:hover {
-          transform: translateY(-3px);
-          box-shadow: 0 10px 20px rgba(81, 51, 34, 0.12);
+        .link-row:hover {
+          transform: translateY(-2px) scale(1.01);
+          box-shadow: 0 12px 24px rgba(81, 51, 34, 0.1);
+          border-color: var(--accent);
         }
-        .public-link-icon {
-          width: 48px;
-          height: 48px;
+        .link-row-icon {
+          flex: 0 0 auto;
+          width: 38px;
+          height: 38px;
           border-radius: 50%;
           display: flex;
           align-items: center;
           justify-content: center;
         }
-        .public-link-icon svg {
-          width: 24px;
-          height: 24px;
+        .link-row-icon svg {
+          width: 20px;
+          height: 20px;
         }
-        .public-link-label {
-          font-size: 13px;
+        .link-row-label {
+          flex: 1;
+          font-size: 14px;
           font-weight: 600;
-          word-break: break-word;
+        }
+        .link-row-arrow {
+          flex: 0 0 auto;
+          color: var(--muted);
+          font-size: 18px;
+          transition: transform 0.15s ease;
+        }
+        .link-row:hover .link-row-arrow {
+          transform: translateX(3px);
+          color: var(--accent);
+        }
+        .site-footer {
+          text-align: center;
+          margin: 0 0 40px;
+        }
+        .footer-link {
+          font-size: 12px;
+          color: var(--muted);
+          text-decoration: none;
+          opacity: 0.7;
+        }
+        .footer-link:hover {
+          opacity: 1;
+          text-decoration: underline;
         }
         h1, h2, p {
           margin-top: 0;
