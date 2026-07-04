@@ -84,7 +84,9 @@ const requestListener = async (req, res) => {
 
       res.writeHead(301, { Location: resolvedTarget, "Cache-Control": "no-store" });
       res.end();
-      registerClick(item.source);
+      if (!isPrefetchRequest(req)) {
+        registerClick(item.source);
+      }
       return;
     }
 
@@ -278,7 +280,9 @@ const requestListener = async (req, res) => {
 
       res.writeHead(301, { Location: resolvedTarget, "Cache-Control": "no-store" });
       res.end();
-      registerClick(match.source);
+      if (!isPrefetchRequest(req)) {
+        registerClick(match.source);
+      }
       return;
     }
 
@@ -412,6 +416,17 @@ function readRedirects() {
 
 function writeRedirects(redirects) {
   fs.writeFileSync(REDIRECTS_FILE, `${JSON.stringify(redirects, null, 2)}\n`, "utf8");
+}
+
+function isPrefetchRequest(req) {
+  const purpose = (
+    req.headers["sec-purpose"] ||
+    req.headers["purpose"] ||
+    req.headers["x-purpose"] ||
+    req.headers["x-moz"] ||
+    ""
+  ).toLowerCase();
+  return purpose.includes("prefetch") || purpose.includes("preview") || purpose.includes("prerender");
 }
 
 function registerClick(source) {
@@ -1072,9 +1087,14 @@ function renderStats(res, redirects, flash) {
 
   const rows = sorted.length
     ? sorted
-        .map(
-          (item) => `
+        .map((item) => {
+          const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
+          const platform = detectPlatform(item.source, resolvedTarget);
+          const label = item.publicLabel || (item.source.startsWith("*.") ? "" : platform.name);
+
+          return `
             <tr>
+              <td>${label ? `<strong>${escapeHtml(label)}</strong>` : "—"}</td>
               <td><code>${escapeHtml(item.source)}</code></td>
               <td>${renderTargetCell(item.target)}</td>
               <td class="clicks-cell">${item.clicks || 0}</td>
@@ -1085,10 +1105,10 @@ function renderStats(res, redirects, flash) {
                 </form>
               </td>
             </tr>
-          `
-        )
+          `;
+        })
         .join("")
-    : `<tr><td colspan="4">Aucune redirection enregistree.</td></tr>`;
+    : `<tr><td colspan="5">Aucune redirection enregistree.</td></tr>`;
 
   const content = `
     <header class="topbar">
@@ -1107,6 +1127,7 @@ function renderStats(res, redirects, flash) {
       <table>
         <thead>
           <tr>
+            <th>Label</th>
             <th>Source</th>
             <th>Cible</th>
             <th>Clics</th>
