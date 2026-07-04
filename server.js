@@ -84,7 +84,9 @@ const requestListener = async (req, res) => {
       const originalSource = normalizeSource(form.originalSource || form.source || "");
       const source = normalizeSource(form.source || "");
       const target = (form.target || "").trim();
-      const existingRedirects = readRedirects().filter((item) => item.source !== originalSource);
+      const allRedirects = readRedirects();
+      const editIndex = originalSource ? allRedirects.findIndex((item) => item.source === originalSource) : -1;
+      const existingRedirects = allRedirects.filter((item) => item.source !== originalSource);
 
       const error = validateRedirectInput(source, target, existingRedirects);
       if (error) {
@@ -92,15 +94,21 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      existingRedirects.push({
+      const savedRedirect = {
         source,
         target,
         code: 301,
         updatedAt: new Date().toISOString(),
         public: form.public === "on",
-        publicLabel: (form.publicLabel || "").trim()
-      });
-      existingRedirects.sort((a, b) => a.source.localeCompare(b.source));
+        publicLabel: (form.publicLabel || "").trim(),
+        group: (form.group || "").trim()
+      };
+
+      if (editIndex === -1) {
+        existingRedirects.push(savedRedirect);
+      } else {
+        existingRedirects.splice(Math.min(editIndex, existingRedirects.length), 0, savedRedirect);
+      }
       writeRedirects(existingRedirects);
       redirect(
         res,
@@ -120,6 +128,28 @@ const requestListener = async (req, res) => {
       const redirects = readRedirects().filter((item) => item.source !== source);
       writeRedirects(redirects);
       redirect(res, "/admin?success=Redirection%20supprimee");
+      return;
+    }
+
+    if (pathname === "/admin/redirects/move" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const source = normalizeSource(form.source || "");
+      const direction = form.direction === "up" ? -1 : 1;
+      const redirects = readRedirects();
+      const index = redirects.findIndex((item) => item.source === source);
+      const targetIndex = index + direction;
+
+      if (index !== -1 && targetIndex >= 0 && targetIndex < redirects.length) {
+        [redirects[index], redirects[targetIndex]] = [redirects[targetIndex], redirects[index]];
+        writeRedirects(redirects);
+      }
+
+      redirect(res, "/admin?success=Ordre%20mis%20a%20jour");
       return;
     }
 
@@ -584,13 +614,23 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
   const rows = redirects.length
     ? redirects
         .map(
-          (item) => `
+          (item, index) => `
             <tr>
               <td><code>${escapeHtml(item.source)}</code></td>
               <td>${renderTargetCell(item.target)}</td>
-              <td>${item.code}</td>
               <td>${item.public ? "Oui" : "Non"}</td>
+              <td>${item.group ? escapeHtml(item.group) : "—"}</td>
               <td class="actions-cell">
+                <form method="post" action="/admin/redirects/move">
+                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+                  <input type="hidden" name="direction" value="up" />
+                  <button type="submit" class="secondary move-button" ${index === 0 ? "disabled" : ""} title="Monter">&uarr;</button>
+                </form>
+                <form method="post" action="/admin/redirects/move">
+                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+                  <input type="hidden" name="direction" value="down" />
+                  <button type="submit" class="secondary move-button" ${index === redirects.length - 1 ? "disabled" : ""} title="Descendre">&darr;</button>
+                </form>
                 <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
                 <form method="post" action="/admin/redirects/delete">
                   <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
@@ -633,11 +673,16 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <span>Titre public (optionnel)</span>
           <input type="text" name="publicLabel" placeholder="Ex: Mon Discord" value="${escapeHtml(editingRedirect ? editingRedirect.publicLabel || "" : "")}" />
         </label>
+        <label>
+          <span>Groupe / onglet (optionnel)</span>
+          <input type="text" name="group" placeholder="Ex: Reseaux sociaux" value="${escapeHtml(editingRedirect ? editingRedirect.group || "" : "")}" />
+        </label>
         <label class="checkbox-label">
           <input type="checkbox" name="public" ${editingRedirect && editingRedirect.public ? "checked" : ""} />
           <span>Afficher ce lien sur la page d'accueil publique</span>
         </label>
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
+        <p>Si vous donnez le meme nom de groupe a plusieurs liens publics, des onglets apparaissent automatiquement sur la page d'accueil. Utilisez les fleches dans la liste ci-dessous pour changer l'ordre d'affichage.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
           ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
@@ -651,9 +696,9 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <tr>
             <th>Source</th>
             <th>Cible</th>
-            <th>Code</th>
             <th>Public</th>
-            <th>Action</th>
+            <th>Groupe</th>
+            <th>Ordre / Action</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -818,36 +863,91 @@ function buildPublicLinks(redirects) {
       return {
         href: buildPublicLinkHref(item.source),
         label: item.publicLabel || platform.name,
+        group: (item.group || "").trim(),
         platform
       };
     });
 }
 
-function renderLinksList(publicLinks) {
+function groupPublicLinks(publicLinks) {
+  const groups = [];
+  const byKey = new Map();
+
+  for (const link of publicLinks) {
+    const key = link.group || "_ungrouped";
+    let entry = byKey.get(key);
+    if (!entry) {
+      entry = { label: link.group || "Autres", links: [] };
+      byKey.set(key, entry);
+      groups.push(entry);
+    }
+    entry.links.push(link);
+  }
+
+  return groups;
+}
+
+function renderLinkRow(link) {
+  return `
+    <a class="link-row" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+      <span class="link-row-icon" style="background:${link.platform.gradient || link.platform.color}">
+        ${link.platform.icon}
+      </span>
+      <span class="link-row-label">${escapeHtml(link.label)}</span>
+      <span class="link-row-arrow" aria-hidden="true">&rsaquo;</span>
+    </a>
+  `;
+}
+
+function renderLinksSection(publicLinks) {
   if (!publicLinks.length) {
     return "";
   }
 
-  const rows = publicLinks
+  const groups = groupPublicLinks(publicLinks);
+  if (groups.length <= 1) {
+    return `<div class="links-list">${publicLinks.map(renderLinkRow).join("")}</div>`;
+  }
+
+  const tabs = [{ label: "Tous", links: publicLinks }, ...groups];
+
+  const inputs = tabs
+    .map((tab, index) => `<input type="radio" name="home-tab" id="tab-${index}" class="tab-input" ${index === 0 ? "checked" : ""} />`)
+    .join("");
+  const labels = tabs
+    .map((tab, index) => `<label for="tab-${index}" class="tab-label">${escapeHtml(tab.label)}</label>`)
+    .join("");
+  const panels = tabs
     .map(
-      (link) => `
-        <a class="link-row" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
-          <span class="link-row-icon" style="background:${link.platform.gradient || link.platform.color}">
-            ${link.platform.icon}
-          </span>
-          <span class="link-row-label">${escapeHtml(link.label)}</span>
-          <span class="link-row-arrow" aria-hidden="true">&rsaquo;</span>
-        </a>
+      (tab, index) => `
+        <div class="tab-panel" id="panel-${index}">
+          <div class="links-list">${tab.links.map(renderLinkRow).join("")}</div>
+        </div>
+      `
+    )
+    .join("");
+  const visibilityRules = tabs
+    .map(
+      (tab, index) => `
+        #tab-${index}:checked ~ .tab-panels #panel-${index} { display: block; }
+        #tab-${index}:checked ~ .tab-labels label[for="tab-${index}"] { background: var(--accent); color: #fff; }
       `
     )
     .join("");
 
-  return `<div class="links-list">${rows}</div>`;
+  return `
+    <div class="tabs">
+      ${inputs}
+      <div class="tab-labels">${labels}</div>
+      <div class="tab-panels">${panels}</div>
+      <style>${visibilityRules}</style>
+    </div>
+  `;
 }
 
 function renderHome(res, redirects) {
   const publicLinks = buildPublicLinks(redirects);
-  const linksList = renderLinksList(publicLinks);
+  const linksList = renderLinksSection(publicLinks);
   const content = `
     <section class="profile-card">
       <div class="hero-glow" aria-hidden="true"></div>
@@ -1072,6 +1172,37 @@ function renderPage(title, content) {
           opacity: 1;
           text-decoration: underline;
         }
+        .tabs {
+          position: relative;
+          margin-top: 28px;
+        }
+        .tab-input {
+          position: absolute;
+          opacity: 0;
+          width: 0;
+          height: 0;
+          pointer-events: none;
+        }
+        .tab-labels {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          justify-content: center;
+          margin-bottom: 18px;
+        }
+        .tab-label {
+          padding: 6px 14px;
+          border-radius: 999px;
+          background: #f0e6da;
+          color: var(--muted);
+          font-size: 13px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 0.15s ease, color 0.15s ease;
+        }
+        .tab-panel {
+          display: none;
+        }
         h1, h2, p {
           margin-top: 0;
         }
@@ -1151,6 +1282,14 @@ function renderPage(title, content) {
         }
         .actions-cell form {
           margin: 0;
+        }
+        .move-button {
+          padding: 8px 12px;
+          min-width: 36px;
+        }
+        .move-button[disabled] {
+          opacity: 0.35;
+          cursor: not-allowed;
         }
         .message {
           padding: 12px 14px;
