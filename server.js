@@ -177,6 +177,42 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    if (pathname === "/admin/site/groups/rename" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const oldName = (form.oldName || "").trim();
+      const newName = (form.newName || "").trim();
+
+      if (!oldName || !newName) {
+        redirect(res, "/admin/site?error=Nom%20de%20groupe%20invalide");
+        return;
+      }
+
+      if (oldName !== newName) {
+        const redirects = readRedirects();
+        let changed = false;
+        for (const item of redirects) {
+          if ((item.group || "").trim() === oldName) {
+            item.group = newName;
+            changed = true;
+          }
+        }
+        if (changed) {
+          writeRedirects(redirects);
+        }
+
+        const groupOrder = getSiteConfig().groupOrder.map((name) => (name === oldName ? newName : name));
+        writeSiteConfig({ groupOrder });
+      }
+
+      redirect(res, "/admin/site?success=Groupe%20renomme");
+      return;
+    }
+
     if (pathname === "/admin/stats" && method === "GET") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
@@ -1233,7 +1269,11 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
               (name, index) => `
                 <div class="group-order-row" data-group="${escapeHtml(name)}">
                   <span class="drag-handle" draggable="true" title="Glisser pour reordonner">&#8942;&#8942;</span>
-                  <span class="group-order-label">${escapeHtml(name)}</span>
+                  <form method="post" action="/admin/site/groups/rename" class="group-rename-form">
+                    <input type="hidden" name="oldName" value="${escapeHtml(name)}" />
+                    <input type="text" name="newName" value="${escapeHtml(name)}" class="group-rename-input" />
+                    <button type="submit" class="secondary">Renommer</button>
+                  </form>
                   <div class="group-order-actions">
                     <form method="post" action="/admin/site/groups/move">
                       <input type="hidden" name="name" value="${escapeHtml(name)}" />
@@ -2280,6 +2320,16 @@ function renderPage(title, content, { wide = false } = {}) {
           opacity: 0.4;
         }
         .group-order-label {
+          flex: 1;
+          font-weight: 600;
+        }
+        .group-rename-form {
+          display: flex;
+          flex: 1;
+          gap: 8px;
+          align-items: center;
+        }
+        .group-rename-input {
           flex: 1;
           font-weight: 600;
         }
