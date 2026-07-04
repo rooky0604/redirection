@@ -1121,7 +1121,10 @@ function renderLinkRow(link) {
         ${header}
         <span class="spotify-preview">
           ${link.spotifyImage ? `<img class="spotify-cover" src="${escapeHtml(link.spotifyImage)}" alt="" />` : ""}
-          <span class="spotify-track-title">${escapeHtml(link.spotifyTitle)}</span>
+          <span class="spotify-text">
+            <span class="spotify-track-title">${escapeHtml(link.spotifyTitle)}</span>
+            <span class="spotify-subtitle">Ecouter sur Spotify</span>
+          </span>
         </span>
       </a>
     `;
@@ -1406,19 +1409,43 @@ function renderPage(title, content) {
         .spotify-preview {
           display: flex;
           align-items: center;
-          gap: 10px;
-          padding-left: 52px;
+          gap: 14px;
+          margin-left: 52px;
+          padding: 8px 10px;
+          border-radius: 12px;
+          background: linear-gradient(135deg, rgba(29, 185, 84, 0.1), rgba(29, 185, 84, 0.02));
         }
         .spotify-cover {
           flex: 0 0 auto;
-          width: 40px;
-          height: 40px;
-          border-radius: 6px;
+          width: 56px;
+          height: 56px;
+          border-radius: 10px;
           object-fit: cover;
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+          transition: transform 0.2s ease;
+        }
+        .link-row:hover .spotify-cover {
+          transform: scale(1.05);
+        }
+        .spotify-text {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          min-width: 0;
         }
         .spotify-track-title {
-          font-size: 13px;
-          color: var(--muted);
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--ink);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .spotify-subtitle {
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          color: #1db954;
         }
         .link-row:hover {
           transform: translateY(-2px) scale(1.01);
