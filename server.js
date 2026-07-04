@@ -60,6 +60,34 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    if (pathname === "/go" && method === "GET") {
+      const redirects = readRedirects();
+      const source = normalizeSource(url.searchParams.get("to") || "");
+      const item = redirects.find((entry) => entry.source === source && entry.public);
+
+      if (!item) {
+        renderNotFound(res, requestHost, pathname);
+        return;
+      }
+
+      const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source]));
+      if (!resolvedTarget) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(
+          renderPage(
+            "Erreur",
+            `<p>La redirection pour <code>${escapeHtml(item.source)}</code> forme une boucle ou pointe vers une cible inexistante.</p>`
+          )
+        );
+        return;
+      }
+
+      res.writeHead(301, { Location: resolvedTarget, "Cache-Control": "no-store" });
+      res.end();
+      registerClick(item.source);
+      return;
+    }
+
     if (pathname === "/admin" && method === "GET") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
@@ -506,7 +534,8 @@ function validateRedirectInput(source, target, redirects = []) {
     sourcePath === "/admin" ||
     sourcePath.startsWith("/admin/") ||
     sourcePath === "/login" ||
-    sourcePath === "/logout"
+    sourcePath === "/logout" ||
+    sourcePath === "/go"
   ) {
     return "Ce chemin est reserve a l'administration.";
   }
@@ -1246,7 +1275,7 @@ function buildPublicLinks(redirects) {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
       const platform = detectPlatform(item.source, resolvedTarget);
       return {
-        href: resolvedTarget,
+        href: `/go?to=${encodeURIComponent(item.source)}`,
         label: item.publicLabel || platform.name,
         group: (item.group || "").trim(),
         platform,
