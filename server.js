@@ -111,7 +111,7 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      return renderSiteSettings(res, getFlashMessage(url), getSiteConfig());
+      return renderSiteSettings(res, getFlashMessage(url), getSiteConfig(), readRedirects());
     }
 
     if (pathname === "/admin/site" && method === "POST") {
@@ -134,6 +134,46 @@ const requestListener = async (req, res) => {
         logoUrl
       });
       redirect(res, "/admin/site?success=Personnalisation%20enregistree");
+      return;
+    }
+
+    if (pathname === "/admin/site/groups/move" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const name = (form.name || "").trim();
+      const direction = form.direction === "up" ? -1 : 1;
+      const redirects = readRedirects();
+      const allNames = Array.from(new Set(redirects.map((item) => (item.group || "").trim()).filter(Boolean)));
+      const currentOrder = applyGroupOrder(allNames, getSiteConfig().groupOrder);
+      const index = currentOrder.indexOf(name);
+      const targetIndex = index + direction;
+
+      if (index !== -1 && targetIndex >= 0 && targetIndex < currentOrder.length) {
+        [currentOrder[index], currentOrder[targetIndex]] = [currentOrder[targetIndex], currentOrder[index]];
+        writeSiteConfig({ groupOrder: currentOrder });
+      }
+
+      redirect(res, "/admin/site?success=Ordre%20des%20groupes%20mis%20a%20jour");
+      return;
+    }
+
+    if (pathname === "/admin/site/groups/reorder" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const order = (form.order || "")
+        .split("||")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      writeSiteConfig({ groupOrder: order });
+      redirect(res, "/admin/site?success=Ordre%20des%20groupes%20mis%20a%20jour");
       return;
     }
 
@@ -423,7 +463,8 @@ function getSiteConfig() {
     title: String(config.title || "").trim() || DEFAULT_SITE_CONFIG.title,
     badge: String(config.badge || "").trim() || DEFAULT_SITE_CONFIG.badge,
     tagline: String(config.tagline || "").trim() || DEFAULT_SITE_CONFIG.tagline,
-    logoUrl: String(config.logoUrl || "").trim()
+    logoUrl: String(config.logoUrl || "").trim(),
+    groupOrder: Array.isArray(config.groupOrder) ? config.groupOrder.filter((v) => typeof v === "string") : []
   };
 }
 
@@ -1036,7 +1077,8 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
       return `<section class="card group-card">${renderGroupTable(redirects, "")}</section>`;
     }
 
-    const tabs = order.map((key) => {
+    const orderedKeys = applyGroupOrder(order, getSiteConfig().groupOrder);
+    const tabs = orderedKeys.map((key) => {
       const label = key ? key : "Sans groupe";
       return {
         label,
@@ -1174,8 +1216,98 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
   res.end(renderPage("Administration", content, { wide: true }));
 }
 
-function renderSiteSettings(res, flash, siteConfig) {
+function renderSiteSettings(res, flash, siteConfig, redirects = []) {
   const messages = renderMessages(flash);
+  const groupNames = Array.from(new Set(redirects.map((item) => (item.group || "").trim()).filter(Boolean)));
+  const orderedGroups = applyGroupOrder(groupNames, siteConfig.groupOrder);
+
+  const groupOrderSection = orderedGroups.length > 1
+    ? `
+      <section class="card">
+        <h2>Ordre des onglets</h2>
+        <p>Cet ordre s'applique aux onglets de groupes sur la page d'accueil publique (et dans l'administration).</p>
+        <div class="group-order-list">
+          ${orderedGroups
+            .map(
+              (name, index) => `
+                <div class="group-order-row" data-group="${escapeHtml(name)}">
+                  <span class="drag-handle" draggable="true" title="Glisser pour reordonner">&#8942;&#8942;</span>
+                  <span class="group-order-label">${escapeHtml(name)}</span>
+                  <div class="group-order-actions">
+                    <form method="post" action="/admin/site/groups/move">
+                      <input type="hidden" name="name" value="${escapeHtml(name)}" />
+                      <input type="hidden" name="direction" value="up" />
+                      <button type="submit" class="secondary move-button" ${index === 0 ? "disabled" : ""} title="Monter">&uarr;</button>
+                    </form>
+                    <form method="post" action="/admin/site/groups/move">
+                      <input type="hidden" name="name" value="${escapeHtml(name)}" />
+                      <input type="hidden" name="direction" value="down" />
+                      <button type="submit" class="secondary move-button" ${index === orderedGroups.length - 1 ? "disabled" : ""} title="Descendre">&darr;</button>
+                    </form>
+                  </div>
+                </div>
+              `
+            )
+            .join("")}
+        </div>
+        <script>
+          (function () {
+            let draggedRow = null;
+            const list = document.querySelector(".group-order-list");
+            if (!list) {
+              return;
+            }
+
+            list.querySelectorAll(".drag-handle").forEach((handle) => {
+              handle.addEventListener("dragstart", () => {
+                draggedRow = handle.closest(".group-order-row");
+                draggedRow.classList.add("dragging");
+              });
+              handle.addEventListener("dragend", () => {
+                if (draggedRow) {
+                  draggedRow.classList.remove("dragging");
+                }
+                draggedRow = null;
+              });
+            });
+
+            list.querySelectorAll(".group-order-row").forEach((row) => {
+              row.addEventListener("dragover", (event) => {
+                event.preventDefault();
+                if (!draggedRow || draggedRow === row) {
+                  return;
+                }
+                const rect = row.getBoundingClientRect();
+                const before = event.clientY - rect.top < rect.height / 2;
+                row.parentNode.insertBefore(draggedRow, before ? row : row.nextSibling);
+              });
+
+              row.addEventListener("drop", (event) => {
+                event.preventDefault();
+                if (!draggedRow) {
+                  return;
+                }
+                const names = Array.from(list.querySelectorAll(".group-order-row")).map(
+                  (r) => r.dataset.group
+                );
+                const form = document.createElement("form");
+                form.method = "post";
+                form.action = "/admin/site/groups/reorder";
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = "order";
+                input.value = names.join("||");
+                form.appendChild(input);
+                document.body.appendChild(form);
+                form.submit();
+              });
+            });
+          })();
+        </script>
+      </section>
+    `
+    : "";
+
   const content = `
     <header class="topbar">
       <div>
@@ -1214,6 +1346,7 @@ function renderSiteSettings(res, flash, siteConfig) {
         </div>
       </form>
     </section>
+    ${groupOrderSection}
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -1283,9 +1416,10 @@ function renderStats(res, redirects, flash, activeTab = "") {
     if (order.length <= 1) {
       tableSection = renderTable(sorted, "");
     } else {
+      const orderedKeys = applyGroupOrder(order, getSiteConfig().groupOrder);
       const tabs = [
         { label: "Tous", content: renderTable(sorted, "Tous") },
-        ...order.map((key) => {
+        ...orderedKeys.map((key) => {
           const label = key ? key : "Sans groupe";
           return { label, content: renderTable(byGroup.get(key), label) };
         })
@@ -1479,6 +1613,21 @@ function buildPublicLinks(redirects) {
     });
 }
 
+function applyGroupOrder(items, groupOrder, keyOf = (item) => item) {
+  if (!groupOrder || !groupOrder.length) {
+    return items;
+  }
+  const remaining = [...items];
+  const ordered = [];
+  for (const name of groupOrder) {
+    const index = remaining.findIndex((item) => keyOf(item) === name);
+    if (index !== -1) {
+      ordered.push(remaining.splice(index, 1)[0]);
+    }
+  }
+  return [...ordered, ...remaining];
+}
+
 function groupPublicLinks(publicLinks) {
   const groups = [];
   const byKey = new Map();
@@ -1587,10 +1736,12 @@ function renderLinksSection(publicLinks) {
     return "";
   }
 
-  const groups = groupPublicLinks(publicLinks);
-  if (groups.length <= 1) {
+  const rawGroups = groupPublicLinks(publicLinks);
+  if (rawGroups.length <= 1) {
     return `<div class="links-list">${publicLinks.map(renderLinkRow).join("")}</div>`;
   }
+
+  const groups = applyGroupOrder(rawGroups, getSiteConfig().groupOrder, (group) => group.label);
 
   const tabs = groups.map((tab) => ({
     label: tab.label,
@@ -2107,6 +2258,31 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .draggable-row.dragging {
           opacity: 0.4;
+        }
+        .group-order-list {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .group-order-row {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 10px 14px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: #fff;
+        }
+        .group-order-row.dragging {
+          opacity: 0.4;
+        }
+        .group-order-label {
+          flex: 1;
+          font-weight: 600;
+        }
+        .group-order-actions {
+          display: flex;
+          gap: 8px;
         }
         .move-button[disabled] {
           opacity: 0.35;
