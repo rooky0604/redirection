@@ -9,6 +9,7 @@ const STORAGE_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(ROOT_DIR, "data");
 const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
+const SITE_CONFIG_FILE = path.join(STORAGE_DIR, "site-config.json");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -74,6 +75,38 @@ const requestListener = async (req, res) => {
       return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect);
     }
 
+    if (pathname === "/admin/site" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      return renderSiteSettings(res, getFlashMessage(url), getSiteConfig());
+    }
+
+    if (pathname === "/admin/site" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const logoUrl = (form.logoUrl || "").trim();
+      if (logoUrl && !parseAbsoluteTarget(logoUrl)) {
+        redirect(res, "/admin/site?error=URL%20du%20logo%20invalide");
+        return;
+      }
+
+      writeSiteConfig({
+        title: (form.title || "").trim(),
+        badge: (form.badge || "").trim(),
+        tagline: (form.tagline || "").trim(),
+        logoUrl
+      });
+      redirect(res, "/admin/site?success=Personnalisation%20enregistree");
+      return;
+    }
+
     if (pathname === "/admin/redirects" && method === "POST") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
@@ -81,7 +114,8 @@ const requestListener = async (req, res) => {
       }
 
       const form = await parseForm(req);
-      const originalSource = normalizeSource(form.originalSource || form.source || "");
+      const rawOriginalSource = (form.originalSource || "").trim();
+      const originalSource = rawOriginalSource ? normalizeSource(rawOriginalSource) : "";
       const source = normalizeSource(form.source || "");
       const target = (form.target || "").trim();
       const allRedirects = readRedirects();
@@ -101,7 +135,8 @@ const requestListener = async (req, res) => {
         updatedAt: new Date().toISOString(),
         public: form.public === "on",
         publicLabel: (form.publicLabel || "").trim(),
-        group: (form.group || "").trim()
+        group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
+        useSourceLink: form.useSourceLink === "on"
       };
 
       if (editIndex === -1) {
@@ -162,7 +197,7 @@ const requestListener = async (req, res) => {
     if (match) {
       const resolvedTarget = resolveRedirectTarget(match.target, redirects, new Set([match.source]));
       if (!resolvedTarget) {
-        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(
           renderPage(
             "Erreur",
@@ -183,7 +218,7 @@ const requestListener = async (req, res) => {
 
     renderNotFound(res, requestHost, pathname);
   } catch (error) {
-    res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+    res.writeHead(500, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(renderPage("Erreur", `<p>Erreur interne: ${escapeHtml(error.message)}</p>`));
   }
 };
@@ -226,6 +261,44 @@ function ensureDataFile() {
   if (!fs.existsSync(REDIRECTS_FILE)) {
     fs.writeFileSync(REDIRECTS_FILE, "[]\n", "utf8");
   }
+
+  if (!fs.existsSync(SITE_CONFIG_FILE)) {
+    fs.writeFileSync(SITE_CONFIG_FILE, "{}\n", "utf8");
+  }
+}
+
+const DEFAULT_SITE_CONFIG = {
+  title: "Rooky",
+  badge: "Liens officiels",
+  tagline: "Retrouvez ici tous mes liens et comptes officiels, reunis au meme endroit.",
+  logoUrl: ""
+};
+
+function readSiteConfig() {
+  ensureDataFile();
+  try {
+    const raw = fs.readFileSync(SITE_CONFIG_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSiteConfig(nextConfig) {
+  const current = readSiteConfig();
+  const merged = { ...current, ...nextConfig };
+  fs.writeFileSync(SITE_CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+}
+
+function getSiteConfig() {
+  const config = readSiteConfig();
+  return {
+    title: String(config.title || "").trim() || DEFAULT_SITE_CONFIG.title,
+    badge: String(config.badge || "").trim() || DEFAULT_SITE_CONFIG.badge,
+    tagline: String(config.tagline || "").trim() || DEFAULT_SITE_CONFIG.tagline,
+    logoUrl: String(config.logoUrl || "").trim()
+  };
 }
 
 function logStorageStatus() {
@@ -600,10 +673,11 @@ function renderLogin(res, flash) {
         </label>
         <button type="submit">Se connecter</button>
       </form>
+      <a href="/" class="link-button secondary back-home-link">Retour a l'accueil</a>
     </section>
   `;
 
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Connexion", content));
 }
 
@@ -611,37 +685,86 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
   const messages = renderMessages(flash);
   const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
   const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
-  const rows = redirects.length
-    ? redirects
-        .map(
-          (item, index) => `
-            <tr>
-              <td><code>${escapeHtml(item.source)}</code></td>
-              <td>${renderTargetCell(item.target)}</td>
-              <td>${item.public ? "Oui" : "Non"}</td>
-              <td>${item.group ? escapeHtml(item.group) : "—"}</td>
-              <td class="actions-cell">
-                <form method="post" action="/admin/redirects/move">
-                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
-                  <input type="hidden" name="direction" value="up" />
-                  <button type="submit" class="secondary move-button" ${index === 0 ? "disabled" : ""} title="Monter">&uarr;</button>
-                </form>
-                <form method="post" action="/admin/redirects/move">
-                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
-                  <input type="hidden" name="direction" value="down" />
-                  <button type="submit" class="secondary move-button" ${index === redirects.length - 1 ? "disabled" : ""} title="Descendre">&darr;</button>
-                </form>
-                <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
-                <form method="post" action="/admin/redirects/delete">
-                  <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
-                  <button type="submit" class="danger">Supprimer</button>
-                </form>
-              </td>
-            </tr>
-          `
-        )
-        .join("")
-    : `<tr><td colspan="5">Aucune redirection enregistree.</td></tr>`;
+  const existingGroups = Array.from(
+    new Set(redirects.map((item) => (item.group || "").trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b));
+  const currentGroup = editingRedirect ? editingRedirect.group || "" : "";
+  const groupOptions = [
+    `<option value="">(Aucun groupe)</option>`,
+    ...existingGroups.map(
+      (group) => `<option value="${escapeHtml(group)}" ${group === currentGroup ? "selected" : ""}>${escapeHtml(group)}</option>`
+    )
+  ].join("");
+
+  const renderRow = (item, index) => `
+    <tr>
+      <td><code>${escapeHtml(item.source)}</code></td>
+      <td>${renderTargetCell(item.target)}</td>
+      <td>${item.public ? "Oui" : "Non"}</td>
+      <td class="actions-cell">
+        <form method="post" action="/admin/redirects/move">
+          <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+          <input type="hidden" name="direction" value="up" />
+          <button type="submit" class="secondary move-button" ${index === 0 ? "disabled" : ""} title="Monter">&uarr;</button>
+        </form>
+        <form method="post" action="/admin/redirects/move">
+          <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+          <input type="hidden" name="direction" value="down" />
+          <button type="submit" class="secondary move-button" ${index === redirects.length - 1 ? "disabled" : ""} title="Descendre">&darr;</button>
+        </form>
+        <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
+        <form method="post" action="/admin/redirects/delete">
+          <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+          <button type="submit" class="danger">Supprimer</button>
+        </form>
+      </td>
+    </tr>
+  `;
+
+  const renderGroupTable = (items) => `
+    <table>
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th>Cible</th>
+          <th>Public</th>
+          <th>Ordre / Action</th>
+        </tr>
+      </thead>
+      <tbody>${items.map((item) => renderRow(item, redirects.indexOf(item))).join("")}</tbody>
+    </table>
+  `;
+
+  const groupSections = (() => {
+    if (!redirects.length) {
+      return `<section class="card"><p>Aucune redirection enregistree.</p></section>`;
+    }
+
+    const byGroup = new Map();
+    const order = [];
+    for (const item of redirects) {
+      const key = (item.group || "").trim();
+      if (!byGroup.has(key)) {
+        byGroup.set(key, []);
+        order.push(key);
+      }
+      byGroup.get(key).push(item);
+    }
+
+    if (order.length <= 1) {
+      return `<section class="card group-card">${renderGroupTable(redirects)}</section>`;
+    }
+
+    const tabs = [
+      { label: "Tous", content: renderGroupTable(redirects) },
+      ...order.map((key) => ({
+        label: key ? key : "Sans groupe",
+        content: renderGroupTable(byGroup.get(key))
+      }))
+    ];
+
+    return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab")}</section>`;
+  })();
 
   const content = `
     <header class="topbar">
@@ -650,7 +773,10 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible peut etre une URL externe ou une autre source deja enregistree.</p>
         <p>L'application essaie d'abord le host exact, puis les variantes usuelles avec et sans <code>www</code>. Si les deux existent, la redirection exacte reste prioritaire.</p>
       </div>
-      <a href="/logout" class="link-button">Deconnexion</a>
+      <div class="topbar-actions">
+        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/logout" class="link-button">Deconnexion</a>
+      </div>
     </header>
     ${messages}
     <section class="card">
@@ -674,40 +800,81 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <input type="text" name="publicLabel" placeholder="Ex: Mon Discord" value="${escapeHtml(editingRedirect ? editingRedirect.publicLabel || "" : "")}" />
         </label>
         <label>
-          <span>Groupe / onglet (optionnel)</span>
-          <input type="text" name="group" placeholder="Ex: Reseaux sociaux" value="${escapeHtml(editingRedirect ? editingRedirect.group || "" : "")}" />
+          <span>Ajouter au menu / groupe existant</span>
+          <select name="groupSelect">${groupOptions}</select>
+        </label>
+        <label>
+          <span>Ou creer un nouveau menu / groupe</span>
+          <input type="text" name="groupNew" placeholder="Ex: Reseaux sociaux" />
         </label>
         <label class="checkbox-label">
           <input type="checkbox" name="public" ${editingRedirect && editingRedirect.public ? "checked" : ""} />
           <span>Afficher ce lien sur la page d'accueil publique</span>
         </label>
+        <label class="checkbox-label">
+          <input type="checkbox" name="useSourceLink" ${editingRedirect && editingRedirect.useSourceLink ? "checked" : ""} />
+          <span>Utiliser le lien source (au lieu de la cible finale) pour ce lien public</span>
+        </label>
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
-        <p>Si vous donnez le meme nom de groupe a plusieurs liens publics, des onglets apparaissent automatiquement sur la page d'accueil. Utilisez les fleches dans la liste ci-dessous pour changer l'ordre d'affichage.</p>
+        <p>Par defaut, le lien affiche sur la page publique pointe directement vers la destination finale, meme si le sous-domaine source n'est pas encore configure. Cochez la case ci-dessus pour forcer le passage par votre lien source a la place.</p>
+        <p>Chaque menu/groupe cree devient un onglet sur la page d'accueil publique, et les liens que vous y ajoutez apparaissent a l'interieur. Utilisez les fleches dans les listes ci-dessous pour changer l'ordre d'affichage.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
           ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
         </div>
       </form>
     </section>
+    <h2 class="section-title">Menus et redirections</h2>
+    ${groupSections}
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Administration", content));
+}
+
+function renderSiteSettings(res, flash, siteConfig) {
+  const messages = renderMessages(flash);
+  const content = `
+    <header class="topbar">
+      <div>
+        <h1>Personnalisation de la page publique</h1>
+        <p>Ces reglages controlent le titre, le texte et le logo affiches sur la page d'accueil publique de vos liens.</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/admin" class="link-button secondary">Redirections</a>
+        <a href="/logout" class="link-button">Deconnexion</a>
+      </div>
+    </header>
+    ${messages}
     <section class="card">
-      <h2>Liste des redirections</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Source</th>
-            <th>Cible</th>
-            <th>Public</th>
-            <th>Groupe</th>
-            <th>Ordre / Action</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <h2>Identite de la page</h2>
+      <form method="post" action="/admin/site" class="form-grid">
+        <label>
+          <span>Logo (URL d'une image, optionnel)</span>
+          <input type="text" name="logoUrl" placeholder="https://exemple.com/mon-logo.png" value="${escapeHtml(siteConfig.logoUrl)}" />
+        </label>
+        <label>
+          <span>Petit badge au-dessus du titre</span>
+          <input type="text" name="badge" placeholder="Liens officiels" value="${escapeHtml(siteConfig.badge)}" />
+        </label>
+        <label>
+          <span>Titre</span>
+          <input type="text" name="title" placeholder="Rooky" value="${escapeHtml(siteConfig.title)}" required />
+        </label>
+        <label>
+          <span>Texte de presentation</span>
+          <input type="text" name="tagline" placeholder="Retrouvez ici tous mes liens et comptes officiels." value="${escapeHtml(siteConfig.tagline)}" />
+        </label>
+        <div class="form-actions">
+          <button type="submit">Enregistrer</button>
+          <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Voir la page publique</a>
+        </div>
+      </form>
     </section>
   `;
 
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(renderPage("Administration", content));
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Personnalisation", content));
 }
 
 const ICON_LINK =
@@ -844,7 +1011,7 @@ function detectPlatform(source, resolvedTarget) {
   return byKeyword || DEFAULT_PLATFORM;
 }
 
-function buildPublicLinkHref(source) {
+function buildSourceHref(source) {
   const slashIndex = source.indexOf("/");
   const host = slashIndex === -1 ? source : source.slice(0, slashIndex);
   const linkPath = slashIndex === -1 ? "/" : source.slice(slashIndex);
@@ -861,7 +1028,7 @@ function buildPublicLinks(redirects) {
       const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
       const platform = detectPlatform(item.source, resolvedTarget);
       return {
-        href: buildPublicLinkHref(item.source),
+        href: item.useSourceLink ? buildSourceHref(item.source) : resolvedTarget,
         label: item.publicLabel || platform.name,
         group: (item.group || "").trim(),
         platform
@@ -899,38 +1066,28 @@ function renderLinkRow(link) {
   `;
 }
 
-function renderLinksSection(publicLinks) {
-  if (!publicLinks.length) {
-    return "";
+function renderCssTabs(tabs, idPrefix) {
+  if (tabs.length <= 1) {
+    return tabs.length ? tabs[0].content : "";
   }
-
-  const groups = groupPublicLinks(publicLinks);
-  if (groups.length <= 1) {
-    return `<div class="links-list">${publicLinks.map(renderLinkRow).join("")}</div>`;
-  }
-
-  const tabs = [{ label: "Tous", links: publicLinks }, ...groups];
 
   const inputs = tabs
-    .map((tab, index) => `<input type="radio" name="home-tab" id="tab-${index}" class="tab-input" ${index === 0 ? "checked" : ""} />`)
+    .map(
+      (tab, index) =>
+        `<input type="radio" name="${idPrefix}-group" id="${idPrefix}-${index}" class="tab-input" ${index === 0 ? "checked" : ""} />`
+    )
     .join("");
   const labels = tabs
-    .map((tab, index) => `<label for="tab-${index}" class="tab-label">${escapeHtml(tab.label)}</label>`)
+    .map((tab, index) => `<label for="${idPrefix}-${index}" class="tab-label">${escapeHtml(tab.label)}</label>`)
     .join("");
   const panels = tabs
-    .map(
-      (tab, index) => `
-        <div class="tab-panel" id="panel-${index}">
-          <div class="links-list">${tab.links.map(renderLinkRow).join("")}</div>
-        </div>
-      `
-    )
+    .map((tab, index) => `<div class="tab-panel" id="${idPrefix}-panel-${index}">${tab.content}</div>`)
     .join("");
   const visibilityRules = tabs
     .map(
       (tab, index) => `
-        #tab-${index}:checked ~ .tab-panels #panel-${index} { display: block; }
-        #tab-${index}:checked ~ .tab-labels label[for="tab-${index}"] { background: var(--accent); color: #fff; }
+        #${idPrefix}-${index}:checked ~ .tab-panels #${idPrefix}-panel-${index} { display: block; }
+        #${idPrefix}-${index}:checked ~ .tab-labels label[for="${idPrefix}-${index}"] { background: var(--accent); color: #fff; }
       `
     )
     .join("");
@@ -945,15 +1102,38 @@ function renderLinksSection(publicLinks) {
   `;
 }
 
+function renderLinksSection(publicLinks) {
+  if (!publicLinks.length) {
+    return "";
+  }
+
+  const groups = groupPublicLinks(publicLinks);
+  if (groups.length <= 1) {
+    return `<div class="links-list">${publicLinks.map(renderLinkRow).join("")}</div>`;
+  }
+
+  const tabs = [{ label: "Tous", links: publicLinks }, ...groups].map((tab) => ({
+    label: tab.label,
+    content: `<div class="links-list">${tab.links.map(renderLinkRow).join("")}</div>`
+  }));
+
+  return renderCssTabs(tabs, "home-tab");
+}
+
 function renderHome(res, redirects) {
+  const siteConfig = getSiteConfig();
   const publicLinks = buildPublicLinks(redirects);
   const linksList = renderLinksSection(publicLinks);
+  const logoMarkup = siteConfig.logoUrl
+    ? `<img class="profile-logo" src="${escapeHtml(siteConfig.logoUrl)}" alt="" />`
+    : "";
   const content = `
     <section class="profile-card">
       <div class="hero-glow" aria-hidden="true"></div>
-      <span class="hero-badge">Liens officiels</span>
-      <h1>Rooky</h1>
-      <p>Retrouvez ici tous mes liens et comptes officiels, reunis au meme endroit.</p>
+      ${logoMarkup}
+      <span class="hero-badge">${escapeHtml(siteConfig.badge)}</span>
+      <h1>${escapeHtml(siteConfig.title)}</h1>
+      <p>${escapeHtml(siteConfig.tagline)}</p>
       ${linksList}
     </section>
     <footer class="site-footer">
@@ -961,13 +1141,13 @@ function renderHome(res, redirects) {
     </footer>
   `;
 
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(renderPage("Rooky - Mes liens officiels", content));
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage(`${siteConfig.title} - Mes liens officiels`, content));
 }
 
 function renderNotFound(res, requestHost, pathname) {
   const requestedSource = formatSource(requestHost, pathname);
-  res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(404, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(
     renderPage(
       "Non trouve",
@@ -1038,6 +1218,20 @@ function renderPage(title, content) {
           max-width: 460px;
           margin: 80px auto;
         }
+        .back-home-link {
+          display: block;
+          width: fit-content;
+          margin: 18px auto 0;
+          background: transparent;
+          color: var(--muted);
+          font-size: 13px;
+          padding: 4px 8px;
+        }
+        .back-home-link:hover {
+          background: transparent;
+          color: var(--accent);
+          text-decoration: underline;
+        }
         .profile-card {
           position: relative;
           overflow: hidden;
@@ -1059,6 +1253,17 @@ function renderPage(title, content) {
           filter: blur(10px);
           animation: hero-glow-move 8s ease-in-out infinite;
           pointer-events: none;
+        }
+        .profile-logo {
+          position: relative;
+          display: block;
+          width: 84px;
+          height: 84px;
+          margin: 0 auto 16px;
+          border-radius: 50%;
+          object-fit: cover;
+          border: 3px solid #fff;
+          box-shadow: 0 8px 20px rgba(81, 51, 34, 0.15);
         }
         .hero-badge {
           position: relative;
@@ -1216,6 +1421,21 @@ function renderPage(title, content) {
           gap: 16px;
           align-items: center;
           margin-bottom: 20px;
+        }
+        .topbar-actions {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .section-title {
+          margin: 8px 4px 12px;
+        }
+        .group-card h3 {
+          margin-bottom: 14px;
+          padding-bottom: 10px;
+          border-bottom: 1px solid var(--line);
+          color: var(--accent-dark);
         }
         .form-grid {
           display: grid;
