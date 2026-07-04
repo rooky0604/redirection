@@ -96,7 +96,9 @@ const requestListener = async (req, res) => {
         source,
         target,
         code: 301,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        public: form.public === "on",
+        publicLabel: (form.publicLabel || "").trim()
       });
       existingRedirects.sort((a, b) => a.source.localeCompare(b.source));
       writeRedirects(existingRedirects);
@@ -146,7 +148,7 @@ const requestListener = async (req, res) => {
     }
 
     if (pathname === "/") {
-      return renderHome(res);
+      return renderHome(res, redirects);
     }
 
     renderNotFound(res, requestHost, pathname);
@@ -587,6 +589,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
               <td><code>${escapeHtml(item.source)}</code></td>
               <td>${renderTargetCell(item.target)}</td>
               <td>${item.code}</td>
+              <td>${item.public ? "Oui" : "Non"}</td>
               <td class="actions-cell">
                 <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
                 <form method="post" action="/admin/redirects/delete">
@@ -598,7 +601,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           `
         )
         .join("")
-    : `<tr><td colspan="4">Aucune redirection enregistree.</td></tr>`;
+    : `<tr><td colspan="5">Aucune redirection enregistree.</td></tr>`;
 
   const content = `
     <header class="topbar">
@@ -626,6 +629,14 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <span>Code</span>
           <input type="text" value="301" disabled />
         </label>
+        <label>
+          <span>Titre public (optionnel)</span>
+          <input type="text" name="publicLabel" placeholder="Ex: Mon Discord" value="${escapeHtml(editingRedirect ? editingRedirect.publicLabel || "" : "")}" />
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" name="public" ${editingRedirect && editingRedirect.public ? "checked" : ""} />
+          <span>Afficher ce lien sur la page d'accueil publique</span>
+        </label>
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
@@ -641,6 +652,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
             <th>Source</th>
             <th>Cible</th>
             <th>Code</th>
+            <th>Public</th>
             <th>Action</th>
           </tr>
         </thead>
@@ -653,7 +665,190 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
   res.end(renderPage("Administration", content));
 }
 
-function renderHome(res) {
+const ICON_LINK =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 14.5l5-5"/><path d="M8 16.5l-1.5 1.5a3 3 0 0 1-4.2-4.2L4 12"/><path d="M16 7.5l1.5-1.5a3 3 0 0 1 4.2 4.2L20 12"/></svg>';
+
+const PLATFORMS = [
+  {
+    name: "Discord",
+    color: "#5865F2",
+    hosts: ["discord.com", "discord.gg"],
+    keyword: "discord",
+    icon:
+      '<svg viewBox="0 0 24 24"><path fill="white" d="M8.5 12.5c0 .8-.6 1.5-1.3 1.5s-1.3-.7-1.3-1.5.6-1.5 1.3-1.5 1.3.7 1.3 1.5zm8.6 0c0 .8-.6 1.5-1.3 1.5s-1.3-.7-1.3-1.5.6-1.5 1.3-1.5 1.3.7 1.3 1.5z"/><path fill="white" d="M17.5 6.5C16.3 5.9 15 5.5 13.7 5.3c-.2.3-.3.6-.5 1-1.3-.2-2.7-.2-4 0-.1-.4-.3-.7-.5-1-1.3.2-2.6.6-3.8 1.2C2.6 9.7 2 13 2.3 16.2c1.5 1.1 3 1.8 4.6 2.3.4-.5.7-1.1 1-1.7-.6-.2-1.1-.5-1.6-.8.1-.1.3-.2.4-.3 3 1.4 6.3 1.4 9.3 0 .1.1.3.2.4.3-.5.3-1 .6-1.6.8.3.6.6 1.1 1 1.7 1.6-.5 3.1-1.2 4.6-2.3.4-3.7-.6-7-2.9-9.7z"/></svg>'
+  },
+  {
+    name: "TikTok",
+    color: "#010101",
+    hosts: ["tiktok.com"],
+    keyword: "tiktok",
+    icon:
+      '<svg viewBox="0 0 24 24"><path fill="white" d="M14.5 3h-2.7v11.6a2.6 2.6 0 1 1-1.9-2.5v-2.8a5.4 5.4 0 1 0 4.6 5.3V9.2a6.7 6.7 0 0 0 4 1.3V7.8a4 4 0 0 1-4-4.1z"/></svg>'
+  },
+  {
+    name: "Instagram",
+    color: "#d6249f",
+    gradient: "linear-gradient(45deg, #feda75, #d62976, #4f5bd5)",
+    hosts: ["instagram.com"],
+    keyword: "instagram",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6"><rect x="3.5" y="3.5" width="17" height="17" rx="5"/><circle cx="12" cy="12" r="4.2"/><circle cx="17.2" cy="6.8" r="1" fill="white" stroke="none"/></svg>'
+  },
+  {
+    name: "YouTube",
+    color: "#FF0000",
+    hosts: ["youtube.com", "youtu.be"],
+    keyword: "youtube",
+    icon:
+      '<svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="4" fill="white"/><path fill="#FF0000" d="M10.5 9.2v5.6l5-2.8z"/></svg>'
+  },
+  {
+    name: "X (Twitter)",
+    color: "#000000",
+    hosts: ["twitter.com", "x.com"],
+    keyword: "twitter",
+    icon:
+      '<svg viewBox="0 0 24 24"><path stroke="white" stroke-width="2.4" stroke-linecap="round" fill="none" d="M4 4l16 16M20 4L4 20"/></svg>'
+  },
+  {
+    name: "Twitch",
+    color: "#9146FF",
+    hosts: ["twitch.tv"],
+    keyword: "twitch",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M5 3l-2 4v12h5v2h3l2-2h4l4-4V3H5zm14 10l-3 3h-4l-2 2v-2H7V5h12v8z"/><rect x="12" y="7" width="1.6" height="4.5"/><rect x="16" y="7" width="1.6" height="4.5"/></svg>'
+  },
+  {
+    name: "Telegram",
+    color: "#26A5E4",
+    hosts: ["t.me", "telegram.org", "telegram.me"],
+    keyword: "telegram",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M21 4L3 11.5l6 2 2 6 2.5-4 4.5 3.5L21 4zM9.5 13l8-6.5-6.5 7.5-.3 3-1.2-4z"/></svg>'
+  },
+  {
+    name: "WhatsApp",
+    color: "#25D366",
+    hosts: ["wa.me", "whatsapp.com"],
+    keyword: "whatsapp",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.7-1.2A9 9 0 1 0 12 3zm0 16.2a7.2 7.2 0 0 1-3.7-1l-.3-.2-2.8.7.7-2.7-.2-.3A7.2 7.2 0 1 1 12 19.2zm4-5.4c-.2-.1-1.3-.6-1.5-.7-.2-.1-.4-.1-.5.1-.2.2-.6.7-.7.9-.1.2-.3.2-.5.1-.7-.3-1.4-.7-2-1.3-.5-.5-1-1.1-1.4-1.7-.1-.2 0-.4.1-.5.1-.1.2-.3.4-.4.1-.1.2-.3.2-.4.1-.2 0-.3 0-.5-.1-.1-.5-1.3-.7-1.7-.2-.5-.4-.4-.5-.4h-.5c-.2 0-.5.1-.7.3-.2.2-.9.9-.9 2.2s1 2.5 1.1 2.7c.1.2 2 3 4.8 4.2.7.3 1.2.5 1.6.6.7.2 1.3.2 1.8.1.5-.1 1.3-.5 1.5-1 .2-.5.2-.9.1-1z"/></svg>'
+  },
+  {
+    name: "Snapchat",
+    color: "#FFFC00",
+    dark: true,
+    hosts: ["snapchat.com"],
+    keyword: "snapchat",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="#3c3c3c"><path d="M12 3c-3 0-5 2.3-5 5.5 0 1 .1 1.8.2 2.5-.7.3-1.7.6-2.2 1-.3.2-.2.6.1.8.5.3 1.3.6 1.8 1-.1.3-.3.6-.6.9-.3.3-.1.7.3.8.6.1 1.1.2 1.4.5.2.7.9 2 3 2.4.5.1 1-.2 1.5-.2h1.1c.5 0 1 .3 1.5.2 2.1-.4 2.8-1.7 3-2.4.3-.3.8-.4 1.4-.5.4-.1.6-.5.3-.8-.3-.3-.5-.6-.6-.9.5-.4 1.3-.7 1.8-1 .3-.2.4-.6.1-.8-.5-.4-1.5-.7-2.2-1 .1-.7.2-1.5.2-2.5 0-3.2-2-5.5-5-5.5z"/></svg>'
+  },
+  {
+    name: "Spotify",
+    color: "#1DB954",
+    hosts: ["spotify.com"],
+    keyword: "spotify",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"><path d="M6 15.5c3.5-1.2 8-1 11 .7"/><path d="M6.5 11.8c4-1.3 9-1 12 1"/><path d="M7 8.2c4.5-1.4 10-1.1 13.5 1.2"/></svg>'
+  },
+  {
+    name: "Facebook",
+    color: "#1877F2",
+    hosts: ["facebook.com", "fb.com"],
+    keyword: "facebook",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M14 8.5h2V5.7c-.3 0-1.3-.1-2.5-.1-2.5 0-4.2 1.5-4.2 4.3v2.3H6.8v3.2h2.5V21h3.3v-5.6h2.5l.4-3.2h-2.9V9.9c0-.9.2-1.4 1.4-1.4z"/></svg>'
+  },
+  {
+    name: "LinkedIn",
+    color: "#0A66C2",
+    hosts: ["linkedin.com"],
+    keyword: "linkedin",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M6.9 8.6H4V19h2.9V8.6zM5.4 4.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4zM20 12.6c0-3-1.6-4.4-3.8-4.4-1.7 0-2.5 1-2.9 1.6V8.6H10.4c0 .8 0 10.4 0 10.4h2.9v-5.8c0-.3 0-.6.1-.9.3-.6.9-1.3 1.9-1.3 1.3 0 1.9 1 1.9 2.5v5.5H20v-5.9z"/></svg>'
+  },
+  {
+    name: "GitHub",
+    color: "#181717",
+    hosts: ["github.com"],
+    keyword: "github",
+    icon:
+      '<svg viewBox="0 0 24 24" fill="white"><path d="M12 2.5a9.5 9.5 0 0 0-3 18.5c.5.1.6-.2.6-.5v-1.7c-2.7.6-3.2-1.2-3.2-1.2-.4-1.1-1-1.4-1-1.4-.9-.6.1-.6.1-.6.9.1 1.4 1 1.4 1 .9 1.5 2.3 1.1 2.8.8.1-.6.3-1.1.6-1.3-2.2-.2-4.4-1.1-4.4-4.9 0-1.1.4-1.9 1-2.6-.1-.2-.4-1.2.1-2.6 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 4.9 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.6.6.7 1 1.5 1 2.6 0 3.8-2.2 4.7-4.4 4.9.3.3.6.8.6 1.7v2.5c0 .3.1.6.6.5A9.5 9.5 0 0 0 12 2.5z"/></svg>'
+  }
+];
+
+const DEFAULT_PLATFORM = { name: "Lien", color: "#b04a2f", hosts: [], keyword: "", icon: ICON_LINK };
+
+function detectPlatform(source, resolvedTarget) {
+  let hostname = "";
+  try {
+    hostname = new URL(resolvedTarget).hostname.toLowerCase();
+  } catch {
+    hostname = "";
+  }
+
+  const byHost = PLATFORMS.find((platform) =>
+    platform.hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`))
+  );
+  if (byHost) {
+    return byHost;
+  }
+
+  const label = source.toLowerCase();
+  const byKeyword = PLATFORMS.find((platform) => platform.keyword && label.includes(platform.keyword));
+  return byKeyword || DEFAULT_PLATFORM;
+}
+
+function buildPublicLinkHref(source) {
+  const slashIndex = source.indexOf("/");
+  const host = slashIndex === -1 ? source : source.slice(0, slashIndex);
+  const linkPath = slashIndex === -1 ? "/" : source.slice(slashIndex);
+  if (!host) {
+    return linkPath;
+  }
+  return `https://${host}${linkPath}`;
+}
+
+function renderPublicLinks(redirects) {
+  const publicLinks = redirects
+    .filter((item) => item.public && !item.source.startsWith("*."))
+    .map((item) => {
+      const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
+      const platform = detectPlatform(item.source, resolvedTarget);
+      return {
+        href: buildPublicLinkHref(item.source),
+        label: item.publicLabel || platform.name,
+        platform
+      };
+    });
+
+  if (!publicLinks.length) {
+    return "";
+  }
+
+  const cards = publicLinks
+    .map(
+      (link) => `
+        <a class="public-link" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
+          <span class="public-link-icon" style="background:${link.platform.gradient || link.platform.color}">
+            ${link.platform.icon}
+          </span>
+          <span class="public-link-label">${escapeHtml(link.label)}</span>
+        </a>
+      `
+    )
+    .join("");
+
+  return `
+    <section class="public-links">
+      <h2>Mes liens</h2>
+      <div class="public-links-grid">${cards}</div>
+    </section>
+  `;
+}
+
+function renderHome(res, redirects) {
+  const publicLinksSection = renderPublicLinks(redirects);
   const content = `
     <section class="hero">
       <div class="hero-glow" aria-hidden="true"></div>
@@ -664,6 +859,7 @@ function renderHome(res) {
         <a href="/admin" class="link-button">Accéder à l'administration</a>
       </div>
     </section>
+    ${publicLinksSection}
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -816,6 +1012,55 @@ function renderPage(title, content) {
             animation: none;
           }
         }
+        .public-links {
+          max-width: 640px;
+          margin: 0 auto 40px;
+          text-align: center;
+          animation: hero-rise 0.6s ease-out;
+        }
+        .public-links h2 {
+          font-size: 1.2rem;
+          margin-bottom: 18px;
+        }
+        .public-links-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+          gap: 16px;
+        }
+        .public-link {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 10px;
+          padding: 16px 10px;
+          border-radius: 16px;
+          background: rgba(255, 253, 249, 0.9);
+          border: 1px solid var(--line);
+          text-decoration: none;
+          color: var(--ink);
+          transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .public-link:hover {
+          transform: translateY(-3px);
+          box-shadow: 0 10px 20px rgba(81, 51, 34, 0.12);
+        }
+        .public-link-icon {
+          width: 48px;
+          height: 48px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .public-link-icon svg {
+          width: 24px;
+          height: 24px;
+        }
+        .public-link-label {
+          font-size: 13px;
+          font-weight: 600;
+          word-break: break-word;
+        }
         h1, h2, p {
           margin-top: 0;
         }
@@ -839,6 +1084,17 @@ function renderPage(title, content) {
           font-size: 14px;
           margin-bottom: 8px;
           color: var(--muted);
+        }
+        .checkbox-label {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .checkbox-label input {
+          width: auto;
+        }
+        .checkbox-label span {
+          margin-bottom: 0;
         }
         input, button, .link-button {
           border-radius: 12px;
