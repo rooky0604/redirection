@@ -1118,7 +1118,6 @@ function renderLinkRow(link) {
   if (link.platform.name === "Spotify" && link.spotifyTitle) {
     return `
       <a class="link-row spotify-card" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
-        ${header}
         <span class="spotify-preview">
           ${link.spotifyImage ? `<img class="spotify-cover" src="${escapeHtml(link.spotifyImage)}" alt="" />` : ""}
           <span class="spotify-text">
@@ -1409,16 +1408,15 @@ function renderPage(title, content) {
         .spotify-preview {
           display: flex;
           align-items: center;
-          gap: 14px;
-          margin-left: 52px;
-          padding: 8px 10px;
+          gap: 16px;
+          padding: 6px;
           border-radius: 12px;
           background: linear-gradient(135deg, rgba(29, 185, 84, 0.1), rgba(29, 185, 84, 0.02));
         }
         .spotify-cover {
           flex: 0 0 auto;
-          width: 56px;
-          height: 56px;
+          width: 64px;
+          height: 64px;
           border-radius: 10px;
           object-fit: cover;
           box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
@@ -1429,13 +1427,14 @@ function renderPage(title, content) {
         }
         .spotify-text {
           display: flex;
+          flex: 1;
           flex-direction: column;
           gap: 2px;
           min-width: 0;
         }
         .spotify-track-title {
-          font-size: 14px;
-          font-weight: 600;
+          font-size: 16px;
+          font-weight: 700;
           color: var(--ink);
           overflow: hidden;
           text-overflow: ellipsis;
