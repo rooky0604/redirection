@@ -101,7 +101,8 @@ const requestListener = async (req, res) => {
       const editingRedirect = editSource
         ? redirects.find((item) => item.source === editSource) || null
         : null;
-      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect);
+      const activeTab = url.searchParams.get("tab") || "";
+      return renderAdmin(res, redirects, getFlashMessage(url), editingRedirect, activeTab);
     }
 
     if (pathname === "/admin/site" && method === "GET") {
@@ -142,7 +143,7 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      return renderStats(res, readRedirects(), getFlashMessage(url));
+      return renderStats(res, readRedirects().filter(isPubliclyVisible), getFlashMessage(url));
     }
 
     if (pathname === "/admin/stats/reset" && method === "POST") {
@@ -174,9 +175,10 @@ const requestListener = async (req, res) => {
       const originalSource = rawOriginalSource ? normalizeSource(rawOriginalSource) : "";
       const useFinalLink = form.useFinalLink === "on";
       const rawSource = (form.source || "").trim();
+      const tab = (form.tab || "").trim();
 
       if (!rawSource && !useFinalLink) {
-        redirect(res, "/admin?error=La%20source%20est%20requise.");
+        redirect(res, buildAdminRedirectUrl({ error: "La source est requise.", tab }));
         return;
       }
 
@@ -188,7 +190,7 @@ const requestListener = async (req, res) => {
 
       const error = validateRedirectInput(source, target, existingRedirects);
       if (error) {
-        redirect(res, `/admin?error=${encodeURIComponent(error)}`);
+        redirect(res, buildAdminRedirectUrl({ error, tab }));
         return;
       }
 
@@ -218,7 +220,10 @@ const requestListener = async (req, res) => {
       writeRedirects(existingRedirects);
       redirect(
         res,
-        `/admin?success=${encodeURIComponent(originalSource ? "Redirection modifiee" : "Redirection enregistree")}`
+        buildAdminRedirectUrl({
+          success: originalSource ? "Redirection modifiee" : "Redirection enregistree",
+          tab
+        })
       );
       return;
     }
@@ -231,9 +236,10 @@ const requestListener = async (req, res) => {
 
       const form = await parseForm(req);
       const source = normalizeSource(form.source || "");
+      const tab = (form.tab || "").trim();
       const redirects = readRedirects().filter((item) => item.source !== source);
       writeRedirects(redirects);
-      redirect(res, "/admin?success=Redirection%20supprimee");
+      redirect(res, buildAdminRedirectUrl({ success: "Redirection supprimee", tab }));
       return;
     }
 
@@ -246,6 +252,7 @@ const requestListener = async (req, res) => {
       const form = await parseForm(req);
       const source = normalizeSource(form.source || "");
       const direction = form.direction === "up" ? -1 : 1;
+      const tab = (form.tab || "").trim();
       const redirects = readRedirects();
       const index = redirects.findIndex((item) => item.source === source);
       const targetIndex = index + direction;
@@ -255,7 +262,7 @@ const requestListener = async (req, res) => {
         writeRedirects(redirects);
       }
 
-      redirect(res, "/admin?success=Ordre%20mis%20a%20jour");
+      redirect(res, buildAdminRedirectUrl({ success: "Ordre mis a jour", tab }));
       return;
     }
 
@@ -266,6 +273,7 @@ const requestListener = async (req, res) => {
       }
 
       const form = await parseForm(req);
+      const tab = (form.tab || "").trim();
       const order = (form.order || "")
         .split("||")
         .map((value) => normalizeSource(value))
@@ -293,7 +301,7 @@ const requestListener = async (req, res) => {
       }
 
       writeRedirects(reordered);
-      redirect(res, "/admin?success=Ordre%20mis%20a%20jour");
+      redirect(res, buildAdminRedirectUrl({ success: "Ordre mis a jour", tab }));
       return;
     }
 
@@ -897,6 +905,21 @@ function redirect(res, location) {
   res.end();
 }
 
+function buildAdminRedirectUrl({ success = "", error = "", tab = "" } = {}) {
+  const query = new URLSearchParams();
+  if (success) {
+    query.set("success", success);
+  }
+  if (error) {
+    query.set("error", error);
+  }
+  if (tab) {
+    query.set("tab", tab);
+  }
+  const qs = query.toString();
+  return `/admin${qs ? `?${qs}` : ""}`;
+}
+
 function renderLogin(res, flash) {
   const messages = renderMessages(flash);
   const content = `
@@ -923,7 +946,7 @@ function renderLogin(res, flash) {
   res.end(renderPage("Connexion", content));
 }
 
-function renderAdmin(res, redirects, flash, editingRedirect = null) {
+function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = "") {
   const messages = renderMessages(flash);
   const formTitle = editingRedirect ? "Modifier la redirection" : "Nouvelle redirection";
   const submitLabel = editingRedirect ? "Mettre a jour" : "Enregistrer";
@@ -938,7 +961,9 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
     )
   ].join("");
 
-  const renderRow = (item, index) => `
+  const renderRow = (item, index, tabLabel) => {
+    const tabParam = tabLabel ? `&tab=${encodeURIComponent(tabLabel)}` : "";
+    return `
     <tr data-source="${escapeHtml(item.source)}" class="draggable-row">
       <td class="drag-handle" draggable="true" title="Glisser pour reordonner">&#8942;&#8942;</td>
       <td><code>${escapeHtml(item.source)}</code></td>
@@ -948,24 +973,28 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
         <form method="post" action="/admin/redirects/move">
           <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
           <input type="hidden" name="direction" value="up" />
+          <input type="hidden" name="tab" value="${escapeHtml(tabLabel)}" />
           <button type="submit" class="secondary move-button" ${index === 0 ? "disabled" : ""} title="Monter">&uarr;</button>
         </form>
         <form method="post" action="/admin/redirects/move">
           <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
           <input type="hidden" name="direction" value="down" />
+          <input type="hidden" name="tab" value="${escapeHtml(tabLabel)}" />
           <button type="submit" class="secondary move-button" ${index === redirects.length - 1 ? "disabled" : ""} title="Descendre">&darr;</button>
         </form>
-        <a href="/admin?edit=${encodeURIComponent(item.source)}" class="link-button secondary">Modifier</a>
+        <a href="/admin?edit=${encodeURIComponent(item.source)}${tabParam}" class="link-button secondary">Modifier</a>
         <form method="post" action="/admin/redirects/delete">
           <input type="hidden" name="source" value="${escapeHtml(item.source)}" />
+          <input type="hidden" name="tab" value="${escapeHtml(tabLabel)}" />
           <button type="submit" class="danger">Supprimer</button>
         </form>
       </td>
     </tr>
   `;
+  };
 
-  const renderGroupTable = (items) => `
-    <table>
+  const renderGroupTable = (items, tabLabel) => `
+    <table data-tab="${escapeHtml(tabLabel)}">
       <thead>
         <tr>
           <th></th>
@@ -975,7 +1004,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
           <th>Ordre / Action</th>
         </tr>
       </thead>
-      <tbody>${items.map((item) => renderRow(item, redirects.indexOf(item))).join("")}</tbody>
+      <tbody>${items.map((item) => renderRow(item, redirects.indexOf(item), tabLabel)).join("")}</tbody>
     </table>
   `;
 
@@ -996,15 +1025,18 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
     }
 
     if (order.length <= 1) {
-      return `<section class="card group-card">${renderGroupTable(redirects)}</section>`;
+      return `<section class="card group-card">${renderGroupTable(redirects, "")}</section>`;
     }
 
-    const tabs = order.map((key) => ({
-      label: key ? key : "Sans groupe",
-      content: renderGroupTable(byGroup.get(key))
-    }));
+    const tabs = order.map((key) => {
+      const label = key ? key : "Sans groupe";
+      return {
+        label,
+        content: renderGroupTable(byGroup.get(key), label)
+      };
+    });
 
-    return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab")}</section>`;
+    return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab", activeTab)}</section>`;
   })();
 
   const content = `
@@ -1025,6 +1057,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
       <h2>${formTitle}</h2>
       <form method="post" action="/admin/redirects" class="form-grid">
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
+        <input type="hidden" name="tab" value="${escapeHtml(activeTab)}" />
         <label>
           <span>URL souhaitee (facultative si "Utiliser le lien final" est coche)</span>
           <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou *.exemple.fr ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
@@ -1116,6 +1149,11 @@ function renderAdmin(res, redirects, flash, editingRedirect = null) {
             input.name = "order";
             input.value = sources.join("||");
             form.appendChild(input);
+            const tabInput = document.createElement("input");
+            tabInput.type = "hidden";
+            tabInput.name = "tab";
+            tabInput.value = table.dataset.tab || "";
+            form.appendChild(tabInput);
             document.body.appendChild(form);
             form.submit();
           });
@@ -1463,15 +1501,20 @@ function renderLinkRow(link) {
   `;
 }
 
-function renderCssTabs(tabs, idPrefix) {
+function renderCssTabs(tabs, idPrefix, activeLabel = "") {
   if (tabs.length <= 1) {
     return tabs.length ? tabs[0].content : "";
   }
 
+  const activeIndex = Math.max(
+    0,
+    tabs.findIndex((tab) => tab.label === activeLabel)
+  );
+
   const inputs = tabs
     .map(
       (tab, index) =>
-        `<input type="radio" name="${idPrefix}-group" id="${idPrefix}-${index}" class="tab-input" ${index === 0 ? "checked" : ""} />`
+        `<input type="radio" name="${idPrefix}-group" id="${idPrefix}-${index}" class="tab-input" ${index === activeIndex ? "checked" : ""} />`
     )
     .join("");
   const labels = tabs
