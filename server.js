@@ -1097,6 +1097,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <p>L'application essaie d'abord le host exact, puis les variantes usuelles avec et sans <code>www</code>. Si les deux existent, la redirection exacte reste prioritaire.</p>
       </div>
       <div class="topbar-actions">
+        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/logout" class="link-button">Deconnexion</a>
@@ -1315,6 +1316,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <p>Ces reglages controlent le titre, le texte et le logo affiches sur la page d'accueil publique de vos liens.</p>
       </div>
       <div class="topbar-actions">
+        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/logout" class="link-button">Deconnexion</a>
@@ -1435,6 +1437,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <p>Nombre de fois ou chaque lien a effectivement redirige un visiteur, depuis la derniere remise a zero.</p>
       </div>
       <div class="topbar-actions">
+        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/logout" class="link-button">Deconnexion</a>
