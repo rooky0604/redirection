@@ -2299,6 +2299,10 @@ function renderPage(title, content, { wide = false } = {}) {
           background: rgba(255, 255, 255, 0.04);
           color: var(--ink);
         }
+        select option {
+          background: var(--panel);
+          color: var(--ink);
+        }
         input:focus, select:focus {
           outline: none;
           border-color: var(--accent);
