@@ -1892,24 +1892,25 @@ function renderPage(title, content, { wide = false } = {}) {
       ${faviconUrl ? `<link rel="icon" href="${escapeHtml(faviconUrl)}" />` : ""}
       <style>
         :root {
-          --bg: #f4efe8;
-          --panel: #fffdf9;
-          --ink: #1f1a17;
-          --muted: #75685d;
-          --line: #d8cdc1;
-          --accent: #b04a2f;
-          --accent-dark: #7f331f;
-          --danger: #923434;
-          --success: #2f6b46;
+          --bg: #0b0d12;
+          --panel: #161922;
+          --ink: #eef0f5;
+          --muted: #939aad;
+          --line: #262b38;
+          --accent: #6d5ef7;
+          --accent-dark: #5a4bd6;
+          --danger: #f0555f;
+          --success: #3ddc84;
         }
         * { box-sizing: border-box; }
         body {
           margin: 0;
-          font-family: Georgia, "Times New Roman", serif;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
           color: var(--ink);
           background:
-            radial-gradient(circle at top left, #f9d9c8 0, transparent 28%),
-            linear-gradient(135deg, #f3ece4 0%, #efe5da 55%, #e9ddcf 100%);
+            radial-gradient(circle at top left, rgba(109, 94, 247, 0.18) 0, transparent 32%),
+            radial-gradient(circle at bottom right, rgba(61, 220, 132, 0.08) 0, transparent 40%),
+            linear-gradient(160deg, #0b0d12 0%, #0d1017 55%, #0f1219 100%);
           min-height: 100vh;
         }
         .shell {
@@ -1920,11 +1921,11 @@ function renderPage(title, content, { wide = false } = {}) {
           width: min(1400px, calc(100% - 48px));
         }
         .card {
-          background: rgba(255, 253, 249, 0.95);
+          background: rgba(22, 25, 34, 0.9);
           border: 1px solid var(--line);
           border-radius: 18px;
           padding: 24px;
-          box-shadow: 0 12px 30px rgba(81, 51, 34, 0.08);
+          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
           margin-bottom: 20px;
         }
         .auth-card {
@@ -1952,17 +1953,17 @@ function renderPage(title, content, { wide = false } = {}) {
           margin: 90px auto 24px;
           padding: 44px 36px;
           text-align: center;
-          background: rgba(255, 253, 249, 0.92);
+          background: rgba(22, 25, 34, 0.92);
           border: 1px solid var(--line);
           border-radius: 28px;
-          box-shadow: 0 24px 50px rgba(81, 51, 34, 0.12);
+          box-shadow: 0 24px 50px rgba(0, 0, 0, 0.45);
           animation: hero-rise 0.6s ease-out;
         }
         .hero-glow {
           position: absolute;
           inset: -60% -40% auto -40%;
           height: 260px;
-          background: radial-gradient(circle, rgba(176, 74, 47, 0.25), transparent 70%);
+          background: radial-gradient(circle, rgba(109, 94, 247, 0.35), transparent 70%);
           filter: blur(10px);
           animation: hero-glow-move 8s ease-in-out infinite;
           pointer-events: none;
@@ -1975,16 +1976,16 @@ function renderPage(title, content, { wide = false } = {}) {
           margin: 0 auto 16px;
           border-radius: 50%;
           object-fit: cover;
-          border: 3px solid #fff;
-          box-shadow: 0 8px 20px rgba(81, 51, 34, 0.15);
+          border: 3px solid var(--line);
+          box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
         }
         .hero-badge {
           position: relative;
           display: inline-block;
           padding: 6px 14px;
           border-radius: 999px;
-          background: #f5e2d6;
-          color: var(--accent-dark);
+          background: rgba(109, 94, 247, 0.16);
+          color: #b6acff;
           font-size: 12px;
           letter-spacing: 0.08em;
           text-transform: uppercase;
@@ -2037,11 +2038,11 @@ function renderPage(title, content, { wide = false } = {}) {
           gap: 10px;
           padding: 12px 16px;
           border-radius: 16px;
-          background: #fff;
+          background: rgba(255, 255, 255, 0.03);
           border: 1px solid var(--line);
           text-decoration: none;
           color: var(--ink);
-          transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+          transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease;
         }
         .link-row-main {
           display: flex;
@@ -2118,8 +2119,9 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .link-row:hover {
           transform: translateY(-2px) scale(1.01);
-          box-shadow: 0 12px 24px rgba(81, 51, 34, 0.1);
+          box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
           border-color: var(--accent);
+          background: rgba(255, 255, 255, 0.05);
         }
         .link-row-icon {
           position: relative;
@@ -2196,7 +2198,7 @@ function renderPage(title, content, { wide = false } = {}) {
         .tab-label {
           padding: 6px 14px;
           border-radius: 999px;
-          background: #f0e6da;
+          background: rgba(255, 255, 255, 0.06);
           color: var(--muted);
           font-size: 13px;
           font-weight: 600;
@@ -2233,13 +2235,13 @@ function renderPage(title, content, { wide = false } = {}) {
           margin-bottom: 14px;
           padding-bottom: 10px;
           border-bottom: 1px solid var(--line);
-          color: var(--accent-dark);
+          color: var(--accent);
         }
         .add-redirect-summary {
           cursor: pointer;
           font-size: 1.1rem;
           font-weight: 700;
-          color: var(--accent-dark);
+          color: var(--accent);
           list-style: none;
         }
         .add-redirect-summary::-webkit-details-marker {
@@ -2290,12 +2292,20 @@ function renderPage(title, content, { wide = false } = {}) {
           border-radius: 12px;
           font: inherit;
         }
-        input {
+        input, select {
           width: 100%;
           padding: 12px 14px;
           border: 1px solid var(--line);
-          background: #fff;
+          background: rgba(255, 255, 255, 0.04);
           color: var(--ink);
+        }
+        input:focus, select:focus {
+          outline: none;
+          border-color: var(--accent);
+          box-shadow: 0 0 0 3px rgba(109, 94, 247, 0.25);
+        }
+        input[type="checkbox"], input[type="radio"] {
+          accent-color: var(--accent);
         }
         button, .link-button {
           display: inline-flex;
@@ -2315,11 +2325,11 @@ function renderPage(title, content, { wide = false } = {}) {
           background: var(--danger);
         }
         .secondary {
-          background: #e9dfd4;
+          background: rgba(255, 255, 255, 0.08);
           color: var(--ink);
         }
         .secondary:hover {
-          background: #d9ccbe;
+          background: rgba(255, 255, 255, 0.14);
         }
         .form-actions,
         .actions-cell {
@@ -2362,7 +2372,7 @@ function renderPage(title, content, { wide = false } = {}) {
           padding: 10px 14px;
           border: 1px solid var(--line);
           border-radius: 12px;
-          background: #fff;
+          background: rgba(255, 255, 255, 0.03);
         }
         .group-order-row.dragging {
           opacity: 0.4;
@@ -2395,12 +2405,12 @@ function renderPage(title, content, { wide = false } = {}) {
           margin-bottom: 16px;
         }
         .message.error {
-          background: #f8e0dc;
-          color: #6d2419;
+          background: rgba(240, 85, 95, 0.15);
+          color: #ffb3b9;
         }
         .message.success {
-          background: #deefe4;
-          color: #184b2b;
+          background: rgba(61, 220, 132, 0.15);
+          color: #8ff0b8;
         }
         .table-scroll {
           overflow-x: auto;
@@ -2416,12 +2426,13 @@ function renderPage(title, content, { wide = false } = {}) {
           vertical-align: top;
         }
         code {
-          background: #f5eee6;
+          background: rgba(255, 255, 255, 0.08);
+          color: var(--ink);
           padding: 2px 6px;
           border-radius: 6px;
         }
         a {
-          color: var(--accent-dark);
+          color: #a89bff;
         }
         @media (max-width: 720px) {
           .shell {
