@@ -1178,11 +1178,17 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
           <input type="text" name="groupNew" placeholder="Ex: Reseaux sociaux" />
         </label>
         <label class="checkbox-label">
-          <input type="checkbox" name="public" ${editingRedirect && editingRedirect.public ? "checked" : ""} />
+          <span class="switch">
+            <input type="checkbox" name="public" ${editingRedirect && editingRedirect.public ? "checked" : ""} />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </span>
           <span>Afficher ce lien sur la page d'accueil publique</span>
         </label>
         <label class="checkbox-label">
-          <input type="checkbox" name="useFinalLink" ${editingRedirect && editingRedirect.useFinalLink ? "checked" : ""} />
+          <span class="switch">
+            <input type="checkbox" name="useFinalLink" ${editingRedirect && editingRedirect.useFinalLink ? "checked" : ""} />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </span>
           <span>Utiliser le lien final pour ce lien</span>
         </label>
         <p>La cible peut etre une URL externe ou une source deja enregistree. L'application resout alors la destination finale avant de repondre en 301.</p>
@@ -2287,6 +2293,49 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .checkbox-label span {
           margin-bottom: 0;
+        }
+        .switch {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          flex: 0 0 auto;
+        }
+        .switch input {
+          position: absolute;
+          opacity: 0;
+          width: 44px;
+          height: 24px;
+          margin: 0;
+          cursor: pointer;
+        }
+        .switch-track {
+          width: 44px;
+          height: 24px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.15);
+          position: relative;
+          transition: background 0.2s ease;
+          pointer-events: none;
+        }
+        .switch-thumb {
+          position: absolute;
+          top: 2px;
+          left: 2px;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: #fff;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+          transition: transform 0.2s ease;
+        }
+        .switch input:checked + .switch-track {
+          background: var(--accent);
+        }
+        .switch input:checked + .switch-track .switch-thumb {
+          transform: translateX(20px);
+        }
+        .switch input:focus-visible + .switch-track {
+          box-shadow: 0 0 0 3px rgba(109, 94, 247, 0.35);
         }
         input, button, .link-button {
           border-radius: 12px;
