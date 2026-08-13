@@ -11,6 +11,7 @@ const STORAGE_DIR = process.env.DATA_DIR
   : path.join(ROOT_DIR, "data");
 const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 const SITE_CONFIG_FILE = path.join(STORAGE_DIR, "site-config.json");
+const MONITORS_FILE = path.join(STORAGE_DIR, "monitors.json");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -18,6 +19,7 @@ const PORT = Number(process.env.PORT || 3000);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
+const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -217,6 +219,118 @@ const requestListener = async (req, res) => {
       }
 
       redirect(res, "/admin/site?success=Groupe%20renomme");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      return renderMonitoring(res, readMonitorConfig(), getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/monitoring" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const webhookUrl = (form.webhookUrl || "").trim();
+      if (webhookUrl && !parseAbsoluteTarget(webhookUrl)) {
+        redirect(res, "/admin/monitoring?error=URL%20de%20webhook%20invalide");
+        return;
+      }
+
+      const config = readMonitorConfig();
+      config.webhookUrl = webhookUrl;
+      writeMonitorConfig(config);
+      redirect(res, "/admin/monitoring?success=Webhook%20enregistre");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/bots" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const name = (form.name || "").trim();
+      const guildId = (form.guildId || "").trim();
+      const botId = (form.botId || "").trim();
+      const botUsername = (form.botUsername || "").trim();
+
+      if (!guildId || (!botId && !botUsername)) {
+        redirect(res, "/admin/monitoring?error=ID%20de%20serveur%20et%20ID%20ou%20nom%20du%20bot%20requis");
+        return;
+      }
+
+      const config = readMonitorConfig();
+      config.bots.push({
+        id: crypto.randomBytes(4).toString("hex"),
+        name,
+        guildId,
+        botId,
+        botUsername,
+        status: "inconnu",
+        lastCheckedAt: "",
+        lastError: ""
+      });
+      writeMonitorConfig(config);
+      redirect(res, "/admin/monitoring?success=Bot%20ajoute");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/bots/delete" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const config = readMonitorConfig();
+      config.bots = config.bots.filter((bot) => bot.id !== id);
+      writeMonitorConfig(config);
+      redirect(res, "/admin/monitoring?success=Bot%20retire");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/bots/check" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const config = readMonitorConfig();
+      const bot = config.bots.find((entry) => entry.id === id);
+
+      if (bot) {
+        const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
+        if (result.status === "erreur") {
+          bot.lastError = result.detail;
+        } else {
+          if (result.status !== bot.status && config.webhookUrl && bot.status && bot.status !== "inconnu") {
+            await sendDiscordEmbed(config.webhookUrl, {
+              title: bot.name || bot.botUsername || bot.botId,
+              description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
+              color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
+              timestamp: new Date().toISOString()
+            });
+          }
+          bot.status = result.status;
+          bot.lastError = "";
+        }
+        bot.lastCheckedAt = new Date().toISOString();
+        writeMonitorConfig(config);
+      }
+
+      redirect(res, "/admin/monitoring?success=Verification%20effectuee");
       return;
     }
 
@@ -481,6 +595,10 @@ function ensureDataFile() {
   if (!fs.existsSync(SITE_CONFIG_FILE)) {
     fs.writeFileSync(SITE_CONFIG_FILE, "{}\n", "utf8");
   }
+
+  if (!fs.existsSync(MONITORS_FILE)) {
+    fs.writeFileSync(MONITORS_FILE, JSON.stringify({ webhookUrl: "", bots: [] }, null, 2) + "\n", "utf8");
+  }
 }
 
 const DEFAULT_SITE_CONFIG = {
@@ -541,6 +659,11 @@ async function startServer() {
   http.createServer(requestListener).listen(PORT, () => {
     console.log(`Application disponible sur http://localhost:${PORT}`);
   });
+
+  runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
+  setInterval(() => {
+    runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
+  }, MONITOR_INTERVAL_MS);
 }
 
 function isDnsHostname(host) {
@@ -971,6 +1094,147 @@ function fetchSteamAppDetails(steamUrl, timeoutMs = 5000) {
   });
 }
 
+function readMonitorConfig() {
+  ensureDataFile();
+  try {
+    const raw = fs.readFileSync(MONITORS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      webhookUrl: String(parsed?.webhookUrl || "").trim(),
+      bots: Array.isArray(parsed?.bots) ? parsed.bots : []
+    };
+  } catch {
+    return { webhookUrl: "", bots: [] };
+  }
+}
+
+function writeMonitorConfig(config) {
+  fs.writeFileSync(MONITORS_FILE, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+function fetchDiscordGuildWidget(guildId, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    const apiUrl = `https://discord.com/api/guilds/${encodeURIComponent(guildId)}/widget.json`;
+
+    const req = https.get(apiUrl, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve({ ok: false, error: `HTTP ${res.statusCode} (le widget du serveur est-il active ?)` });
+        return;
+      }
+
+      let body = "";
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          resolve({ ok: true, members: Array.isArray(parsed.members) ? parsed.members : [] });
+        } catch {
+          resolve({ ok: false, error: "Reponse invalide du widget Discord." });
+        }
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy();
+    });
+    req.on("error", (error) => resolve({ ok: false, error: error.message }));
+  });
+}
+
+async function checkBotStatus(guildId, botId, botUsername) {
+  const widget = await fetchDiscordGuildWidget(guildId);
+  if (!widget.ok) {
+    return { status: "erreur", detail: widget.error };
+  }
+
+  const normalizedUsername = (botUsername || "").trim().toLowerCase();
+  const member = widget.members.find((m) => {
+    const idMatch = botId && String(m.id) === String(botId);
+    const usernameMatch = normalizedUsername && String(m.username || "").toLowerCase() === normalizedUsername;
+    return idMatch || usernameMatch;
+  });
+
+  return member
+    ? { status: "en ligne", detail: member.status || "online" }
+    : { status: "hors ligne", detail: "" };
+}
+
+function sendDiscordEmbed(webhookUrl, embed) {
+  return new Promise((resolve) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(webhookUrl);
+    } catch {
+      resolve(false);
+      return;
+    }
+
+    const payload = JSON.stringify({ embeds: [embed] });
+    const req = https.request(
+      {
+        hostname: parsedUrl.hostname,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload)
+        },
+        timeout: 6000
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode >= 200 && res.statusCode < 300);
+      }
+    );
+
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function runMonitorChecks() {
+  const config = readMonitorConfig();
+  if (!config.bots.length) {
+    return;
+  }
+
+  let changed = true;
+  for (const bot of config.bots) {
+    const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
+    const previousStatus = bot.status || "inconnu";
+
+    if (result.status === "erreur") {
+      bot.lastError = result.detail;
+      bot.lastCheckedAt = new Date().toISOString();
+      continue;
+    }
+
+    bot.lastError = "";
+    bot.lastCheckedAt = new Date().toISOString();
+
+    if (result.status !== previousStatus) {
+      if (config.webhookUrl && previousStatus !== "inconnu") {
+        await sendDiscordEmbed(config.webhookUrl, {
+          title: bot.name || bot.botUsername || bot.botId,
+          description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
+          color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
+          timestamp: new Date().toISOString()
+        });
+      }
+      bot.status = result.status;
+    }
+  }
+
+  if (changed) {
+    writeMonitorConfig(config);
+  }
+}
+
 function parseForm(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -1151,6 +1415,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -1385,6 +1650,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
+        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -1510,6 +1776,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -1519,6 +1786,117 @@ function renderStats(res, redirects, flash, activeTab = "") {
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Statistiques", content, { wide: true }));
+}
+
+function renderMonitoring(res, config, flash) {
+  const messages = renderMessages(flash);
+
+  const rows = config.bots.length
+    ? config.bots
+        .map((bot) => {
+          const statusClass =
+            bot.status === "en ligne" ? "status-ok" : bot.status === "hors ligne" ? "status-missing" : "";
+          const lastChecked = bot.lastCheckedAt
+            ? new Date(bot.lastCheckedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/Paris" })
+            : "Jamais verifie";
+
+          return `
+            <tr>
+              <td><strong>${escapeHtml(bot.name || bot.botUsername || bot.botId)}</strong></td>
+              <td><code>${escapeHtml(bot.guildId)}</code></td>
+              <td><code>${escapeHtml(bot.botId || bot.botUsername || "")}</code></td>
+              <td class="${statusClass}">${escapeHtml(bot.status || "inconnu")}</td>
+              <td>${escapeHtml(lastChecked)}${bot.lastError ? `<br /><span class="status-missing">${escapeHtml(bot.lastError)}</span>` : ""}</td>
+              <td class="actions-cell">
+                <form method="post" action="/admin/monitoring/bots/check">
+                  <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
+                  <button type="submit" class="secondary">Verifier</button>
+                </form>
+                <form method="post" action="/admin/monitoring/bots/delete">
+                  <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
+                  <button type="submit" class="danger">Retirer</button>
+                </form>
+              </td>
+            </tr>
+          `;
+        })
+        .join("")
+    : `<tr><td colspan="6">Aucun bot surveille pour le moment.</td></tr>`;
+
+  const content = `
+    <header class="topbar">
+      <div>
+        <h1>Monitoring</h1>
+        <p>Surveille si vos bots Discord sont en ligne, via le widget public de leur serveur (aucun token requis). Verification automatique toutes les 5 minutes.</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/admin" class="link-button secondary">Redirections</a>
+        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
+        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/logout" class="link-button">Deconnexion</a>
+      </div>
+    </header>
+    ${messages}
+    <section class="card">
+      <h2>Notification Discord</h2>
+      <form method="post" action="/admin/monitoring" class="form-grid">
+        <label>
+          <span>URL du webhook Discord (salon ou envoyer les alertes)</span>
+          <input type="text" name="webhookUrl" placeholder="https://discord.com/api/webhooks/..." value="${escapeHtml(config.webhookUrl)}" />
+        </label>
+        <div class="form-actions">
+          <button type="submit">Enregistrer</button>
+        </div>
+      </form>
+    </section>
+    <details class="card add-redirect">
+      <summary class="add-redirect-summary">Ajouter un bot a surveiller</summary>
+      <form method="post" action="/admin/monitoring/bots" class="form-grid">
+        <label>
+          <span>Nom (optionnel)</span>
+          <input type="text" name="name" placeholder="Ex: MonBot" />
+        </label>
+        <label>
+          <span>ID du serveur Discord (widget doit etre active)</span>
+          <input type="text" name="guildId" placeholder="123456789012345678" required />
+        </label>
+        <label>
+          <span>ID du bot (optionnel si vous renseignez le nom d'utilisateur)</span>
+          <input type="text" name="botId" placeholder="123456789012345678" />
+        </label>
+        <label>
+          <span>Nom d'utilisateur du bot (optionnel si vous renseignez l'ID)</span>
+          <input type="text" name="botUsername" placeholder="Ex: MonBot" />
+        </label>
+        <p>Le widget du serveur doit etre active dans Discord (Parametres du serveur -&gt; Widget) pour que la verification fonctionne.</p>
+        <p>Sur les gros serveurs, Discord anonymise parfois les ID dans le widget public : renseignez aussi le nom d'utilisateur du bot pour fiabiliser la detection.</p>
+        <div class="form-actions">
+          <button type="submit">Ajouter</button>
+        </div>
+      </form>
+    </details>
+    <section class="card">
+      <h2>Bots surveilles</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>Serveur</th>
+              <th>Bot</th>
+              <th>Statut</th>
+              <th>Derniere verification</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Monitoring", content, { wide: true }));
 }
 
 const ICON_LINK =
@@ -2417,6 +2795,14 @@ function renderPage(title, content, { wide = false } = {}) {
         .clicks-cell {
           font-weight: 700;
           font-variant-numeric: tabular-nums;
+        }
+        .status-ok {
+          color: var(--success);
+          font-weight: 700;
+        }
+        .status-missing {
+          color: var(--danger);
+          font-weight: 700;
         }
         .drag-handle {
           width: 20px;
