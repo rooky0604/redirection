@@ -247,7 +247,28 @@ const requestListener = async (req, res) => {
       const config = readMonitorConfig();
       config.webhookUrl = webhookUrl;
       writeMonitorConfig(config);
-      redirect(res, "/admin/monitoring?success=Webhook%20enregistre");
+
+      if (webhookUrl) {
+        const testResult = await sendDiscordEmbed(webhookUrl, {
+          title: "Test de notification",
+          description: "Si vous voyez ce message, le webhook est correctement configure.",
+          color: 0x6d5ef7,
+          timestamp: new Date().toISOString()
+        });
+
+        if (!testResult.ok) {
+          console.error(`[monitoring] echec du message de test: ${testResult.status || ""} ${testResult.error || ""}`);
+          redirect(
+            res,
+            `/admin/monitoring?error=${encodeURIComponent(
+              `Webhook enregistre mais le message de test a echoue (${testResult.status || testResult.error || "erreur inconnue"}).`
+            )}`
+          );
+          return;
+        }
+      }
+
+      redirect(res, "/admin/monitoring?success=Webhook%20enregistre%20et%20message%20de%20test%20envoye");
       return;
     }
 
@@ -316,12 +337,15 @@ const requestListener = async (req, res) => {
           bot.lastError = result.detail;
         } else {
           if (result.status !== bot.status && config.webhookUrl && bot.status && bot.status !== "inconnu") {
-            await sendDiscordEmbed(config.webhookUrl, {
+            const sendResult = await sendDiscordEmbed(config.webhookUrl, {
               title: bot.name || bot.botUsername || bot.botId,
               description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
               color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
               timestamp: new Date().toISOString()
             });
+            if (!sendResult.ok) {
+              console.error(`[monitoring] echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
+            }
           }
           bot.status = result.status;
           bot.lastError = "";
@@ -1168,11 +1192,20 @@ function sendDiscordEmbed(webhookUrl, embed) {
     try {
       parsedUrl = new URL(webhookUrl);
     } catch {
-      resolve(false);
+      resolve({ ok: false, error: "URL de webhook invalide." });
       return;
     }
 
     const payload = JSON.stringify({ embeds: [embed] });
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+
     const req = https.request(
       {
         hostname: parsedUrl.hostname,
@@ -1185,13 +1218,22 @@ function sendDiscordEmbed(webhookUrl, embed) {
         timeout: 6000
       },
       (res) => {
-        res.resume();
-        resolve(res.statusCode >= 200 && res.statusCode < 300);
+        let body = "";
+        res.on("data", (chunk) => {
+          body += chunk;
+        });
+        res.on("end", () => {
+          const ok = res.statusCode >= 200 && res.statusCode < 300;
+          finish(ok ? { ok: true, status: res.statusCode } : { ok: false, status: res.statusCode, error: body });
+        });
       }
     );
 
-    req.on("timeout", () => req.destroy());
-    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      finish({ ok: false, error: "Delai depasse en contactant Discord." });
+    });
+    req.on("error", (error) => finish({ ok: false, error: error.message }));
     req.write(payload);
     req.end();
   });
@@ -1219,12 +1261,15 @@ async function runMonitorChecks() {
 
     if (result.status !== previousStatus) {
       if (config.webhookUrl && previousStatus !== "inconnu") {
-        await sendDiscordEmbed(config.webhookUrl, {
+        const sendResult = await sendDiscordEmbed(config.webhookUrl, {
           title: bot.name || bot.botUsername || bot.botId,
           description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
           color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
           timestamp: new Date().toISOString()
         });
+        if (!sendResult.ok) {
+          console.error(`[monitoring] echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
+        }
       }
       bot.status = result.status;
     }

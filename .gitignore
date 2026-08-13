@@ -1,3 +1,5 @@
 node_modules/
 .env
 data/redirects.json
+data/site-config.json
+data/monitors.json
