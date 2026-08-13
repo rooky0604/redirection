@@ -283,6 +283,12 @@ const requestListener = async (req, res) => {
         return;
       }
 
+      const customImageUrl = (form.customImageUrl || "").trim();
+      if (customImageUrl && !parseAbsoluteTarget(customImageUrl)) {
+        redirect(res, buildAdminRedirectUrl({ error: "URL d'image invalide.", tab }));
+        return;
+      }
+
       const spotifyMeta = isSpotifyUrl(target) ? await fetchSpotifyOEmbed(target) : null;
       const steamMeta = isSteamUrl(target) ? await fetchSteamAppDetails(target) : null;
 
@@ -295,6 +301,7 @@ const requestListener = async (req, res) => {
         publicLabel: (form.publicLabel || "").trim(),
         group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
         useFinalLink,
+        customImageUrl,
         spotifyTitle: spotifyMeta ? spotifyMeta.title : "",
         spotifyImage: spotifyMeta ? spotifyMeta.thumbnailUrl : "",
         steamTitle: steamMeta ? steamMeta.title : "",
@@ -1170,6 +1177,10 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
           <input type="text" name="publicLabel" placeholder="Ex: Mon Discord" value="${escapeHtml(editingRedirect ? editingRedirect.publicLabel || "" : "")}" />
         </label>
         <label>
+          <span>Image personnalisee (URL, optionnel)</span>
+          <input type="text" name="customImageUrl" placeholder="https://exemple.com/mon-image.png" value="${escapeHtml(editingRedirect ? editingRedirect.customImageUrl || "" : "")}" />
+        </label>
+        <label>
           <span>Ajouter au menu / groupe existant</span>
           <select name="groupSelect">${groupOptions}</select>
         </label>
@@ -1195,6 +1206,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <p>Cochez "Utiliser le lien final pour ce lien" si vous n'avez pas besoin d'une redirection source fonctionnelle : l'URL souhaitee devient facultative, et seule la cible finale sera utilisee sur la page publique.</p>
         <p>Chaque menu/groupe cree devient un onglet sur la page d'accueil publique, et les liens que vous y ajoutez apparaissent a l'interieur. Utilisez les fleches dans les listes ci-dessous pour changer l'ordre d'affichage.</p>
         <p>Note: une source generique <code>*.domaine.fr</code> ne peut jamais apparaitre comme lien public individuel, meme si la case est cochee. La colonne "Public" reflete l'etat reel sur la page d'accueil.</p>
+        <p>L'image personnalisee remplace l'icone (ou la favicon detectee automatiquement) affichee sur la page publique pour ce lien, y compris la pochette Spotify ou la bannière Steam si applicable.</p>
         <div class="form-actions">
           <button type="submit">${submitLabel}</button>
           ${editingRedirect ? '<a href="/admin" class="link-button secondary">Annuler</a>' : ""}
@@ -1674,6 +1686,7 @@ function buildPublicLinks(redirects) {
         group: (item.group || "").trim(),
         platform,
         targetHostname,
+        customImageUrl: item.customImageUrl || "",
         spotifyTitle: item.spotifyTitle || "",
         spotifyImage: item.spotifyImage || "",
         steamTitle: item.steamTitle || "",
@@ -1717,18 +1730,18 @@ function groupPublicLinks(publicLinks) {
 
 function renderLinkRow(link) {
   const isUnknownPlatform = link.platform === DEFAULT_PLATFORM;
-  const iconContent =
+  const autoFaviconUrl =
     isUnknownPlatform && link.targetHostname
-      ? `
+      ? `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(link.targetHostname)}`
+      : "";
+  const overrideImageUrl = link.customImageUrl || autoFaviconUrl;
+
+  const iconContent = overrideImageUrl
+    ? `
         <span class="fallback-icon">${link.platform.icon}</span>
-        <img
-          class="favicon-img"
-          src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(link.targetHostname)}"
-          alt=""
-          onerror="this.remove()"
-        />
+        <img class="favicon-img" src="${escapeHtml(overrideImageUrl)}" alt="" onerror="this.remove()" />
       `
-      : link.platform.icon;
+    : link.platform.icon;
 
   const header = `
     <span class="link-row-main">
@@ -1741,10 +1754,11 @@ function renderLinkRow(link) {
   `;
 
   if (link.platform.name === "Spotify" && link.spotifyTitle) {
+    const cover = link.customImageUrl || link.spotifyImage;
     return `
       <a class="link-row spotify-card" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
         <span class="spotify-preview">
-          ${link.spotifyImage ? `<img class="spotify-cover" src="${escapeHtml(link.spotifyImage)}" alt="" />` : ""}
+          ${cover ? `<img class="spotify-cover" src="${escapeHtml(cover)}" alt="" />` : ""}
           <span class="spotify-text">
             <span class="spotify-track-title">${escapeHtml(link.spotifyTitle)}</span>
             <span class="spotify-subtitle">Ecouter sur Spotify</span>
@@ -1755,9 +1769,10 @@ function renderLinkRow(link) {
   }
 
   if (link.platform.name === "Steam" && link.steamTitle) {
+    const banner = link.customImageUrl || link.steamImage;
     return `
       <a class="link-row steam-card" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">
-        ${link.steamImage ? `<img class="steam-cover" src="${escapeHtml(link.steamImage)}" alt="" />` : ""}
+        ${banner ? `<img class="steam-cover" src="${escapeHtml(banner)}" alt="" />` : ""}
         <span class="steam-text">
           <span class="steam-title">${escapeHtml(link.steamTitle)}</span>
           <span class="steam-subtitle">Voir sur Steam</span>
