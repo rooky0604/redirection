@@ -231,44 +231,118 @@ const requestListener = async (req, res) => {
       return renderMonitoring(res, readMonitorConfig(), getFlashMessage(url));
     }
 
-    if (pathname === "/admin/monitoring" && method === "POST") {
+    if (pathname === "/admin/monitoring/webhooks" && method === "POST") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
         return;
       }
 
       const form = await parseForm(req);
-      const webhookUrl = (form.webhookUrl || "").trim();
-      if (webhookUrl && !parseAbsoluteTarget(webhookUrl)) {
+      const name = (form.name || "").trim();
+      const url = (form.url || "").trim();
+
+      if (!url || !parseAbsoluteTarget(url)) {
         redirect(res, "/admin/monitoring?error=URL%20de%20webhook%20invalide");
         return;
       }
 
-      const config = readMonitorConfig();
-      config.webhookUrl = webhookUrl;
-      writeMonitorConfig(config);
+      const testResult = await sendDiscordEmbed(url, {
+        title: "Test de notification",
+        description: "Si vous voyez ce message, ce webhook est correctement configure.",
+        color: 0x6d5ef7,
+        timestamp: new Date().toISOString()
+      });
 
-      if (webhookUrl) {
-        const testResult = await sendDiscordEmbed(webhookUrl, {
-          title: "Test de notification",
-          description: "Si vous voyez ce message, le webhook est correctement configure.",
-          color: 0x6d5ef7,
-          timestamp: new Date().toISOString()
-        });
-
-        if (!testResult.ok) {
-          console.error(`[monitoring] echec du message de test: ${testResult.status || ""} ${testResult.error || ""}`);
-          redirect(
-            res,
-            `/admin/monitoring?error=${encodeURIComponent(
-              `Webhook enregistre mais le message de test a echoue (${testResult.status || testResult.error || "erreur inconnue"}).`
-            )}`
-          );
-          return;
-        }
+      if (!testResult.ok) {
+        console.error(`[monitoring] echec du message de test: ${testResult.status || ""} ${testResult.error || ""}`);
+        redirect(
+          res,
+          `/admin/monitoring?error=${encodeURIComponent(
+            `Le message de test a echoue (${testResult.status || testResult.error || "erreur inconnue"}), webhook non enregistre.`
+          )}`
+        );
+        return;
       }
 
+      const config = readMonitorConfig();
+      config.webhooks.push({
+        id: crypto.randomBytes(4).toString("hex"),
+        name: name || "Sans nom",
+        url,
+        isPrimary: config.webhooks.length === 0
+      });
+      writeMonitorConfig(config);
       redirect(res, "/admin/monitoring?success=Webhook%20enregistre%20et%20message%20de%20test%20envoye");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/webhooks/delete" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const config = readMonitorConfig();
+      const wasPrimary = config.webhooks.find((w) => w.id === id)?.isPrimary;
+      config.webhooks = config.webhooks.filter((w) => w.id !== id);
+      if (wasPrimary && config.webhooks.length) {
+        config.webhooks[0].isPrimary = true;
+      }
+      for (const bot of config.bots) {
+        if (bot.webhookId === id) {
+          bot.webhookId = "";
+        }
+      }
+      writeMonitorConfig(config);
+      redirect(res, "/admin/monitoring?success=Webhook%20retire");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/webhooks/primary" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const config = readMonitorConfig();
+      for (const webhook of config.webhooks) {
+        webhook.isPrimary = webhook.id === id;
+      }
+      writeMonitorConfig(config);
+      redirect(res, "/admin/monitoring?success=Webhook%20principal%20mis%20a%20jour");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/maintenance" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const config = readMonitorConfig();
+      const webhook = getPrimaryWebhook(config);
+      if (!webhook) {
+        redirect(res, "/admin/monitoring?error=Aucun%20webhook%20principal%20configure");
+        return;
+      }
+
+      const sendResult = await sendDiscordEmbed(webhook.url, {
+        title: "Maintenance en cours",
+        description: "Le serveur est actuellement en maintenance.",
+        color: 0xfee75c,
+        timestamp: new Date().toISOString()
+      });
+
+      redirect(
+        res,
+        sendResult.ok
+          ? "/admin/monitoring?success=Annonce%20de%20maintenance%20envoyee"
+          : `/admin/monitoring?error=${encodeURIComponent(`Echec de l'envoi (${sendResult.status || sendResult.error || "erreur"})`)}`
+      );
       return;
     }
 
@@ -283,6 +357,7 @@ const requestListener = async (req, res) => {
       const guildId = (form.guildId || "").trim();
       const botId = (form.botId || "").trim();
       const botUsername = (form.botUsername || "").trim();
+      const webhookId = (form.webhookId || "").trim();
 
       if (!guildId || (!botId && !botUsername)) {
         redirect(res, "/admin/monitoring?error=ID%20de%20serveur%20et%20ID%20ou%20nom%20du%20bot%20requis");
@@ -296,6 +371,7 @@ const requestListener = async (req, res) => {
         guildId,
         botId,
         botUsername,
+        webhookId,
         status: "inconnu",
         lastCheckedAt: "",
         lastError: ""
@@ -320,6 +396,25 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    if (pathname === "/admin/monitoring/bots/webhook" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const webhookId = (form.webhookId || "").trim();
+      const config = readMonitorConfig();
+      const bot = config.bots.find((entry) => entry.id === id);
+      if (bot) {
+        bot.webhookId = webhookId;
+        writeMonitorConfig(config);
+      }
+      redirect(res, "/admin/monitoring?success=Webhook%20du%20bot%20mis%20a%20jour");
+      return;
+    }
+
     if (pathname === "/admin/monitoring/bots/check" && method === "POST") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
@@ -337,6 +432,45 @@ const requestListener = async (req, res) => {
       }
 
       redirect(res, "/admin/monitoring?success=Verification%20effectuee");
+      return;
+    }
+
+    if (pathname === "/admin/monitoring/bots/maintenance" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const id = (form.id || "").trim();
+      const config = readMonitorConfig();
+      const bot = config.bots.find((entry) => entry.id === id);
+
+      if (!bot) {
+        redirect(res, "/admin/monitoring?error=Bot%20introuvable");
+        return;
+      }
+
+      const webhook = getBotWebhook(config, bot);
+      if (!webhook) {
+        redirect(res, "/admin/monitoring?error=Aucun%20webhook%20configure%20pour%20ce%20bot");
+        return;
+      }
+
+      const label = bot.name || bot.botUsername || bot.botId;
+      const sendResult = await sendDiscordEmbed(webhook.url, {
+        title: label,
+        description: "Ce bot est actuellement en maintenance.",
+        color: 0xfee75c,
+        timestamp: new Date().toISOString()
+      });
+
+      redirect(
+        res,
+        sendResult.ok
+          ? "/admin/monitoring?success=Annonce%20de%20maintenance%20envoyee"
+          : `/admin/monitoring?error=${encodeURIComponent(`Echec de l'envoi (${sendResult.status || sendResult.error || "erreur"})`)}`
+      );
       return;
     }
 
@@ -603,7 +737,7 @@ function ensureDataFile() {
   }
 
   if (!fs.existsSync(MONITORS_FILE)) {
-    fs.writeFileSync(MONITORS_FILE, JSON.stringify({ webhookUrl: "", bots: [] }, null, 2) + "\n", "utf8");
+    fs.writeFileSync(MONITORS_FILE, JSON.stringify({ webhooks: [], bots: [] }, null, 2) + "\n", "utf8");
   }
 }
 
@@ -1102,20 +1236,42 @@ function fetchSteamAppDetails(steamUrl, timeoutMs = 5000) {
 
 function readMonitorConfig() {
   ensureDataFile();
+  let parsed;
   try {
-    const raw = fs.readFileSync(MONITORS_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
-      webhookUrl: String(parsed?.webhookUrl || "").trim(),
-      bots: Array.isArray(parsed?.bots) ? parsed.bots : []
-    };
+    parsed = JSON.parse(fs.readFileSync(MONITORS_FILE, "utf8"));
   } catch {
-    return { webhookUrl: "", bots: [] };
+    parsed = {};
   }
+
+  let webhooks = Array.isArray(parsed?.webhooks) ? parsed.webhooks : [];
+
+  // Migration depuis l'ancien format a un seul webhook.
+  const legacyUrl = String(parsed?.webhookUrl || "").trim();
+  if (!webhooks.length && legacyUrl) {
+    webhooks = [{ id: crypto.randomBytes(4).toString("hex"), name: "Principal", url: legacyUrl, isPrimary: true }];
+  }
+
+  if (webhooks.length && !webhooks.some((w) => w.isPrimary)) {
+    webhooks[0].isPrimary = true;
+  }
+
+  return {
+    webhooks,
+    bots: Array.isArray(parsed?.bots) ? parsed.bots : []
+  };
 }
 
 function writeMonitorConfig(config) {
   fs.writeFileSync(MONITORS_FILE, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+function getPrimaryWebhook(config) {
+  return config.webhooks.find((w) => w.isPrimary) || config.webhooks[0] || null;
+}
+
+function getBotWebhook(config, bot) {
+  const assigned = bot.webhookId ? config.webhooks.find((w) => w.id === bot.webhookId) : null;
+  return assigned || getPrimaryWebhook(config);
 }
 
 function fetchDiscordGuildWidget(guildId, timeoutMs = 6000) {
@@ -1243,15 +1399,16 @@ async function checkAndNotifyBot(bot, config) {
 
   console.log(`[monitoring] ${label}: changement detecte ${previousStatus} -> ${result.status}`);
 
-  if (config.webhookUrl && previousStatus !== "inconnu") {
-    const sendResult = await sendDiscordEmbed(config.webhookUrl, {
+  const webhook = getBotWebhook(config, bot);
+  if (webhook && previousStatus !== "inconnu") {
+    const sendResult = await sendDiscordEmbed(webhook.url, {
       title: label,
       description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
       color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
       timestamp: new Date().toISOString()
     });
     if (sendResult.ok) {
-      console.log(`[monitoring] ${label}: embed envoye`);
+      console.log(`[monitoring] ${label}: embed envoye vers "${webhook.name}"`);
     } else {
       console.error(`[monitoring] ${label}: echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
     }
@@ -1833,6 +1990,41 @@ function renderStats(res, redirects, flash, activeTab = "") {
 function renderMonitoring(res, config, flash) {
   const messages = renderMessages(flash);
 
+  const webhookOptions = [`<option value="">(Webhook principal)</option>`]
+    .concat(
+      config.webhooks.map(
+        (w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}${w.isPrimary ? " (principal)" : ""}</option>`
+      )
+    )
+    .join("");
+
+  const webhookRows = config.webhooks.length
+    ? config.webhooks
+        .map(
+          (w) => `
+            <tr>
+              <td><strong>${escapeHtml(w.name)}</strong>${w.isPrimary ? ' <span class="hero-badge" style="margin:0;">Principal</span>' : ""}</td>
+              <td><code>${escapeHtml(w.url)}</code></td>
+              <td class="actions-cell">
+                ${
+                  w.isPrimary
+                    ? ""
+                    : `<form method="post" action="/admin/monitoring/webhooks/primary">
+                        <input type="hidden" name="id" value="${escapeHtml(w.id)}" />
+                        <button type="submit" class="secondary">Definir principal</button>
+                      </form>`
+                }
+                <form method="post" action="/admin/monitoring/webhooks/delete">
+                  <input type="hidden" name="id" value="${escapeHtml(w.id)}" />
+                  <button type="submit" class="danger">Retirer</button>
+                </form>
+              </td>
+            </tr>
+          `
+        )
+        .join("")
+    : `<tr><td colspan="3">Aucun webhook enregistre.</td></tr>`;
+
   const rows = config.bots.length
     ? config.bots
         .map((bot) => {
@@ -1841,6 +2033,7 @@ function renderMonitoring(res, config, flash) {
           const lastChecked = bot.lastCheckedAt
             ? new Date(bot.lastCheckedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/Paris" })
             : "Jamais verifie";
+          const webhook = getBotWebhook(config, bot);
 
           return `
             <tr>
@@ -1849,10 +2042,28 @@ function renderMonitoring(res, config, flash) {
               <td><code>${escapeHtml(bot.botId || bot.botUsername || "")}</code></td>
               <td class="${statusClass}">${escapeHtml(bot.status || "inconnu")}</td>
               <td>${escapeHtml(lastChecked)}${bot.lastError ? `<br /><span class="status-missing">${escapeHtml(bot.lastError)}</span>` : ""}</td>
+              <td>
+                <form method="post" action="/admin/monitoring/bots/webhook">
+                  <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
+                  <select name="webhookId" onchange="this.form.submit()">${[`<option value="">(Webhook principal)</option>`]
+                    .concat(
+                      config.webhooks.map(
+                        (w) =>
+                          `<option value="${escapeHtml(w.id)}" ${bot.webhookId === w.id ? "selected" : ""}>${escapeHtml(w.name)}</option>`
+                      )
+                    )
+                    .join("")}</select>
+                </form>
+                <span style="font-size:12px;color:var(--muted);">${webhook ? escapeHtml(webhook.name) : "aucun"}</span>
+              </td>
               <td class="actions-cell">
                 <form method="post" action="/admin/monitoring/bots/check">
                   <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
                   <button type="submit" class="secondary">Verifier</button>
+                </form>
+                <form method="post" action="/admin/monitoring/bots/maintenance">
+                  <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
+                  <button type="submit" class="warning">Maintenance</button>
                 </form>
                 <form method="post" action="/admin/monitoring/bots/delete">
                   <input type="hidden" name="id" value="${escapeHtml(bot.id)}" />
@@ -1863,7 +2074,7 @@ function renderMonitoring(res, config, flash) {
           `;
         })
         .join("")
-    : `<tr><td colspan="6">Aucun bot surveille pour le moment.</td></tr>`;
+    : `<tr><td colspan="7">Aucun bot surveille pour le moment.</td></tr>`;
 
   const content = `
     <header class="topbar">
@@ -1880,16 +2091,44 @@ function renderMonitoring(res, config, flash) {
     </header>
     ${messages}
     <section class="card">
-      <h2>Notification Discord</h2>
-      <form method="post" action="/admin/monitoring" class="form-grid">
-        <label>
-          <span>URL du webhook Discord (salon ou envoyer les alertes)</span>
-          <input type="text" name="webhookUrl" placeholder="https://discord.com/api/webhooks/..." value="${escapeHtml(config.webhookUrl)}" />
-        </label>
-        <div class="form-actions">
-          <button type="submit">Enregistrer</button>
-        </div>
+      <h2>Serveur en maintenance</h2>
+      <p>Envoie une annonce de maintenance generale au webhook principal.</p>
+      <form method="post" action="/admin/monitoring/maintenance">
+        <button type="submit" class="warning warning-large">Le serveur est en maintenance</button>
       </form>
+    </section>
+    <section class="card">
+      <h2>Webhooks</h2>
+      <p>Chaque bot peut notifier un webhook different (utile si une autre personne veut etre notifiee sur son propre serveur pour son bot). Le webhook principal reste utilise par defaut.</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>URL</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>${webhookRows}</tbody>
+        </table>
+      </div>
+      <details class="add-redirect" style="margin-top:16px;">
+        <summary class="add-redirect-summary">Ajouter un webhook</summary>
+        <form method="post" action="/admin/monitoring/webhooks" class="form-grid">
+          <label>
+            <span>Nom du webhook</span>
+            <input type="text" name="name" placeholder="Ex: Serveur de Julien" />
+          </label>
+          <label>
+            <span>URL du webhook Discord</span>
+            <input type="text" name="url" placeholder="https://discord.com/api/webhooks/..." required />
+          </label>
+          <p>Un message de test est envoye immediatement pour verifier que ca fonctionne.</p>
+          <div class="form-actions">
+            <button type="submit">Ajouter</button>
+          </div>
+        </form>
+      </details>
     </section>
     <details class="card add-redirect">
       <summary class="add-redirect-summary">Ajouter un bot a surveiller</summary>
@@ -1910,6 +2149,10 @@ function renderMonitoring(res, config, flash) {
           <span>Nom d'utilisateur du bot (optionnel si vous renseignez l'ID)</span>
           <input type="text" name="botUsername" placeholder="Ex: MonBot" />
         </label>
+        <label>
+          <span>Webhook a notifier pour ce bot</span>
+          <select name="webhookId">${webhookOptions}</select>
+        </label>
         <p>Le widget du serveur doit etre active dans Discord (Parametres du serveur -&gt; Widget) pour que la verification fonctionne.</p>
         <p>Sur les gros serveurs, Discord anonymise parfois les ID dans le widget public : renseignez aussi le nom d'utilisateur du bot pour fiabiliser la detection.</p>
         <div class="form-actions">
@@ -1928,6 +2171,7 @@ function renderMonitoring(res, config, flash) {
               <th>Bot</th>
               <th>Statut</th>
               <th>Derniere verification</th>
+              <th>Webhook</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -2811,6 +3055,18 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .danger {
           background: var(--danger);
+        }
+        .warning {
+          background: #fee75c;
+          color: #4a3b00;
+        }
+        .warning:hover {
+          background: #f5d942;
+        }
+        .warning-large {
+          padding: 16px 24px;
+          font-size: 1.05rem;
+          font-weight: 700;
         }
         .secondary {
           background: rgba(255, 255, 255, 0.08);
