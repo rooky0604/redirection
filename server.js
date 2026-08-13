@@ -19,7 +19,7 @@ const PORT = Number(process.env.PORT || 3000);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
-const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
+const MONITOR_INTERVAL_MS = 60 * 1000;
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -332,25 +332,7 @@ const requestListener = async (req, res) => {
       const bot = config.bots.find((entry) => entry.id === id);
 
       if (bot) {
-        const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
-        if (result.status === "erreur") {
-          bot.lastError = result.detail;
-        } else {
-          if (result.status !== bot.status && config.webhookUrl && bot.status && bot.status !== "inconnu") {
-            const sendResult = await sendDiscordEmbed(config.webhookUrl, {
-              title: bot.name || bot.botUsername || bot.botId,
-              description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
-              color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
-              timestamp: new Date().toISOString()
-            });
-            if (!sendResult.ok) {
-              console.error(`[monitoring] echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
-            }
-          }
-          bot.status = result.status;
-          bot.lastError = "";
-        }
-        bot.lastCheckedAt = new Date().toISOString();
+        await checkAndNotifyBot(bot, config);
         writeMonitorConfig(config);
       }
 
@@ -1138,7 +1120,7 @@ function writeMonitorConfig(config) {
 
 function fetchDiscordGuildWidget(guildId, timeoutMs = 6000) {
   return new Promise((resolve) => {
-    const apiUrl = `https://discord.com/api/guilds/${encodeURIComponent(guildId)}/widget.json`;
+    const apiUrl = `https://discord.com/api/guilds/${encodeURIComponent(guildId)}/widget.json?_=${Date.now()}`;
 
     const req = https.get(apiUrl, { timeout: timeoutMs }, (res) => {
       if (res.statusCode !== 200) {
@@ -1239,45 +1221,60 @@ function sendDiscordEmbed(webhookUrl, embed) {
   });
 }
 
+async function checkAndNotifyBot(bot, config) {
+  const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
+  const previousStatus = bot.status || "inconnu";
+  const label = bot.name || bot.botUsername || bot.botId;
+
+  if (result.status === "erreur") {
+    console.warn(`[monitoring] ${label}: erreur (${result.detail})`);
+    bot.lastError = result.detail;
+    bot.lastCheckedAt = new Date().toISOString();
+    return;
+  }
+
+  console.log(`[monitoring] ${label}: ${result.status} (precedent: ${previousStatus})`);
+  bot.lastError = "";
+  bot.lastCheckedAt = new Date().toISOString();
+
+  if (result.status === previousStatus) {
+    return;
+  }
+
+  console.log(`[monitoring] ${label}: changement detecte ${previousStatus} -> ${result.status}`);
+
+  if (config.webhookUrl && previousStatus !== "inconnu") {
+    const sendResult = await sendDiscordEmbed(config.webhookUrl, {
+      title: label,
+      description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
+      color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
+      timestamp: new Date().toISOString()
+    });
+    if (sendResult.ok) {
+      console.log(`[monitoring] ${label}: embed envoye`);
+    } else {
+      console.error(`[monitoring] ${label}: echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
+    }
+  } else if (previousStatus === "inconnu") {
+    console.log(`[monitoring] ${label}: premiere verification, pas de notification`);
+  }
+
+  bot.status = result.status;
+}
+
 async function runMonitorChecks() {
   const config = readMonitorConfig();
   if (!config.bots.length) {
     return;
   }
 
-  let changed = true;
+  console.log(`[monitoring] verification de ${config.bots.length} bot(s)...`);
+
   for (const bot of config.bots) {
-    const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
-    const previousStatus = bot.status || "inconnu";
-
-    if (result.status === "erreur") {
-      bot.lastError = result.detail;
-      bot.lastCheckedAt = new Date().toISOString();
-      continue;
-    }
-
-    bot.lastError = "";
-    bot.lastCheckedAt = new Date().toISOString();
-
-    if (result.status !== previousStatus) {
-      if (config.webhookUrl && previousStatus !== "inconnu") {
-        const sendResult = await sendDiscordEmbed(config.webhookUrl, {
-          title: bot.name || bot.botUsername || bot.botId,
-          description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
-          color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
-          timestamp: new Date().toISOString()
-        });
-        if (!sendResult.ok) {
-          console.error(`[monitoring] echec envoi embed: ${sendResult.status || ""} ${sendResult.error || ""}`);
-        }
-      }
-      bot.status = result.status;
-    }
+    await checkAndNotifyBot(bot, config);
   }
 
-  if (changed) {
-    writeMonitorConfig(config);
-  }
+  writeMonitorConfig(config);
 }
 
 function parseForm(req) {
@@ -1872,7 +1869,7 @@ function renderMonitoring(res, config, flash) {
     <header class="topbar">
       <div>
         <h1>Monitoring</h1>
-        <p>Surveille si vos bots Discord sont en ligne, via le widget public de leur serveur (aucun token requis). Verification automatique toutes les 5 minutes.</p>
+        <p>Surveille si vos bots Discord sont en ligne, via le widget public de leur serveur (aucun token requis). Verification automatique toutes les minutes.</p>
       </div>
       <div class="topbar-actions">
         <a href="/admin" class="link-button secondary">Redirections</a>
