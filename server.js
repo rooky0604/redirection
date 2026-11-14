@@ -67,6 +67,116 @@ const requestListener = async (req, res) => {
       return renderPublicPlanning(res, readPlanning(planningSiteChannel()));
     }
 
+    // Espace modo : connexion par rooky-tv (bot relie), le mot de passe admin reste possible.
+    if (pathname === "/modo/login" && method === "GET") {
+      const doc = readPlanning(planningSiteChannel());
+      if (!doc.channel || !doc.syncKey || !doc.program?.modoUrl) {
+        redirect(res, "/login?error=" + encodeURIComponent("Acces modo indisponible : ce site n'est pas encore relie a rooky-tv."));
+        return;
+      }
+      const state = crypto.randomBytes(18).toString("base64url");
+      setCookie(res, "modo_state", state, { httpOnly: true, secure: useSecureCookies, maxAge: 600 });
+      const target = new URL(doc.program.modoUrl);
+      target.searchParams.set("channel", doc.channel);
+      target.searchParams.set("site", modoSiteId(doc.syncKey));
+      target.searchParams.set("state", state);
+      redirect(res, target.toString());
+      return;
+    }
+
+    if (pathname === "/modo/callback" && method === "GET") {
+      const doc = readPlanning(planningSiteChannel());
+      const state = parseCookies(req.headers.cookie || "").modo_state || "";
+      const claims = verifyModoToken(doc, url.searchParams.get("token") || "", state);
+      if (!claims) {
+        redirect(res, "/login?error=" + encodeURIComponent("Connexion modo refusee ou expiree : reclique sur Acces modo."));
+        return;
+      }
+      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
+        httpOnly: true,
+        secure: useSecureCookies,
+        maxAge: Math.round(MODO_SESSION_MS / 1000)
+      });
+      redirect(res, "/modo");
+      return;
+    }
+
+    if (pathname === "/modo/logout") {
+      clearCookie(res, "modo");
+      redirect(res, "/planning");
+      return;
+    }
+
+    if (pathname === "/modo" || pathname.startsWith("/modo/")) {
+      const doc = readPlanning(planningSiteChannel());
+      const viewer = isAuthenticated(req)
+        ? { n: "Admin", r: "admin", admin: true, k: { stream: "edit", montage: "edit", post: "edit", autre: "edit", tickets: "edit" } }
+        : readModoSession(req, doc.channel);
+      if (!viewer) {
+        redirect(res, "/login");
+        return;
+      }
+      const flash = getFlashMessage(url);
+
+      if (pathname === "/modo" && method === "GET") {
+        const live = await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message }));
+        return renderModoPlanning(res, doc, viewer, live, flash);
+      }
+
+      // Ajout d'une tache (droit "Modifie" sur l'activite) ou suggestion au streamer.
+      if (pathname === "/modo/action" && method === "POST") {
+        const form = await parseForm(req);
+        const action = form.action === "suggest" ? "suggest" : "task.create";
+        try {
+          await modoApi(doc, viewer, action, { kind: form.kind, title: form.title, date: form.date, time: form.time, notes: form.notes });
+          redirect(res, `/modo?success=${encodeURIComponent(action === "suggest" ? "Suggestion envoyee au streamer en MP" : "Ajoute au planning")}`);
+        } catch (error) {
+          redirect(res, `/modo?error=${encodeURIComponent(error.message)}`);
+        }
+        return;
+      }
+
+      if (pathname === "/modo/tickets" && method === "GET") {
+        const live = await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message }));
+        return renderModoTickets(res, doc, viewer, live, flash);
+      }
+
+      const ticketMatch = /^\/modo\/tickets\/(\d{1,12})$/.exec(pathname);
+      if (ticketMatch && method === "GET") {
+        const id = Number(ticketMatch[1]);
+        const [live, data] = await Promise.all([
+          modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message })),
+          modoApi(doc, viewer, "ticket.get", { id }).catch((error) => ({ error: error.message }))
+        ]);
+        return renderModoTicket(res, doc, viewer, live, data, flash);
+      }
+
+      if (ticketMatch && method === "POST") {
+        const id = Number(ticketMatch[1]);
+        const form = await parseForm(req);
+        const back = `/modo/tickets/${id}`;
+        try {
+          if (form.action === "reply") {
+            await modoApi(doc, viewer, "ticket.reply", { id, content: form.content });
+            redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en MP")}`);
+          } else if (form.action === "ban") {
+            // Ban tickets : inscrit au casier du membre par rooky-tv (meme source que les salons ticket).
+            await modoApi(doc, viewer, "ticket.ban", { id, reason: form.reason, duration: form.duration });
+            redirect(res, `${back}?success=${encodeURIComponent("Ban tickets inscrit au casier, ticket ferme")}`);
+          } else {
+            await modoApi(doc, viewer, "ticket.status", { id, status: form.action === "reopen" ? "open" : "closed" });
+            redirect(res, `${back}?success=${encodeURIComponent(form.action === "reopen" ? "Ticket rouvert" : "Ticket ferme")}`);
+          }
+        } catch (error) {
+          redirect(res, `${back}?error=${encodeURIComponent(error.message)}`);
+        }
+        return;
+      }
+
+      renderNotFound(res, requestHost, pathname);
+      return;
+    }
+
     if (pathname === "/api/planning/sync" && method === "POST") {
       return handlePlanningSync(req, res);
     }
@@ -1211,6 +1321,9 @@ function setCookie(res, name, value, options = {}) {
   if (options.secure) {
     parts.push("Secure");
   }
+  if (options.maxAge) {
+    parts.push(`Max-Age=${options.maxAge}`);
+  }
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
@@ -1627,6 +1740,12 @@ function renderLogin(res, flash) {
         </label>
         <button type="submit">Se connecter</button>
       </form>
+      ${
+        readPlanning(planningSiteChannel()).program?.modoUrl
+          ? `<a href="/modo/login" class="link-button" style="display:flex;justify-content:center;margin-top:14px;">\ud83d\udee1\ufe0f Acces modo (connexion avec rooky-tv)</a>
+      <p style="margin:8px 0 0;font-size:13px;color:var(--muted);text-align:center;">Pour l'equipe de la chaine : planning sur plusieurs semaines et taches reservees aux modos.</p>`
+          : ""
+      }
       <a href="/" class="link-button secondary back-home-link">Retour a l'accueil</a>
     </section>
   `;
@@ -2323,7 +2442,7 @@ function renderMonitoring(res, config, flash) {
 // POST /api/planning/sync avec le code de liaison du site (page /admin/planning), a chaque changement.
 
 const PLANNING_PARIS = "Europe/Paris";
-const PLANNING_MAX_BODY = 256 * 1024;
+const PLANNING_MAX_BODY = 1024 * 1024;
 
 function normalizePlanningChannel(value) {
   const channel = String(value || "")
@@ -2391,7 +2510,46 @@ function cleanPlanningProgram(body) {
   const date = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? value : "");
   const time = (value) => (/^\d{2}:\d{2}$/.test(String(value || "")) ? value : "");
   const list = (value, max) => (Array.isArray(value) ? value.slice(0, max) : []);
+  const cleanItem = (item) => ({
+    time: time(item?.time),
+    subject: str(item?.subject, 200),
+    category: str(item?.category, 100),
+    thumbnail: httpsUrl(item?.thumbnail),
+    status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
+    // Titre masque sur Discord (rooky-tv) : dans l'image seulement, pas sur la page /planning.
+    imageOnly: item?.imageOnly === true
+  });
+  const modoUrl = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)[:/])\S+$/i.test(String(body.modoUrl || "")) ? String(body.modoUrl).slice(0, 500) : "";
+  const modo = body.modo && typeof body.modo === "object"
+    ? {
+        from: date(body.modo.from),
+        to: date(body.modo.to),
+        streams: list(body.modo.streams, 80)
+          .map((day) => ({
+            date: date(day?.date),
+            time: time(day?.time),
+            cancelled: day?.cancelled === true,
+            postponed: day?.postponed === true,
+            quiet: day?.quiet === true,
+            description: str(day?.description, 1500),
+            items: list(day?.items, 30).map(cleanItem).filter((item) => item.subject)
+          }))
+          .filter((day) => day.date),
+        tasks: list(body.modo.tasks, 200)
+          .map((task) => ({
+            kind: ["post", "montage", "autre"].includes(task?.kind) ? task.kind : "autre",
+            title: str(task?.title, 200),
+            date: date(task?.date),
+            time: time(task?.time),
+            late: task?.late === true,
+            recurring: task?.recurring === true
+          }))
+          .filter((task) => task.date && task.title)
+      }
+    : null;
   return {
+    modoUrl,
+    modo,
     live: body.live === true ? true : body.live === false ? false : null,
     scheduleText: str(body.scheduleText, 1000),
     imageUrl: httpsUrl(body.imageUrl),
@@ -2407,15 +2565,7 @@ function cleanPlanningProgram(body) {
         postponed: day?.postponed === true,
         description: str(day?.description, 1500),
         items: list(day?.items, 30)
-          .map((item) => ({
-            time: time(item?.time),
-            subject: str(item?.subject, 200),
-            category: str(item?.category, 100),
-            thumbnail: httpsUrl(item?.thumbnail),
-            status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
-            // Titre masque sur Discord (rooky-tv) : dans l'image seulement, pas sur la page /planning.
-            imageOnly: item?.imageOnly === true
-          }))
+          .map(cleanItem)
           .filter((item) => item.subject)
       }))
       .filter((day) => day.date)
@@ -2750,7 +2900,7 @@ function renderPublicPlanning(res, doc) {
       <div class="pw-week">${columns}</div>
       <footer class="pw-foot">
         <span>${updated ? `Mis a jour le ${escapeHtml(updated)}` : ""}</span>
-        <a href="/">Retour a ${escapeHtml(siteConfig.title)}</a>
+        <span>${program?.modoUrl ? `<a href="/modo">Acces modo</a> · ` : ""}<a href="/">Retour a ${escapeHtml(siteConfig.title)}</a></span>
       </footer>
     </main>
     <dialog class="pw-zoom" aria-label="Programme du jour">
@@ -2792,6 +2942,438 @@ function renderPublicPlanning(res, doc) {
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Programme de la semaine", content, { wide: true }));
+}
+
+/* ------------------------------ Espace modo ------------------------------ */
+// L'equipe de la chaine (streamer et modos) se connecte par rooky-tv : /modo/login envoie sur
+// rooky-tv (adresse donnee par la synchro), qui verifie la personne et revient sur /modo/callback avec
+// un jeton signe par la cle de liaison (secret partage avec rooky-tv seulement), valable 5 minutes et
+// lie au navigateur (cookie modo_state). Session : cookie signe, 12 h, avec les activites que la
+// personne voit sur le planning rooky-tv (k : stream, montage, post, autre).
+const MODO_SESSION_MS = 12 * 60 * 60 * 1000;
+
+const modoSiteId = (syncKey) => crypto.createHash("sha256").update(String(syncKey)).digest("hex").slice(0, 16);
+
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+function verifyModoToken(doc, token, state) {
+  if (!doc.channel || !doc.syncKey || !state) return null;
+  const [payload, sig] = String(token).split(".");
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac("sha256", doc.syncKey).update(payload).digest("base64url");
+  if (!safeEqual(sig, expected)) return null;
+  let claims;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!claims || claims.c !== doc.channel || !safeEqual(claims.s || "", state) || !(claims.e > Date.now())) return null;
+  return claims;
+}
+
+function signModoSession(data) {
+  const payload = Buffer.from(JSON.stringify(data)).toString("base64url");
+  return `${payload}.${crypto.createHmac("sha256", `modo:${SESSION_SECRET}`).update(payload).digest("base64url")}`;
+}
+
+function readModoSession(req, channel) {
+  const value = parseCookies(req.headers.cookie || "").modo || "";
+  const [payload, sig] = value.split(".");
+  if (!payload || !sig) return null;
+  if (!safeEqual(sig, crypto.createHmac("sha256", `modo:${SESSION_SECRET}`).update(payload).digest("base64url"))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return data && data.c === channel && data.e > Date.now() ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+const MODO_KINDS = {
+  montage: { label: "Montage", emoji: "\ud83c\udfac" },
+  post: { label: "Poster", emoji: "\ud83d\udcf2" },
+  autre: { label: "Autre", emoji: "\ud83d\udcdd" }
+};
+
+function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
+  const modo = doc.program?.modo || null;
+  const today = planningToday();
+  const rights = modoRights(viewer, live);
+  const can = (kind) => rights[kind] === "view" || rights[kind] === "edit";
+  const streams = (modo?.streams || []).filter((s) => s.date >= today && can("stream"));
+  const tasks = (modo?.tasks || []).filter((t) => (t.date >= today || t.late) && can(t.kind));
+  const last = modo?.to && modo.to >= today ? modo.to : planningAddDays(today, 27);
+  const updated = doc.receivedAt
+    ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })
+    : "";
+
+  const tag = (text, cls = "") => `<span class="md-tag${cls ? ` ${cls}` : ""}">${text}</span>`;
+  const renderStream = (stream) => `
+    <div class="md-stream${stream.cancelled ? " is-cancelled" : ""}">
+      <div class="md-line">
+        <span class="md-time">${stream.time ? escapeHtml(planningHour(stream.time)) : "?"}</span>
+        <strong>\ud83d\udd34 Stream</strong>
+        ${stream.cancelled ? tag("Annule", "bad") : ""}${stream.postponed ? tag("Reporte") : ""}${stream.quiet ? tag("Pas encore annonce") : ""}
+      </div>
+      ${stream.description ? `<p class="md-desc">${planningMarkdown(stream.description)}</p>` : ""}
+      ${
+        stream.items.length
+          ? `<ul class="md-items">${stream.items
+              .map(
+                (item) => `<li>
+                  ${item.thumbnail ? `<img src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : `<span class="md-noimg"></span>`}
+                  <span>${escapeHtml(item.subject)}<small>${escapeHtml([item.time ? planningHour(item.time) : "", item.category].filter(Boolean).join(" \u00b7 "))}</small>
+                  ${item.status === "planning" ? tag("Organisation") : ""}${item.imageOnly ? tag("Masque sur Discord") : ""}</span>
+                </li>`
+              )
+              .join("")}</ul>`
+          : `<p class="md-empty">Programme pas encore prepare</p>`
+      }
+    </div>`;
+  const renderTask = (task) => `
+    <div class="md-task">
+      <span class="md-time">${task.time ? escapeHtml(planningHour(task.time)) : ""}</span>
+      <span>${MODO_KINDS[task.kind].emoji} ${escapeHtml(task.title)}</span>
+      ${tag(MODO_KINDS[task.kind].label)}${task.recurring ? tag("Repete") : ""}${task.late ? tag("En retard", "bad") : ""}
+    </div>`;
+
+  // Semaines du lundi au dimanche, de la semaine en cours jusqu'a la fin de ce que rooky-tv envoie.
+  const weekday = planningDayParts(today).weekday;
+  let monday = planningAddDays(today, -((weekday + 6) % 7));
+  const weeks = [];
+  while (monday <= last) {
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const date = planningAddDays(monday, i);
+      if (date < today || date > last) continue;
+      const dayStreams = streams.filter((s) => s.date === date);
+      const dayTasks = tasks.filter((t) => t.date === date);
+      const { name, short } = planningDayParts(date);
+      days.push(`
+        <section class="md-day${date === today ? " is-today" : ""}${dayStreams.length || dayTasks.length ? "" : " is-empty"}">
+          <header><strong>${date === today ? "Aujourd'hui" : name}</strong> <span>${escapeHtml(short)}</span></header>
+          ${dayStreams.map(renderStream).join("")}${dayTasks.map(renderTask).join("")}
+          ${dayStreams.length || dayTasks.length ? "" : `<p class="md-empty">Rien de prevu</p>`}
+        </section>`);
+    }
+    const end = planningAddDays(monday, 6);
+    weeks.push(`
+      <section class="md-week">
+        <h2>Semaine du ${escapeHtml(planningDayParts(monday).short)} au ${escapeHtml(planningDayParts(end).short)}</h2>
+        <div class="md-days">${days.join("")}</div>
+      </section>`);
+    monday = planningAddDays(monday, 7);
+  }
+
+  const editKinds = ["stream", "montage", "post", "autre"].filter((k) => rights[k] === "edit");
+  const kindOptions = (kinds) => kinds.map((k) => `<option value="${k}">${MODO_ALL_KINDS[k]}</option>`).join("");
+  const suggestions = Array.isArray(live.suggestions) ? live.suggestions : [];
+  const suggestionStatus = { pending: "En attente du streamer", accepted: "Ajoutee au planning", refused: "Refusee" };
+  const forms = `
+    <section class="md-forms">
+      <form method="post" action="/modo/action" class="md-form">
+        <h2>Ajouter au planning</h2>
+        <div class="md-form-row">
+          <select name="kind" aria-label="Type">${kindOptions(editKinds.length ? editKinds : ["autre"])}</select>
+          <input type="text" name="title" maxlength="120" placeholder="Titre" required />
+        </div>
+        <div class="md-form-row">
+          <input type="date" name="date" min="${today}" value="${today}" required />
+          <input type="time" name="time" value="12:00" required />
+        </div>
+        <textarea name="notes" maxlength="800" rows="2" placeholder="Notes (optionnel)"></textarea>
+        <div class="md-form-row">
+          ${editKinds.length ? `<button type="submit" name="action" value="add">Ajouter</button>` : ""}
+          <button type="submit" name="action" value="suggest" class="secondary">Suggerer au streamer</button>
+        </div>
+        <p class="md-hint">${editKinds.length ? "Ajouter : directement dans le planning (et l'agenda Google de la chaine, sans compte Google a connecter). " : ""}Suggerer : le streamer recoit un MP du bot et accepte ou refuse.</p>
+      </form>
+      <div class="md-form">
+        <h2>Suggestions</h2>
+        ${
+          suggestions.length
+            ? `<ul class="md-sugg">${suggestions
+                .map(
+                  (sg) => `<li><span>${escapeHtml(MODO_ALL_KINDS[sg.kind] || sg.kind)} <strong>${escapeHtml(sg.title)}</strong><small>${escapeHtml(modoDateTime(sg.dueAt))} · par ${escapeHtml(sg.author || "?")}</small></span><span class="md-tag${sg.status === "refused" ? " bad" : sg.status === "accepted" ? " ok" : ""}">${suggestionStatus[sg.status] || sg.status}</span></li>`
+                )
+                .join("")}</ul>`
+            : `<p class="md-empty">Aucune suggestion en cours.</p>`
+        }
+      </div>
+    </section>`;
+
+  const content = `
+    <style>
+      ${MODO_CSS}
+      .md { display: grid; gap: 18px; }
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
+      .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
+      .md-hero p { margin: 0; color: var(--muted); }
+      .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--muted); }
+      .md-days { display: grid; gap: 8px; }
+      .md-day { background: rgba(22, 25, 34, 0.9); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 10px; }
+      .md-day.is-today { border-color: var(--accent); }
+      .md-day.is-empty { opacity: 0.55; padding: 8px 14px; display: flex; justify-content: space-between; align-items: center; }
+      .md-day header span { color: var(--muted); font-size: 13px; margin-left: 6px; }
+      .md-line, .md-task { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .md-time { font-weight: 800; color: #45e0d2; min-width: 48px; }
+      .md-stream.is-cancelled .md-time { text-decoration: line-through; opacity: 0.6; }
+      .md-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+      .md-tag.bad { background: rgba(240, 85, 95, 0.18); color: var(--danger); }
+      .md-desc { margin: 6px 0 0 56px; font-size: 13px; }
+      .md-items { list-style: none; margin: 8px 0 0 56px; padding: 0; display: grid; gap: 6px; }
+      .md-items li { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+      .md-items li > span { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+      .md-items small { color: var(--muted); }
+      .md-items img, .md-noimg { width: 26px; height: 35px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; background: rgba(255, 255, 255, 0.06); }
+      .md-empty { margin: 0; color: var(--muted); font-size: 13px; font-style: italic; }
+      .md-day.is-empty .md-empty { font-style: normal; }
+      .md-foot { color: var(--muted); font-size: 13px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .md-foot a { color: var(--muted); }
+      @media (max-width: 640px) { .md-desc, .md-items { margin-left: 0; } }
+    </style>
+    <main class="md">
+      <section class="md-hero">
+        <div>
+          <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
+          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.r === "admin" ? " (mot de passe)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
+        </div>
+        <a class="link-button secondary" href="${viewer.r === "admin" ? "/admin" : "/modo/logout"}">${viewer.r === "admin" ? "Administration" : "Se deconnecter"}</a>
+      </section>
+      ${modoNav("planning", live, rights)}
+      ${renderMessages(flash)}
+      ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
+      ${forms}
+      ${!modo ? `<p class="md-empty">Rien recu de rooky-tv pour l'instant : le planning arrive au prochain changement.</p>` : weeks.join("")}
+      <footer class="md-foot">
+        <span>${updated ? `Mis a jour le ${escapeHtml(updated)}` : ""}</span>
+        <a href="/planning">Page publique du planning</a>
+      </footer>
+    </main>
+  `;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Espace modo", content, { wide: true }));
+}
+
+const MODO_ALL_KINDS = {
+  stream: "\ud83d\udd34 Stream",
+  montage: "\ud83c\udfac Montage",
+  post: "\ud83d\udcf2 Poster",
+  autre: "\ud83d\udcdd Autre"
+};
+
+// Droits affiches : ceux renvoyes en direct par rooky-tv, sinon ceux de la connexion (anciennes
+// sessions : true = "view"). rooky-tv reverifie de toute facon chaque action.
+function modoRights(viewer, live) {
+  const level = (v) => (v === true ? "view" : v === "view" || v === "edit" ? v : "none");
+  const source = live?.rights ? { ...live.rights.kinds, tickets: live.rights.tickets } : viewer.k || {};
+  return Object.fromEntries(["stream", "montage", "post", "autre", "tickets"].map((k) => [k, level(source[k])]));
+}
+
+function modoDateTime(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS });
+}
+
+/**
+ * Appel a rooky-tv (pages/api/redirection/modo.js), signe avec la cle de liaison. La personne
+ * connectee est transmise (id Discord, ou admin du site), rooky-tv verifie ses droits.
+ */
+async function modoApi(doc, viewer, action, extra = {}) {
+  if (!doc.channel || !doc.syncKey || !doc.program?.modoUrl) throw new Error("Site pas encore relie a rooky-tv.");
+  const endpoint = new URL("/api/redirection/modo", doc.program.modoUrl).toString();
+  const body = JSON.stringify({
+    ...extra,
+    channel: doc.channel,
+    site: modoSiteId(doc.syncKey),
+    ts: Date.now(),
+    action,
+    user: viewer.admin ? { admin: true, name: "Admin du site" } : { id: viewer.u, name: viewer.n }
+  });
+  const signature = crypto.createHmac("sha256", doc.syncKey).update(body).digest("base64url");
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Modo-Signature": signature },
+    body,
+    signal: AbortSignal.timeout(10000)
+  }).catch(() => null);
+  if (!res) throw new Error("rooky-tv ne repond pas.");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `rooky-tv a refuse (${res.status}).`);
+  return data;
+}
+
+const MODO_CSS = `
+  .md-nav { display: flex; gap: 8px; flex-wrap: wrap; }
+  .md-nav a { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; }
+  .md-nav a.on { border-color: var(--accent); color: var(--accent); }
+  .md-count { background: #ff6b87; color: #fff; border-radius: 999px; padding: 0 7px; font-size: 12px; margin-left: 4px; }
+  .md-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .md-form { background: rgba(22, 25, 34, 0.9); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: grid; gap: 8px; align-content: start; }
+  .md-form h2 { margin: 0; font-size: 1.05rem; }
+  .md-form-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .md-form-row > * { flex: 1 1 120px; min-width: 0; }
+  .md-form textarea { width: 100%; box-sizing: border-box; }
+  .md-hint { margin: 0; font-size: 12px; color: var(--muted); }
+  .md-sugg { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .md-sugg li { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 13px; }
+  .md-sugg li > span:first-child { display: grid; min-width: 0; overflow-wrap: anywhere; }
+  .md-sugg small { color: var(--muted); }
+  .md-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); white-space: nowrap; }
+  .md-tag.bad { background: rgba(240, 85, 95, 0.18); color: var(--danger); }
+  .md-tag.ok { background: rgba(69, 224, 210, 0.15); color: #45e0d2; }
+  .mt-list { display: grid; gap: 8px; }
+  .mt-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; background: rgba(22, 25, 34, 0.9); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; color: var(--ink); text-decoration: none; }
+  .mt-row.unread { border-color: #ff6b87; }
+  .mt-row.closed { opacity: 0.6; }
+  .mt-row > span:first-child { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+  .mt-row small { color: var(--muted); }
+  .mt-chat { display: grid; gap: 10px; }
+  .mt-msg { max-width: 80%; padding: 10px 14px; border-radius: 14px; background: rgba(22, 25, 34, 0.95); border: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .mt-msg.out { justify-self: end; background: rgba(69, 224, 210, 0.12); border-color: rgba(69, 224, 210, 0.35); }
+  .mt-msg.system { justify-self: center; background: transparent; border-style: dashed; color: var(--muted); font-size: 13px; }
+  .mt-msg small { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; white-space: normal; }
+  .mt-msg img { max-width: 100%; max-height: 260px; border-radius: 8px; margin-top: 6px; display: block; }
+  .mt-reply { display: grid; gap: 8px; }
+  .mt-reply textarea { width: 100%; box-sizing: border-box; }
+  .mt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  @media (max-width: 640px) { .mt-msg { max-width: 100%; } }
+`;
+
+function modoNav(active, live, rights) {
+  const tickets = Array.isArray(live?.tickets) ? live.tickets : [];
+  const unread = tickets.filter((t) => t.status === "open" && t.unread).length;
+  const canTickets = rights.tickets === "view" || rights.tickets === "edit";
+  return `<nav class="md-nav">
+    <a href="/modo" class="${active === "planning" ? "on" : ""}">\ud83d\udcc5 Planning</a>
+    ${canTickets ? `<a href="/modo/tickets" class="${active === "tickets" ? "on" : ""}">\ud83c\udfab Tickets${unread ? `<span class="md-count">${unread}</span>` : ""}</a>` : ""}
+  </nav>`;
+}
+
+function modoShell(doc, viewer, inner) {
+  return `
+    <style>
+      ${MODO_CSS}
+      .md { display: grid; gap: 18px; }
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
+      .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
+      .md-hero p { margin: 0; color: var(--muted); }
+      .md-empty { margin: 0; color: var(--muted); font-size: 13px; font-style: italic; }
+    </style>
+    <main class="md">
+      <section class="md-hero">
+        <div>
+          <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
+          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.r === "admin" ? " (mot de passe)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
+        </div>
+        <a class="link-button secondary" href="${viewer.r === "admin" ? "/admin" : "/modo/logout"}">${viewer.r === "admin" ? "Administration" : "Se deconnecter"}</a>
+      </section>
+      ${inner}
+    </main>`;
+}
+
+function renderModoTickets(res, doc, viewer, live, flash) {
+  const rights = modoRights(viewer, live);
+  const tickets = Array.isArray(live.tickets) ? live.tickets : null;
+  const rows = (tickets || [])
+    .map(
+      (t) => `<a class="mt-row${t.status === "open" && t.unread ? " unread" : ""}${t.status !== "open" ? " closed" : ""}" href="/modo/tickets/${t.id}">
+        <span><strong>#${t.id} · ${escapeHtml(t.owner)}</strong><small>${escapeHtml(t.reason || "Sans raison")} · ${escapeHtml(modoDateTime(t.updatedAt))}</small>${t.lastMessage ? `<small>${escapeHtml(t.lastMessage)}</small>` : ""}</span>
+        <span class="md-tag${t.status === "open" ? (t.unread ? " bad" : " ok") : ""}">${t.status === "open" ? (t.unread ? "Nouveau message" : "Ouvert") : "Ferme"}</span>
+      </a>`
+    )
+    .join("");
+  const inner = `
+    ${modoNav("tickets", live, rights)}
+    ${renderMessages(flash)}
+    ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
+    ${
+      tickets === null
+        ? `<p class="md-empty">Tu n'as pas acces aux tickets (droit « Tickets » des groupes d'acces du planning).</p>`
+        : tickets.length
+          ? `<div class="mt-list">${rows}</div>`
+          : `<p class="md-empty">Aucun ticket. Les tickets ouverts sur le Discord (en MP) arrivent ici.</p>`
+    }
+    <script>setTimeout(() => location.reload(), 30000);</script>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Tickets", modoShell(doc, viewer, inner), { wide: true }));
+}
+
+function renderModoTicket(res, doc, viewer, live, data, flash) {
+  const rights = modoRights(viewer, live);
+  const canReply = rights.tickets === "edit";
+  const ticket = data?.ticket;
+  const messages = Array.isArray(data?.messages) ? data.messages : [];
+  const bubbles = messages
+    .map((m) => {
+      const images = (m.attachments || [])
+        .filter((a) => /^https:\/\//.test(a.url || ""))
+        .map((a) =>
+          /^image\//.test(a.type || "")
+            ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(a.url)}" alt="" referrerpolicy="no-referrer" /></a>`
+            : `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer">\ud83d\udcce ${escapeHtml(a.name || "piece jointe")}</a>`
+        )
+        .join("");
+      const who = m.direction === "in" ? ticket?.owner || "Membre" : m.direction === "out" ? `${m.author || "Equipe"} (equipe)` : "";
+      return `<div class="mt-msg ${m.direction}">${escapeHtml(m.content)}${images}<small>${escapeHtml([who, modoDateTime(m.at)].filter(Boolean).join(" · "))}</small></div>`;
+    })
+    .join("");
+  const inner = `
+    ${modoNav("tickets", live, rights)}
+    ${renderMessages(flash)}
+    ${data?.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
+    ${
+      ticket
+        ? `<section class="md-form">
+            <h2>Ticket #${ticket.id} · ${escapeHtml(ticket.owner)} ${ticket.status === "open" ? `<span class="md-tag ok">Ouvert</span>` : `<span class="md-tag">Ferme${ticket.closedBy ? ` par ${escapeHtml(ticket.closedBy)}` : ""}</span>`}</h2>
+            <p class="md-hint">${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))}. Le membre ecrit au bot en MP ; tes reponses lui arrivent en MP, signees « l'equipe ».</p>
+            ${
+              ticket.ban
+                ? `<div class="message error">\ud83d\udeab Banni des tickets (casier, fiche #${escapeHtml(String(ticket.ban.ficheId))}${
+                    ticket.ban.expiresInSeconds ? `, encore ${escapeHtml(String(Math.ceil(ticket.ban.expiresInSeconds / 3600)))} h` : ", definitif"
+                  })${ticket.ban.reason ? ` : ${escapeHtml(ticket.ban.reason)}` : ""}</div>`
+                : ""
+            }
+          </section>
+          <div class="mt-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
+          ${
+            canReply
+              ? `<form method="post" class="mt-reply md-form">
+                  ${ticket.status === "open" ? `<textarea name="content" rows="4" maxlength="3500" placeholder="Ta reponse (envoyee en MP au membre)"></textarea>` : ""}
+                  <div class="mt-actions">
+                    ${ticket.status === "open" ? `<button type="submit" name="action" value="reply">Envoyer</button><button type="submit" name="action" value="close" class="secondary" formnovalidate>Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}
+                  </div>
+                </form>`
+              : `<p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p>`
+          }
+          ${
+            canReply && !ticket.ban
+              ? `<details class="md-form">
+                  <summary>\ud83d\udeab Bannir des tickets</summary>
+                  <form method="post" class="mt-reply" style="margin-top:8px;">
+                    <input type="text" name="reason" maxlength="500" placeholder="Motif (obligatoire)" required />
+                    <input type="text" name="duration" maxlength="12" placeholder="Duree : 30m, 12h, 7j, 2sem — vide = definitif" />
+                    <p class="md-hint">Inscrit au casier du membre, comme le ban tickets des salons Discord : il ne pourra plus ouvrir de ticket, ni en salon ni en MP. Le ticket est ferme.</p>
+                    <div class="mt-actions"><button type="submit" name="action" value="ban" class="danger">Bannir des tickets</button></div>
+                  </form>
+                </details>`
+              : ""
+          }`
+        : ""
+    }
+    <p><a href="/modo/tickets">\u2190 Tous les tickets</a></p>
+    <script>
+      // Nouveaux messages : la page se recharge seule tant que rien n'est en cours de saisie.
+      setInterval(() => { const t = document.querySelector(".mt-reply textarea"); if (!t || !t.value.trim()) location.reload(); }, 20000);
+      window.scrollTo(0, document.body.scrollHeight);
+    </script>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Ticket", modoShell(doc, viewer, inner), { wide: true }));
 }
 
 /* ------------------------- Image du programme (Discord) ------------------------- */
