@@ -864,7 +864,7 @@ const requestListener = async (req, res) => {
       }
       const doc = readPlanning(planningSiteChannel());
       const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch((error) => ({ error: error.message }));
-      return renderAdminTeam(res, doc, team, getFlashMessage(url), teamAccess(req, doc).canEdit);
+      return renderAdminTeam(res, doc, team, getFlashMessage(url), teamAccess(req, doc).canEdit, isAuthenticated(req) ? "admin" : "streamer");
     }
 
     if (pathname === "/admin/equipe" && method === "POST") {
@@ -905,7 +905,7 @@ const requestListener = async (req, res) => {
       const doc = readPlanning(planningSiteChannel());
       const viewer = adminViewer(req, doc);
       const meta = await modoApi(doc, viewer, "tickets.meta").catch((error) => ({ error: error.message }));
-      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url), teamAccess(req, doc).canEdit);
+      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url), teamAccess(req, doc).canEdit, isAuthenticated(req) ? "admin" : "streamer");
     }
 
     if (pathname === "/admin/tickets" && method === "POST") {
@@ -1992,7 +1992,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
       };
     });
 
-    return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab", activeTab)}</section>`;
+    return `<section class="card group-card">${renderCssTabs(tabs, "admin-tab", activeTab, { side: true })}</section>`;
   })();
 
   const content = `
@@ -2001,17 +2001,6 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <h1>Redirections URL</h1>
         <p>La source peut etre un chemin simple ou un sous-domaine avec chemin. La cible peut etre une URL externe ou une autre source deja enregistree.</p>
         <p>L'application essaie d'abord le host exact, puis les variantes usuelles avec et sans <code>www</code>. Si les deux existent, la redirection exacte reste prioritaire.</p>
-      </div>
-      <div class="topbar-actions">
-        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
-        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
-        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
-        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
-        <a href="/admin/planning" class="link-button secondary">Planning</a>
-        <a href="/modo" class="link-button secondary">Espace modo</a>
-        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
-        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
-        <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
     ${messages}
@@ -2136,7 +2125,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Administration", content, { wide: true }));
+  res.end(renderPage("Administration", content, { wide: true, side: { who: "admin", active: "redirects" } }));
 }
 
 function renderSiteSettings(res, flash, siteConfig, redirects = []) {
@@ -2241,17 +2230,6 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <h1>Personnalisation de la page publique</h1>
         <p>Ces reglages controlent le titre, le texte et le logo affiches sur la page d'accueil publique de vos liens.</p>
       </div>
-      <div class="topbar-actions">
-        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
-        <a href="/admin" class="link-button secondary">Redirections</a>
-        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
-        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
-        <a href="/admin/planning" class="link-button secondary">Planning</a>
-        <a href="/modo" class="link-button secondary">Espace modo</a>
-        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
-        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
-        <a href="/logout" class="link-button">Deconnexion</a>
-      </div>
     </header>
     ${messages}
     <section class="card">
@@ -2287,7 +2265,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Personnalisation", content));
+  res.end(renderPage("Personnalisation", content, { side: { who: "admin", active: "site" } }));
 }
 
 function renderStats(res, redirects, flash, activeTab = "") {
@@ -2361,7 +2339,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
           return { label, content: renderTable(byGroup.get(key), label) };
         })
       ];
-      tableSection = renderCssTabs(tabs, "stats-tab", activeTab || "Tous");
+      tableSection = renderCssTabs(tabs, "stats-tab", activeTab || "Tous", { side: true });
     }
   }
 
@@ -2371,24 +2349,13 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <h1>Statistiques</h1>
         <p>Nombre de fois ou chaque lien a effectivement redirige un visiteur, depuis la derniere remise a zero.</p>
       </div>
-      <div class="topbar-actions">
-        <a href="/" class="link-button secondary" target="_blank" rel="noreferrer">Apercu</a>
-        <a href="/admin" class="link-button secondary">Redirections</a>
-        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
-        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
-        <a href="/admin/planning" class="link-button secondary">Planning</a>
-        <a href="/modo" class="link-button secondary">Espace modo</a>
-        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
-        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
-        <a href="/logout" class="link-button">Deconnexion</a>
-      </div>
     </header>
     ${messages}
     <section class="card">${tableSection}</section>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Statistiques", content, { wide: true }));
+  res.end(renderPage("Statistiques", content, { wide: true, side: { who: "admin", active: "stats" } }));
 }
 
 function renderMonitoring(res, config, flash) {
@@ -2486,16 +2453,6 @@ function renderMonitoring(res, config, flash) {
         <h1>Monitoring</h1>
         <p>Surveille si vos bots Discord sont en ligne, via le widget public de leur serveur (aucun token requis). Verification automatique toutes les minutes.</p>
       </div>
-      <div class="topbar-actions">
-        <a href="/admin" class="link-button secondary">Redirections</a>
-        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
-        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
-        <a href="/admin/planning" class="link-button secondary">Planning</a>
-        <a href="/modo" class="link-button secondary">Espace modo</a>
-        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
-        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
-        <a href="/logout" class="link-button">Deconnexion</a>
-      </div>
     </header>
     ${messages}
     <section class="card">
@@ -2590,7 +2547,7 @@ function renderMonitoring(res, config, flash) {
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Monitoring", content, { wide: true }));
+  res.end(renderPage("Monitoring", content, { wide: true, side: { who: "admin", active: "monitoring" } }));
 }
 
 /* ------------------------------ Planning ---------------------------------- */
@@ -3311,7 +3268,7 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
           <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
         </div>
-        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : viewer.r === "streamer" ? `<a class="link-button secondary" href="/admin/equipe">Equipe</a><a class="link-button secondary" href="/admin/tickets">Groupes locaux</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
+
       </section>
       ${modoNav("planning", live, rights)}
       ${renderMessages(flash)}
@@ -3325,7 +3282,7 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
     </main>
   `;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Espace modo", content, { wide: true }));
+  res.end(renderPage("Espace modo", content, { wide: true, side: modoSide(viewer, live, rights, "modo") }));
 }
 
 const MODO_ALL_KINDS = {
@@ -3421,10 +3378,24 @@ const MODO_CSS = `
   @media (max-width: 640px) { .mt-msg { max-width: 100%; } }
 `;
 
+// Menu lateral de l'espace modo selon la personne connectee.
+function modoSide(viewer, live, rights, active) {
+  const tickets = Array.isArray(live?.tickets) ? live.tickets : [];
+  return {
+    who: viewer.admin ? "admin" : viewer.r === "streamer" ? "streamer" : "modo",
+    active,
+    unread: tickets.filter((t) => t.status === "open" && t.unread).length,
+    canTickets: rights.tickets === "view" || rights.tickets === "edit",
+    logout: viewer.admin || viewer.password ? "/logout" : "/modo/logout"
+  };
+}
+
 function modoNav(active, live, rights) {
   const tickets = Array.isArray(live?.tickets) ? live.tickets : [];
   const unread = tickets.filter((t) => t.status === "open" && t.unread).length;
   const canTickets = rights.tickets === "view" || rights.tickets === "edit";
+  return "";
+  // eslint-disable-next-line no-unreachable
   return `<nav class="md-nav">
     <a href="/modo" class="${active === "planning" ? "on" : ""}">\ud83d\udcc5 Planning</a>
     ${canTickets ? `<a href="/modo/tickets" class="${active === "tickets" ? "on" : ""}">\ud83c\udfab Tickets${unread ? `<span class="md-count">${unread}</span>` : ""}</a>` : ""}
@@ -3447,7 +3418,7 @@ function modoShell(doc, viewer, inner) {
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
           <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
         </div>
-        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : viewer.r === "streamer" ? `<a class="link-button secondary" href="/admin/equipe">Equipe</a><a class="link-button secondary" href="/admin/tickets">Groupes locaux</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
+
       </section>
       ${inner}
     </main>`;
@@ -3715,7 +3686,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
       })();
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Tickets", modoShell(doc, viewer, inner), { wide: true }));
+  res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Tickets", modoShell(doc, viewer, inner), { wide: true, side: modoSide(viewer, live, rights, closedTab ? "tickets-closed" : "tickets") }));
 }
 
 /* ------------------------- Groupes locaux (visibilite des tickets) ------------------------- */
@@ -3805,7 +3776,7 @@ function teamAccess(req, doc) {
   return { canView, canEdit };
 }
 
-function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true) {
+function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true, who = "admin") {
   const groups = readModoGroups();
   const users = readModoUsers();
   const reasons = [...new Set([...(Array.isArray(meta.reasons) ? meta.reasons : []), ...groups.flatMap((g) => g.reasons)])];
@@ -3878,7 +3849,7 @@ function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true) {
       <section class="card">
         <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
           <h1 style="margin:0;">Tickets · groupes locaux</h1>
-          <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/admin/equipe" class="link-button secondary">Equipe</a><a href="/modo/tickets" class="link-button secondary">Voir les tickets</a></span>
+          
         </div>
         <p class="ag-hint" style="margin-top:8px;">Une categorie cochee dans un groupe est reservee a ses membres. Les categories qu'aucun groupe ne reserve restent visibles par tous les modos, sans groupe. Le streamer et les admins voient tout. Les droits « Tickets » de rooky-tv (voir / repondre) s'appliquent en plus.</p>
         ${renderMessages(flash)}
@@ -3896,12 +3867,12 @@ function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true) {
       </fieldset>
     </main>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Tickets", content, { wide: true }));
+  res.end(renderPage("Groupes locaux", content, { wide: true, side: { who, active: "groups", logout: who === "admin" ? "/logout" : "/modo/logout" } }));
 }
 
 // Onglet Equipe : cartes (total, vus aujourd'hui, par role d'acces), recherche et tableau des membres
 // avec leurs groupes locaux (ajout de plusieurs / retrait). Les roles viennent toujours de rooky-tv.
-function renderAdminTeam(res, doc, team, flash, canEdit = true) {
+function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
   const groups = readModoGroups();
   const seen = new Map(readModoUsers().map((u) => [u.id, u]));
   const roles = Array.isArray(team.roles) ? team.roles : [];
@@ -4018,7 +3989,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true) {
     <main class="tm">
       <div class="tm-top">
         <h1 style="margin:0;">Equipe${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
-        <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/admin/tickets" class="link-button secondary">Groupes locaux</a></span>
+
       </div>
       ${renderMessages(flash)}
       ${team.error ? `<div class="message error">rooky-tv : ${escapeHtml(team.error)}</div>` : ""}
@@ -4045,7 +4016,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true) {
       })();
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Equipe", content, { wide: true }));
+  res.end(renderPage("Equipe", content, { wide: true, side: { who, active: "team", logout: who === "admin" ? "/logout" : "/modo/logout" } }));
 }
 
 /* ------------------------- Image du programme (Discord) ------------------------- */
@@ -4569,13 +4540,6 @@ function renderPlanning(res, doc, flash, origin) {
         <h1>Planning</h1>
         <p>Affiche le programme du stream de rooky-tv sur la page publique <a href="/planning" target="_blank" rel="noreferrer">/planning</a>.</p>
       </div>
-      <div class="topbar-actions">
-        <a href="/admin" class="link-button secondary">Redirections</a>
-        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
-        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
-        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
-        <a href="/logout" class="link-button">Deconnexion</a>
-      </div>
     </header>
     ${messages}
     <section class="card">
@@ -4692,7 +4656,7 @@ function renderPlanning(res, doc, flash, origin) {
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Planning", content));
+  res.end(renderPage("Planning", content, { side: { who: "admin", active: "admin-planning" } }));
 }
 
 const ICON_LINK =
@@ -4962,7 +4926,8 @@ function renderLinkRow(link) {
   `;
 }
 
-function renderCssTabs(tabs, idPrefix, activeLabel = "") {
+// side : onglets en colonne a gauche du contenu (pages d'administration) ; sinon en ligne (accueil).
+function renderCssTabs(tabs, idPrefix, activeLabel = "", { side = false } = {}) {
   if (tabs.length <= 1) {
     return tabs.length ? tabs[0].content : "";
   }
@@ -4994,7 +4959,7 @@ function renderCssTabs(tabs, idPrefix, activeLabel = "") {
     .join("");
 
   return `
-    <div class="tabs">
+    <div class="tabs${side ? " tabs-side" : ""}">
       ${inputs}
       <div class="tab-labels">${labels}</div>
       <div class="tab-panels">${panels}</div>
@@ -5082,7 +5047,60 @@ function renderMessages(flash) {
   return parts.join("");
 }
 
-function renderPage(title, content, { wide = false } = {}) {
+// Menu lateral selon la personne connectee : side = { who: "admin" | "streamer" | "modo", active,
+// unread, canTickets, logout }. Un element avec sous-menu ouvre un panneau juste a cote.
+function renderSideNav(side) {
+  const config = getSiteConfig();
+  const a = side.active || "";
+  const tickets = side.canTickets !== false;
+  const unread = Number(side.unread) || 0;
+  const link = (key, href, ico, label, extra = "") =>
+    `<div class="side-item"><a class="side-link${a === key ? " on" : ""}" href="${href}"${extra}><span class="side-ico">${ico}</span>${label}</a></div>`;
+  const sub = (key, href, ico, label, items, badge = 0, ownOnly = false) =>
+    `<div class="side-item has-sub"><a class="side-link${a === key || (!ownOnly && items.some((i) => i.key === a)) ? " on" : ""}" href="${href}"><span class="side-ico">${ico}</span>${label}${
+      badge ? `<span class="side-count">${badge}</span>` : ""
+    }<span class="side-chev">\u203a</span></a>
+      <div class="side-fly" role="menu"><div class="side-fly-title">${label}</div>${items
+        .map((i) => `<a role="menuitem" href="${i.href}" class="${i.key === a ? "on" : ""}">${i.label}</a>`)
+        .join("")}</div></div>`;
+  const ticketItems = [
+    { key: "tickets", href: "/modo/tickets", label: "Ouverts" },
+    { key: "tickets-closed", href: "/modo/tickets?vue=fermes", label: "Fermes" },
+    ...(side.who !== "modo" ? [{ key: "groups", href: "/admin/tickets", label: "Groupes locaux" }] : [])
+  ];
+  const parts = [];
+  if (side.who === "admin") {
+    parts.push(`<div class="side-label">Site</div>`);
+    parts.push(link("redirects", "/admin", "\ud83d\udd17", "Redirections"));
+    parts.push(link("preview", "/", "\ud83d\udc41\ufe0f", "Apercu", ` target="_blank" rel="noreferrer"`));
+    parts.push(link("stats", "/admin/stats", "\ud83d\udcca", "Statistiques"));
+    parts.push(link("site", "/admin/site", "\ud83c\udfa8", "Personnalisation"));
+    parts.push(link("monitoring", "/admin/monitoring", "\ud83d\udce1", "Monitoring"));
+    parts.push(link("admin-planning", "/admin/planning", "\ud83d\uddd3\ufe0f", "Planning"));
+    parts.push(`<div class="side-sep"></div><div class="side-label">Equipe</div>`);
+  }
+  if (side.who === "admin" || side.who === "streamer") {
+    parts.push(sub("modo", "/modo", "\ud83d\udee1\ufe0f", "Espace modo", [
+      { key: "modo", href: "/modo", label: "Planning" },
+      ...(tickets ? [{ key: "tickets", href: "/modo/tickets", label: "Tickets" }] : [])
+    ], 0, true));
+    if (tickets) parts.push(sub("tickets", "/modo/tickets", "\ud83c\udfab", "Tickets", ticketItems, unread));
+    parts.push(sub("team", "/admin/equipe", "\ud83d\udc65", "Equipe", [
+      { key: "team", href: "/admin/equipe", label: "Membres" },
+      { key: "groups", href: "/admin/tickets", label: "Groupes locaux" }
+    ]));
+  } else {
+    parts.push(link("modo", "/modo", "\ud83d\udcc5", "Planning"));
+    if (tickets) parts.push(sub("tickets", "/modo/tickets", "\ud83c\udfab", "Tickets", ticketItems, unread));
+  }
+  return `<aside class="side" aria-label="Menu">
+    <a class="side-brand" href="${side.who === "admin" ? "/admin" : "/modo"}">${config.logoUrl ? `<img src="${escapeHtml(config.logoUrl)}" alt="" />` : ""}<span>${escapeHtml(config.title)}</span></a>
+    ${parts.join("")}
+    <div class="side-foot"><div class="side-sep"></div>${link("logout", side.logout || "/logout", "\ud83d\udeaa", "Deconnexion")}</div>
+  </aside>`;
+}
+
+function renderPage(title, content, { wide = false, side = null } = {}) {
   const faviconUrl = getSiteConfig().faviconUrl;
   return `<!doctype html>
   <html lang="fr">
@@ -5120,6 +5138,39 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .shell-wide {
           width: min(1400px, calc(100% - 48px));
+        }
+        /* Menu lateral (administration, espace modo) ; sous-menu en panneau juste a cote. */
+        .app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+        .app-main { width: auto; margin: 28px 28px 40px; min-width: 0; }
+        .side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 4px; padding: 18px 12px; border-right: 1px solid var(--line); background: rgba(12, 14, 20, 0.92); z-index: 20; }
+        .side-brand { display: flex; gap: 10px; align-items: center; padding: 4px 10px 16px; font-weight: 800; font-size: 1.05rem; color: var(--ink); text-decoration: none; }
+        .side-brand img { width: 30px; height: 30px; border-radius: 8px; object-fit: cover; }
+        .side-sep { height: 1px; margin: 8px 10px; background: var(--line); }
+        .side-label { padding: 6px 10px 2px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+        .side-item { position: relative; }
+        .side-link { display: flex; gap: 10px; align-items: center; padding: 9px 10px; border-radius: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 15px; border-left: 3px solid transparent; }
+        .side-link:hover, .side-item:focus-within > .side-link { background: rgba(255, 255, 255, 0.05); }
+        .side-link.on { background: rgba(109, 94, 247, 0.18); color: #b9b0ff; border-left-color: var(--accent); }
+        .side-ico { width: 20px; text-align: center; flex: 0 0 auto; }
+        .side-chev { margin-left: auto; color: var(--muted); font-size: 13px; }
+        .side-count { margin-left: auto; min-width: 20px; padding: 0 6px; border-radius: 999px; background: #ff6b87; color: #fff; font-size: 12px; text-align: center; }
+        .side-count + .side-chev { margin-left: 6px; }
+        .side-fly { display: none; position: absolute; left: calc(100% + 10px); top: -6px; min-width: 220px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: #151821; box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5); }
+        .side-fly::before { content: ""; position: absolute; left: -12px; top: 0; width: 12px; height: 100%; }
+        .side-item.has-sub:hover > .side-fly, .side-item.has-sub:focus-within > .side-fly { display: grid; gap: 2px; }
+        .side-fly-title { padding: 4px 10px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--line); color: #b9b0ff; font-weight: 700; font-size: 14px; }
+        .side-fly a { padding: 8px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; font-size: 14px; border-left: 2px solid var(--line); margin-left: 6px; }
+        .side-fly a:hover { background: rgba(255, 255, 255, 0.06); }
+        .side-fly a.on { background: rgba(109, 94, 247, 0.18); border-left-color: var(--accent); }
+        .side-foot { margin-top: auto; }
+        @media (max-width: 860px) {
+          .app { grid-template-columns: 1fr; }
+          .side { position: sticky; height: auto; flex-direction: row; align-items: center; overflow-x: auto; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); gap: 2px; }
+          .side-brand { padding: 0 8px 0 0; }
+          .side-brand span, .side-label, .side-sep, .side-chev, .side-fly { display: none !important; }
+          .side-link { white-space: nowrap; padding: 8px 10px; border-left: 0; }
+          .side-foot { margin-top: 0; }
+          .app-main { margin: 18px 16px 32px; }
         }
         .card {
           background: rgba(22, 25, 34, 0.9);
@@ -5408,6 +5459,16 @@ function renderPage(title, content, { wide = false } = {}) {
         }
         .tab-panel {
           display: none;
+        }
+        /* Onglets lateraux (administration) : colonne a gauche, contenu a droite. */
+        .tabs-side { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 8px; }
+        .tabs-side .tab-labels { flex-direction: column; flex-wrap: nowrap; justify-content: flex-start; gap: 4px; margin: 0; position: sticky; top: 16px; padding: 8px; border: 1px solid var(--line); border-radius: 14px; background: rgba(12, 14, 20, 0.6); }
+        .tabs-side .tab-label { border-radius: 10px; padding: 9px 12px; font-size: 14px; }
+        .tabs-side .tab-panels { min-width: 0; }
+        @media (max-width: 760px) {
+          .tabs-side { grid-template-columns: 1fr; }
+          .tabs-side .tab-labels { flex-direction: row; overflow-x: auto; position: static; }
+          .tabs-side .tab-label { white-space: nowrap; }
         }
         h1, h2, p {
           margin-top: 0;
@@ -5732,7 +5793,11 @@ function renderPage(title, content, { wide = false } = {}) {
       </style>
     </head>
     <body>
-      <main class="shell${wide ? " shell-wide" : ""}">${content}</main>
+      ${
+        side
+          ? `<div class="app">${renderSideNav(side)}<main class="shell shell-wide app-main">${content}</main></div>`
+          : `<main class="shell${wide ? " shell-wide" : ""}">${content}</main>`
+      }
     </body>
   </html>`;
 }
