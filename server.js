@@ -2537,7 +2537,9 @@ function renderPlanningItem(item) {
 // la page publique et l'image Discord.
 function planningWeek(program) {
   const today = planningToday();
-  const monday = planningAddDays(today, -((planningDayParts(today).weekday + 6) % 7));
+  // Lundi -> dimanche ; le week-end, la semaine qui arrive : samedi -> vendredi.
+  const weekday = planningDayParts(today).weekday;
+  const monday = weekday === 6 ? today : weekday === 0 ? planningAddDays(today, -1) : planningAddDays(today, -((weekday + 6) % 7));
   const lastDay = planningAddDays(monday, 6);
   const vacation = program?.vacation || null;
   const streamsByDay = new Map();
