@@ -36,7 +36,7 @@ Important pour le wildcard `*.monsite.com`: cote DNS et Dokploy, un domaine wild
 
 ## Planning (page publique)
 
-La page publique `/planning` affiche la semaine de streams de la chaine (aujourd'hui et les 6 jours suivants) avec le programme de chaque stream, envoyes par rooky-tv. Rien ne se saisit sur ce site et rien n'est publie sur Discord.
+La page publique `/planning` affiche la grille de la semaine (lundi a dimanche) : streams termines les jours passes (lus par rooky-tv dans l'agenda Google de la chaine, sans lien Google ici), puis le planning a venir avec le programme de chaque stream. Un bouton "Programme de la semaine" y mene depuis la page d'accueil des que la chaine du site est renseignee. Rien ne se saisit sur ce site et rien n'est publie sur Discord.
 
 1. Dans `/admin/planning`, indiquez la chaine Twitch du site et enregistrez : un code de liaison s'affiche.
 2. Sur rooky-tv (Programme > Programme sur Discord > Sites redirection), collez ce code puis "Relier".

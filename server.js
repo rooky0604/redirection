@@ -2308,10 +2308,13 @@ function cleanPlanningProgram(body) {
     scheduleText: str(body.scheduleText, 1000),
     imageUrl: httpsUrl(body.imageUrl),
     vacation: body.vacation && date(body.vacation.until) ? { until: body.vacation.until, message: str(body.vacation.message, 500) } : null,
-    days: list(body.days, 21)
+    // history : rooky-tv a pu lire les streams passes (agenda de la chaine) ; sinon jours passes muets.
+    history: body.history === true,
+    days: list(body.days, 28)
       .map((day) => ({
         date: date(day?.date),
         time: time(day?.time),
+        past: day?.past === true,
         cancelled: day?.cancelled === true,
         postponed: day?.postponed === true,
         description: str(day?.description, 1500),
@@ -2449,11 +2452,18 @@ function renderPublicPlanning(res, doc) {
     ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })
     : "";
 
-  // Seulement les jours qui ont un stream, sur les 7 prochains jours (3 streams = 3 colonnes).
-  const lastDay = planningAddDays(today, 6);
+  // Grille de la semaine, du lundi au dimanche, toujours affichee pour que la page ne soit jamais vide :
+  // jours passes = streams termines (agenda de la chaine, via rooky-tv), a venir = planning.
+  const monday = planningAddDays(today, -((planningDayParts(today).weekday + 6) % 7));
+  const lastDay = planningAddDays(monday, 6);
+  const vacation = program?.vacation;
   const streamsByDay = new Map();
   for (const stream of program?.days || []) {
-    if (stream.date < today || stream.date > lastDay) {
+    if (stream.date < monday || stream.date > lastDay) {
+      continue;
+    }
+    // Jour passe : seulement les streams termines ; aujourd'hui et apres : seulement le planning.
+    if ((stream.date < today) !== stream.past) {
       continue;
     }
     if (!streamsByDay.has(stream.date)) {
@@ -2461,18 +2471,26 @@ function renderPublicPlanning(res, doc) {
     }
     streamsByDay.get(stream.date).push(stream);
   }
-  const days = [...streamsByDay.keys()].sort();
+  const days = Array.from({ length: 7 }, (_, i) => planningAddDays(monday, i));
+  const emptyText = (date) =>
+    date < today
+      ? program?.history ? "Pas de stream" : "—"
+      : !program ? "Programme bientot disponible" : vacation ? "En vacances" : "Pas de stream";
 
   const columns = days
     .map((date) => {
       const { name, short } = planningDayParts(date);
       const streams = streamsByDay.get(date) || [];
       const isToday = date === today;
-      const body = streams
+      const isPast = date < today;
+      const body = !streams.length
+        ? `<p class="pw-off">${emptyText(date)}</p>`
+        : streams
             .map((stream) => {
               const badges = [
                 isToday && program?.live === true && !stream.cancelled ? `<span class="pw-badge pw-live">\ud83d\udd34 En direct</span>` : "",
                 stream.cancelled ? `<span class="pw-badge pw-cancel">Annule</span>` : "",
+                stream.past && !stream.cancelled ? `<span class="pw-badge">✔ Termine</span>` : "",
                 stream.postponed ? `<span class="pw-badge">Reporte</span>` : ""
               ].join("");
               return `
@@ -2485,13 +2503,15 @@ function renderPublicPlanning(res, doc) {
                   ? ""
                   : stream.items.length
                     ? `<ul class="pw-items">${stream.items.map(renderPlanningItem).join("")}</ul>`
-                    : `<p class="pw-empty">Programme bientot annonce</p>`
+                    : stream.past
+                      ? ""
+                      : `<p class="pw-empty">Programme bientot annonce</p>`
               }
             </div>`;
             })
             .join("");
       return `
-      <section class="pw-day${isToday ? " is-today" : ""}">
+      <section class="pw-day${isToday ? " is-today" : ""}${isPast ? " is-past" : ""}${streams.length ? " has-stream" : ""}">
         <header class="pw-day-head">
           <span class="pw-day-name">${isToday ? "Aujourd'hui" : name}</span>
           <span class="pw-day-date">${escapeHtml(short)}</span>
@@ -2501,7 +2521,6 @@ function renderPublicPlanning(res, doc) {
     })
     .join("");
 
-  const vacation = program?.vacation;
   const status =
     program?.live === true
       ? `<span class="pw-badge pw-live">\ud83d\udd34 En direct</span>`
@@ -2523,11 +2542,16 @@ function renderPublicPlanning(res, doc) {
       .pw-hero-status { display: flex; gap: 8px; align-items: center; margin: 10px 0 0; flex-wrap: wrap; }
       .pw-vacation { background: rgba(254, 231, 92, 0.1); border: 1px solid rgba(254, 231, 92, 0.35); border-radius: 16px; padding: 16px 20px; }
       .pw-vacation strong { color: #fee75c; }
-      .pw-week { display: grid; grid-template-columns: repeat(var(--pw-cols, 7), minmax(0, 1fr)); gap: 12px; align-items: start; }
+      .pw-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
       .pw-day {
-        background: rgba(22, 25, 34, 0.95); border: 1px solid rgba(69, 224, 210, 0.35); border-radius: 16px; padding: 14px;
-        display: grid; gap: 10px; align-content: start;
+        background: rgba(22, 25, 34, 0.55); border: 1px dashed var(--line); border-radius: 16px; padding: 12px;
+        display: grid; gap: 10px; align-content: start; min-height: 170px;
       }
+      .pw-day.has-stream { background: rgba(22, 25, 34, 0.95); border: 1px solid rgba(69, 224, 210, 0.4); }
+      .pw-day:not(.has-stream) .pw-day-name { color: var(--muted); }
+      .pw-day.is-past { opacity: 0.6; }
+      .pw-day.is-past.has-stream { border-color: var(--line); }
+      .pw-day.is-past .pw-time { color: var(--muted); }
       .pw-day.is-today { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
       .pw-day-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
       .pw-day-name { font-weight: 700; }
@@ -2553,9 +2577,12 @@ function renderPublicPlanning(res, doc) {
       .pw-current .pw-subject { color: #ff6b87; }
       .pw-foot { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
       .pw-foot a { color: var(--muted); }
-      @media (max-width: 1100px) { .pw-week { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); } }
+      @media (max-width: 1100px) { .pw-week { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
       @media (max-width: 760px) {
         .pw-week { grid-template-columns: 1fr; }
+        .pw-day { min-height: 0; }
+        .pw-day:not(.has-stream) { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; }
+        .pw-day:not(.has-stream) .pw-day-head { gap: 10px; justify-content: flex-start; }
         .pw-hero { flex-direction: column-reverse; align-items: flex-start; }
       }
     </style>
@@ -2578,15 +2605,7 @@ function renderPublicPlanning(res, doc) {
             }</section>`
           : ""
       }
-      ${
-        !program
-          ? `<section class="pw-vacation">Le programme n'est pas encore disponible.</section>`
-          : days.length
-            ? `<div class="pw-week" style="--pw-cols:${days.length}">${columns}</div>`
-            : vacation
-              ? ""
-              : `<section class="pw-vacation">Aucun stream prevu dans les 7 prochains jours.</section>`
-      }
+      <div class="pw-week">${columns}</div>
       <footer class="pw-foot">
         <span>${updated ? `Mis a jour le ${escapeHtml(updated)}` : ""}</span>
         <a href="/">Retour a ${escapeHtml(siteConfig.title)}</a>
@@ -3048,6 +3067,12 @@ function renderHome(res, redirects) {
       <span class="hero-badge">${escapeHtml(siteConfig.badge)}</span>
       <h1>${escapeHtml(siteConfig.title)}</h1>
       <p>${escapeHtml(siteConfig.tagline)}</p>
+      ${
+        // Bouton vers la page publique du programme, des que le site a une chaine (page Planning).
+        planningSiteChannel()
+          ? `<a href="/planning" class="link-button" style="position:relative;display:flex;width:100%;margin:18px 0 6px;padding:14px 18px;font-weight:700;gap:8px;">📅 Programme de la semaine</a>`
+          : ""
+      }
       ${linksList}
     </section>
     <footer class="site-footer">
