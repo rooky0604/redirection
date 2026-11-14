@@ -59,6 +59,7 @@ const requestListener = async (req, res) => {
 
     if (pathname === "/logout") {
       clearCookie(res, "session");
+      clearCookie(res, "modo");
       redirect(res, "/login");
       return;
     }
@@ -92,7 +93,7 @@ const requestListener = async (req, res) => {
         redirect(res, "/login?error=" + encodeURIComponent("Connexion modo refusee ou expiree : reclique sur Acces modo."));
         return;
       }
-      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
+      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
         httpOnly: true,
         secure: useSecureCookies,
         maxAge: Math.round(MODO_SESSION_MS / 1000)
@@ -109,9 +110,13 @@ const requestListener = async (req, res) => {
 
     if (pathname === "/modo" || pathname.startsWith("/modo/")) {
       const doc = readPlanning(planningSiteChannel());
-      const viewer = isAuthenticated(req)
-        ? { n: "Admin", r: "admin", admin: true, k: { stream: "edit", montage: "edit", post: "edit", autre: "edit", tickets: "edit" } }
-        : readModoSession(req, doc.channel);
+      const session = readModoSession(req, doc.channel);
+      const fullRights = { stream: "edit", montage: "edit", post: "edit", autre: "edit", tickets: "edit" };
+      const viewer = session?.a === true
+        ? { ...session, admin: true, k: fullRights }
+        : isAuthenticated(req)
+          ? { n: "Admin", r: "admin", admin: true, password: true, k: fullRights }
+          : session;
       if (!viewer) {
         redirect(res, "/login");
         return;
@@ -136,6 +141,18 @@ const requestListener = async (req, res) => {
         return;
       }
 
+      const suggestionMatch = /^\/modo\/suggestions\/(\d{1,12})$/.exec(pathname);
+      if (suggestionMatch && method === "POST") {
+        const form = await parseForm(req);
+        try {
+          const result = await modoApi(doc, viewer, "suggestion.decide", { id: Number(suggestionMatch[1]), decision: form.decision === "accept" ? "accept" : "refuse" });
+          redirect(res, `/modo?success=${encodeURIComponent(result.text || "Decision enregistree")}`);
+        } catch (error) {
+          redirect(res, `/modo?error=${encodeURIComponent(error.message)}`);
+        }
+        return;
+      }
+
       if (pathname === "/modo/tickets" && method === "GET") {
         const live = await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message }));
         return renderModoTickets(res, doc, viewer, live, flash);
@@ -153,9 +170,23 @@ const requestListener = async (req, res) => {
 
       if (ticketMatch && method === "POST") {
         const id = Number(ticketMatch[1]);
-        const form = await parseForm(req);
+        const params = await parseFormParams(req);
+        const form = Object.fromEntries(params.entries());
         const back = `/modo/tickets/${id}`;
         try {
+          if (form.action === "propose") {
+            // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
+            const streams = params.getAll("stream").map((key) => ({ key, end: params.get(`end_${key}`) || "" }));
+            const custom = form.custom_date && form.custom_time ? { date: form.custom_date, time: form.custom_time, end: form.custom_end || "" } : null;
+            await modoApi(doc, viewer, "ticket.propose", { id, streams, custom });
+            redirect(res, `${back}?success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
+            return;
+          }
+          if (form.action === "offer_accept" || form.action === "offer_refuse") {
+            await modoApi(doc, viewer, "ticket.offer.decide", { id, decision: form.action === "offer_accept" ? "accept" : "refuse" });
+            redirect(res, `${back}?success=${encodeURIComponent(form.action === "offer_accept" ? "Creneau valide : programme modifie, l'invite est prevenu en MP" : "Creneau refuse, l'invite est prevenu")}`);
+            return;
+          }
           if (form.action === "reply") {
             await modoApi(doc, viewer, "ticket.reply", { id, content: form.content });
             redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en MP")}`);
@@ -1294,12 +1325,12 @@ function resolveRedirectTarget(target, redirects, visited = new Set()) {
 function isAuthenticated(req) {
   const cookies = parseCookies(req.headers.cookie || "");
   const signed = cookies.session;
-  if (!signed) {
-    return false;
+  const token = signed ? verifyToken(signed) : "";
+  if (token && sessions.has(token)) {
+    return true;
   }
-
-  const token = verifyToken(signed);
-  return Boolean(token && sessions.has(token));
+  // Owner / admin de rooky-tv connecte par Discord (« Acces modo ») : administration aussi.
+  return readModoSession(req, planningSiteChannel())?.a === true;
 }
 
 function parseCookies(header) {
@@ -1324,12 +1355,18 @@ function setCookie(res, name, value, options = {}) {
   if (options.maxAge) {
     parts.push(`Max-Age=${options.maxAge}`);
   }
-  res.setHeader("Set-Cookie", parts.join("; "));
+  appendSetCookie(res, parts.join("; "));
 }
 
 function clearCookie(res, name) {
   const secureFlag = useSecureCookies ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `${name}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly${secureFlag}`);
+  appendSetCookie(res, `${name}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly${secureFlag}`);
+}
+
+// Ajoute un cookie sans effacer ceux deja poses dans la reponse (connexion + deconnexion).
+function appendSetCookie(res, value) {
+  const previous = res.getHeader("Set-Cookie");
+  res.setHeader("Set-Cookie", [...(Array.isArray(previous) ? previous : previous ? [String(previous)] : []), value]);
 }
 
 function signToken(token) {
@@ -1863,6 +1900,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
+        <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2099,6 +2137,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
+        <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2226,6 +2265,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
+        <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2337,6 +2377,7 @@ function renderMonitoring(res, config, flash) {
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
+        <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2531,6 +2572,9 @@ function cleanPlanningProgram(body) {
             cancelled: day?.cancelled === true,
             postponed: day?.postponed === true,
             quiet: day?.quiet === true,
+            // Cle du stream ("AAAA-MM-JJ" ou "AAAA-MM-JJ#2") et duree (min) : creneaux proposes dans les tickets.
+            key: /^\d{4}-\d{2}-\d{2}(#[2-9])?$/.test(String(day?.key || "")) ? day.key : "",
+            duration: Number.isFinite(Number(day?.duration)) && Number(day.duration) > 0 ? Math.min(1440, Math.round(Number(day.duration))) : null,
             description: str(day?.description, 1500),
             items: list(day?.items, 30).map(cleanItem).filter((item) => item.subject)
           }))
@@ -3062,9 +3106,12 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
         </section>`);
     }
     const end = planningAddDays(monday, 6);
+    // Numero de semaine ISO (celui des calendriers francais) : la semaine du jeudi.
+    const [ty, tm, td] = planningAddDays(monday, 3).split("-").map(Number);
+    const weekNumber = Math.floor((Date.UTC(ty, tm - 1, td) - Date.UTC(ty, 0, 1)) / 86400000 / 7) + 1;
     weeks.push(`
       <section class="md-week">
-        <h2>Semaine du ${escapeHtml(planningDayParts(monday).short)} au ${escapeHtml(planningDayParts(end).short)}</h2>
+        <h2>Semaine ${weekNumber} <span class="md-week-dates">· du ${escapeHtml(planningDayParts(monday).short)} au ${escapeHtml(planningDayParts(end).short)}</span></h2>
         <div class="md-days">${days.join("")}</div>
       </section>`);
     monday = planningAddDays(monday, 7);
@@ -3099,7 +3146,11 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
           suggestions.length
             ? `<ul class="md-sugg">${suggestions
                 .map(
-                  (sg) => `<li><span>${escapeHtml(MODO_ALL_KINDS[sg.kind] || sg.kind)} <strong>${escapeHtml(sg.title)}</strong><small>${escapeHtml(modoDateTime(sg.dueAt))} · par ${escapeHtml(sg.author || "?")}</small></span><span class="md-tag${sg.status === "refused" ? " bad" : sg.status === "accepted" ? " ok" : ""}">${suggestionStatus[sg.status] || sg.status}</span></li>`
+                  (sg) => `<li><span>${escapeHtml(MODO_ALL_KINDS[sg.kind] || sg.kind)} <strong>${escapeHtml(sg.title)}</strong><small>${escapeHtml(modoDateTime(sg.dueAt))} · par ${escapeHtml(sg.author || "?")}</small>${sg.notes ? `<small>${escapeHtml(sg.notes)}</small>` : ""}</span>${
+                    live.canDecide && sg.status === "pending"
+                      ? `<form method="post" action="/modo/suggestions/${Number(sg.id)}" class="md-decide"><button type="submit" name="decision" value="accept">Ajouter</button><button type="submit" name="decision" value="refuse" class="secondary">Refuser</button></form>`
+                      : `<span class="md-tag${sg.status === "refused" ? " bad" : sg.status === "accepted" ? " ok" : ""}">${suggestionStatus[sg.status] || sg.status}</span>`
+                  }</li>`
                 )
                 .join("")}</ul>`
             : `<p class="md-empty">Aucune suggestion en cours.</p>`
@@ -3114,7 +3165,8 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
       .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
       .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
       .md-hero p { margin: 0; color: var(--muted); }
-      .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--muted); }
+      .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--ink); }
+      .md-week-dates { color: var(--muted); font-weight: 400; }
       .md-days { display: grid; gap: 8px; }
       .md-day { background: rgba(22, 25, 34, 0.9); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 10px; }
       .md-day.is-today { border-color: var(--accent); }
@@ -3141,9 +3193,9 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
       <section class="md-hero">
         <div>
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
-          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.r === "admin" ? " (mot de passe)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
+          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
         </div>
-        <a class="link-button secondary" href="${viewer.r === "admin" ? "/admin" : "/modo/logout"}">${viewer.r === "admin" ? "Administration" : "Se deconnecter"}</a>
+        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
       </section>
       ${modoNav("planning", live, rights)}
       ${renderMessages(flash)}
@@ -3193,7 +3245,7 @@ async function modoApi(doc, viewer, action, extra = {}) {
     site: modoSiteId(doc.syncKey),
     ts: Date.now(),
     action,
-    user: viewer.admin ? { admin: true, name: "Admin du site" } : { id: viewer.u, name: viewer.n }
+    user: viewer.admin ? { admin: true, ...(viewer.u ? { id: viewer.u } : {}), name: viewer.password ? "Admin du site" : viewer.n || "Admin" } : { id: viewer.u, name: viewer.n }
   });
   const signature = crypto.createHmac("sha256", doc.syncKey).update(body).digest("base64url");
   const res = await fetch(endpoint, {
@@ -3224,6 +3276,12 @@ const MODO_CSS = `
   .md-sugg li { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 13px; }
   .md-sugg li > span:first-child { display: grid; min-width: 0; overflow-wrap: anywhere; }
   .md-sugg small { color: var(--muted); }
+  .md-decide { display: flex; gap: 6px; flex: 0 0 auto; }
+  .md-slot { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .md-slot > span:nth-child(2) { display: grid; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+  .md-slot small { color: var(--muted); }
+  .md-slot-end { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  .md-decide button { padding: 6px 10px; font-size: 13px; }
   .md-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); white-space: nowrap; }
   .md-tag.bad { background: rgba(240, 85, 95, 0.18); color: var(--danger); }
   .md-tag.ok { background: rgba(69, 224, 210, 0.15); color: #45e0d2; }
@@ -3269,9 +3327,9 @@ function modoShell(doc, viewer, inner) {
       <section class="md-hero">
         <div>
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
-          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.r === "admin" ? " (mot de passe)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
+          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
         </div>
-        <a class="link-button secondary" href="${viewer.r === "admin" ? "/admin" : "/modo/logout"}">${viewer.r === "admin" ? "Administration" : "Se deconnecter"}</a>
+        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
       </section>
       ${inner}
     </main>`;
@@ -3302,6 +3360,68 @@ function renderModoTickets(res, doc, viewer, live, flash) {
     <script>setTimeout(() => location.reload(), 30000);</script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Tickets", modoShell(doc, viewer, inner), { wide: true }));
+}
+
+// Creneaux proposes a l'invite (rooky-tv src/siteTickets.js) : etat, choix a valider, et formulaire
+// de proposition (streams des 7 prochains jours + autre date) pour le streamer et les admins.
+function renderSlotOffer(doc, ticket, canDecide) {
+  const offer = ticket.offer;
+  const statusText = {
+    proposed: "En attente du choix de l'invite (en MP)",
+    chosen: "L'invite a choisi : a valider",
+    accepted: "Valide",
+    refused: "Refuse"
+  };
+  const offerBox = offer
+    ? `<section class="md-form">
+        <h2>\ud83d\udcc5 Creneaux <span class="md-tag${offer.status === "chosen" ? " bad" : offer.status === "accepted" ? " ok" : ""}">${statusText[offer.status] || escapeHtml(offer.status)}</span></h2>
+        <ul class="md-sugg">${(offer.streams || [])
+          .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.start))} \u2192 ${escapeHtml(planningHour(st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
+          .join("")}</ul>
+        ${offer.choice ? `<p><strong>Choix de l'invite :</strong> ${escapeHtml(offer.choice.text)}${offer.choice.early ? " <span class=\"md-tag\">avant le debut</span>" : ""}</p>` : ""}
+        ${
+          canDecide && offer.status === "chosen"
+            ? `<form method="post" class="mt-actions"><button type="submit" name="action" value="offer_accept">Valider (modifie le programme)</button><button type="submit" name="action" value="offer_refuse" class="secondary">Refuser</button></form>
+               <p class="md-hint">Valider : l'heure du titre change pour ce stream${offer.choice?.early ? ", le debut du stream est avance" : ""} — sans le nom de l'invite. Il recoit la validation en MP.</p>`
+            : ""
+        }
+      </section>`
+    : "";
+  if (!canDecide || ticket.status !== "open" || offer?.status === "chosen") return offerBox;
+  const today = planningToday();
+  const last = planningAddDays(today, 6);
+  const streams = (doc.program?.modo?.streams || []).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
+  const endOf = (st) => {
+    const [h, m] = String(st.time || "21:00").split(":").map(Number);
+    const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
+    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  };
+  const form = `
+    <details class="md-form"${offer ? "" : " open"}>
+      <summary>\ud83d\udcc5 ${offer ? "Proposer d'autres creneaux" : "Proposer des creneaux"}</summary>
+      <form method="post" class="mt-reply" style="margin-top:8px;">
+        ${
+          streams.length
+            ? streams
+                .map(
+                  (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
+                    <span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.time))}</strong>
+                    <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
+                    <span class="md-slot-end">fin <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" /></span></label>`
+                )
+                .join("")
+            : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
+        }
+        <div class="md-form-row"><span class="md-hint" style="flex:0 0 100%;">Autre date (optionnel) :</span>
+          <input type="date" name="custom_date" min="${today}" />
+          <input type="time" name="custom_time" aria-label="Debut" />
+          <input type="time" name="custom_end" aria-label="Fin" />
+        </div>
+        <p class="md-hint">L'invite recoit ces streams en MP avec leurs titres (sans les titres d'organisation) et choisit le titre et son heure, jusqu'a 2 h avant le debut du stream. Tu valides ensuite ici.</p>
+        <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
+      </form>
+    </details>`;
+  return offerBox + form;
 }
 
 function renderModoTicket(res, doc, viewer, live, data, flash) {
@@ -3340,6 +3460,7 @@ function renderModoTicket(res, doc, viewer, live, data, flash) {
                 : ""
             }
           </section>
+          ${renderSlotOffer(doc, ticket, data.canDecide === true)}
           <div class="mt-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
           ${
             canReply
