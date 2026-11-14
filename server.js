@@ -2481,10 +2481,10 @@ function renderPublicPlanning(res, doc) {
               ${badges ? `<div class="pw-badges">${badges}</div>` : ""}
               ${stream.description ? `<p class="pw-desc">${planningMarkdown(stream.description)}</p>` : ""}
               ${
-                stream.items.length
-                  ? `<ul class="pw-items">${stream.items.map(renderPlanningItem).join("")}</ul>`
-                  : stream.cancelled
-                    ? ""
+                stream.cancelled
+                  ? ""
+                  : stream.items.length
+                    ? `<ul class="pw-items">${stream.items.map(renderPlanningItem).join("")}</ul>`
                     : `<p class="pw-empty">Programme bientot annonce</p>`
               }
             </div>`;
