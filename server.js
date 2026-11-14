@@ -2359,6 +2359,7 @@ function readPlanning(channel) {
     // Image du programme sur Discord (webhook) : l'adresse est un secret, jamais renvoyee au navigateur.
     imageWebhookUrl: parsed.imageWebhookUrl || "",
     imageWebhookName: parsed.imageWebhookName || "",
+    imagePostedName: parsed.imagePostedName || "",
     imageMessageId: parsed.imageMessageId || "",
     imageThreadId: parsed.imageThreadId || "",
     imageKey: parsed.imageKey || "",
@@ -3051,7 +3052,6 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   }
   const png = await renderPlanningImage(doc);
   const message = {
-    ...(doc.imageWebhookName ? { username: doc.imageWebhookName } : {}),
     embeds: [
       {
         title: "Programme de la semaine",
@@ -3097,6 +3097,34 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   return { messageId: data?.id ? String(data.id) : "", threadId, edited: false };
 }
 
+// Nom du webhook sur Discord : le renomme s'il porte un autre nom que celui choisi (vide = garder le
+// sien). Renvoie le nom actuel.
+async function planningEnsureWebhookName(url, wanted) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) }).catch(() => null);
+  if (!res || !res.ok) {
+    if (res && (res.status === 401 || res.status === 404)) {
+      throw new Error("Discord ne reconnait pas ce webhook : il a ete supprime ou son adresse est incomplete.");
+    }
+    throw new Error(`Discord ne repond pas pour ce webhook${res ? ` (${res.status})` : ""}.`);
+  }
+  const info = await res.json().catch(() => ({}));
+  const name = String(wanted || "").trim();
+  if (!name || info.name === name) {
+    return String(info.name || "");
+  }
+  const renamed = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+    signal: AbortSignal.timeout(10000)
+  }).catch(() => null);
+  if (!renamed || !renamed.ok) {
+    const data = renamed ? await renamed.json().catch(() => null) : null;
+    throw new Error(`Discord a refuse de renommer le webhook${renamed ? ` (${renamed.status}${data?.message ? ` : ${data.message}` : ""})` : ""}.`);
+  }
+  return name;
+}
+
 // Une publication a la fois. mode "auto" : seulement si l'image a change (programme recu, nouveau jour).
 let planningImageQueue = Promise.resolve();
 function queuePlanningImage(mode = "auto", options = {}) {
@@ -3109,14 +3137,23 @@ function queuePlanningImage(mode = "auto", options = {}) {
     if (!doc.imageWebhookUrl) {
       return null;
     }
-    const key = planningImageKey(doc);
-    if (mode === "auto" && doc.imageMessageId && doc.imageKey === key) {
-      return null;
-    }
     try {
-      const result = await publishPlanningImage(doc, { mode: mode === "new" ? "new" : "update", ping: options.ping });
+      // Nom du webhook remis a jour a chaque fois (renomme sur Discord si besoin).
+      const webhookName = await planningEnsureWebhookName(doc.imageWebhookUrl, doc.imageWebhookName);
+      // Un message garde le nom qu'il avait a sa publication : nom change -> nouveau message.
+      const renamed = !!doc.imageMessageId && webhookName !== doc.imagePostedName;
+      const key = planningImageKey(doc);
+      if (mode === "auto" && doc.imageMessageId && doc.imageKey === key && !renamed) {
+        if (webhookName !== doc.imageWebhookName) {
+          writePlanning({ ...readPlanning(channel), imageWebhookName: webhookName });
+        }
+        return null;
+      }
+      const result = await publishPlanningImage(doc, { mode: mode === "new" || renamed ? "new" : "update", ping: mode === "new" ? options.ping : "" });
       writePlanning({
         ...readPlanning(channel),
+        imageWebhookName: webhookName,
+        imagePostedName: webhookName,
         imageMessageId: result.messageId,
         imageThreadId: result.threadId,
         imageKey: key,
@@ -3220,8 +3257,8 @@ function renderPlanning(res, doc, flash, origin) {
           <input type="password" name="webhookUrl" autocomplete="off" placeholder="https://discord.com/api/webhooks/..." />
         </label>
         <label>
-          <span>Nom affiche (optionnel)</span>
-          <input type="text" name="webhookName" value="${escapeHtml(doc.imageWebhookName)}" maxlength="80" />
+          <span>Nom du webhook sur Discord (vide = garder son nom actuel)</span>
+          <input type="text" name="webhookName" value="${escapeHtml(doc.imageWebhookName)}" maxlength="80" placeholder="Nom du webhook" />
         </label>
         <label>
           <span>Mentionner quand tu cliques sur Republier (optionnel)</span>
