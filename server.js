@@ -97,7 +97,7 @@ const requestListener = async (req, res) => {
         return;
       }
       rememberModoUser(claims);
-      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
+      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, o: claims.o === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
         httpOnly: true,
         secure: useSecureCookies,
         maxAge: Math.round(MODO_SESSION_MS / 1000)
@@ -126,7 +126,8 @@ const requestListener = async (req, res) => {
         return;
       }
       const flash = getFlashMessage(url);
-      // Admin de rooky-tv : chaine des tickets choisie (cookie), verifiee par rooky-tv.
+      // Proprietaire de rooky-tv : chaine des tickets choisie (cookie). rooky-tv verifie que c'est lui
+      // (id Discord) et ignore ce choix pour tous les autres.
       if (viewer.admin && viewer.u) {
         const asked = url.searchParams.get("chaine");
         if (asked !== null) {
@@ -855,21 +856,62 @@ const requestListener = async (req, res) => {
       return;
     }
 
+    // Equipe : streamer + modos de la chaine (rooky-tv), leurs roles et leurs groupes locaux.
+    if (pathname === "/admin/equipe" && method === "GET") {
+      if (!teamAccess(req, readPlanning(planningSiteChannel())).canView) {
+        redirect(res, "/login");
+        return;
+      }
+      const doc = readPlanning(planningSiteChannel());
+      const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch((error) => ({ error: error.message }));
+      return renderAdminTeam(res, doc, team, getFlashMessage(url), teamAccess(req, doc).canEdit);
+    }
+
+    if (pathname === "/admin/equipe" && method === "POST") {
+      const access = teamAccess(req, readPlanning(planningSiteChannel()));
+      if (!access.canEdit) {
+        redirect(res, access.canView ? "/admin/equipe?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
+        return;
+      }
+      const params = await parseFormParams(req);
+      const member = String(params.get("member") || "");
+      const back = (key, message) => redirect(res, `/admin/equipe?${key}=${encodeURIComponent(message)}#m-${member}`);
+      if (!/^\d{5,25}$/.test(member)) return back("error", "Membre invalide.");
+      const groups = readModoGroups();
+      if (params.get("action") === "remove") {
+        const group = groups.find((g) => g.id === params.get("group"));
+        if (!group) return back("error", "Groupe introuvable.");
+        group.members = group.members.filter((id) => id !== member);
+        writeModoGroups(groups);
+        return back("success", `Retire du groupe « ${group.name} ».`);
+      }
+      // Groupes coches pour ce membre (ajout de plusieurs d'un coup, retrait des decoches).
+      const chosen = new Set(params.getAll("group"));
+      for (const group of groups) {
+        const has = group.members.includes(member);
+        if (chosen.has(group.id) && !has) group.members.push(member);
+        if (!chosen.has(group.id) && has) group.members = group.members.filter((id) => id !== member);
+      }
+      writeModoGroups(groups);
+      return back("success", "Groupes locaux enregistres.");
+    }
+
     // Tickets : groupes locaux (qui voit quelle categorie) et chaine des tickets pour les admins.
     if (pathname === "/admin/tickets" && method === "GET") {
-      if (!isAuthenticated(req)) {
+      if (!teamAccess(req, readPlanning(planningSiteChannel())).canView) {
         redirect(res, "/login");
         return;
       }
       const doc = readPlanning(planningSiteChannel());
       const viewer = adminViewer(req, doc);
       const meta = await modoApi(doc, viewer, "tickets.meta").catch((error) => ({ error: error.message }));
-      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url));
+      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url), teamAccess(req, doc).canEdit);
     }
 
     if (pathname === "/admin/tickets" && method === "POST") {
-      if (!isAuthenticated(req)) {
-        redirect(res, "/login");
+      const access = teamAccess(req, readPlanning(planningSiteChannel()));
+      if (!access.canEdit) {
+        redirect(res, access.canView ? "/admin/tickets?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
         return;
       }
       const params = await parseFormParams(req);
@@ -1968,6 +2010,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/admin/tickets" class="link-button secondary">Tickets</a>
+        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2206,6 +2249,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/admin/tickets" class="link-button secondary">Tickets</a>
+        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2335,6 +2379,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/admin/tickets" class="link-button secondary">Tickets</a>
+        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2448,6 +2493,7 @@ function renderMonitoring(res, config, flash) {
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
         <a href="/admin/tickets" class="link-button secondary">Tickets</a>
+        <a href="/admin/equipe" class="link-button secondary">Equipe</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -3265,7 +3311,7 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
           <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
         </div>
-        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
+        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : viewer.r === "streamer" ? `<a class="link-button secondary" href="/admin/equipe">Equipe</a><a class="link-button secondary" href="/admin/tickets">Groupes locaux</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
       </section>
       ${modoNav("planning", live, rights)}
       ${renderMessages(flash)}
@@ -3401,7 +3447,7 @@ function modoShell(doc, viewer, inner) {
           <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
           <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
         </div>
-        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
+        <span style="display:flex;gap:8px;flex-wrap:wrap;">${viewer.admin ? `<a class="link-button secondary" href="/admin">Administration</a>` : viewer.r === "streamer" ? `<a class="link-button secondary" href="/admin/equipe">Equipe</a><a class="link-button secondary" href="/admin/tickets">Groupes locaux</a>` : ""}<a class="link-button secondary" href="${viewer.password ? "/logout" : viewer.admin ? "/logout" : "/modo/logout"}">Se deconnecter</a></span>
       </section>
       ${inner}
     </main>`;
@@ -3739,10 +3785,27 @@ function filterModoLive(live, viewer, doc) {
 // Personne connectee a l'administration : admin par Discord (avec son id) ou par mot de passe.
 function adminViewer(req, doc) {
   const session = readModoSession(req, doc.channel);
-  return session?.a === true ? { ...session, admin: true } : { n: "Admin", r: "admin", admin: true, password: true };
+  if (session?.a === true) return { ...session, admin: true };
+  if (session?.r === "streamer" && !isPasswordSession(req)) return session;
+  return { n: "Admin", r: "admin", admin: true, password: true };
 }
 
-function renderAdminTickets(res, doc, viewer, meta, flash) {
+function isPasswordSession(req) {
+  const signed = parseCookies(req.headers.cookie || "").session;
+  const token = signed ? verifyToken(signed) : "";
+  return Boolean(token && sessions.has(token));
+}
+
+// Pages Equipe et Groupes locaux : visibles par les admins et le streamer ; seuls le streamer, le
+// proprietaire de rooky-tv et la connexion par mot de passe (proprietaire du site) les modifient.
+function teamAccess(req, doc) {
+  const session = readModoSession(req, doc.channel);
+  const canEdit = isPasswordSession(req) || session?.r === "streamer" || (session?.a === true && session?.o === true);
+  const canView = canEdit || isAuthenticated(req);
+  return { canView, canEdit };
+}
+
+function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true) {
   const groups = readModoGroups();
   const users = readModoUsers();
   const reasons = [...new Set([...(Array.isArray(meta.reasons) ? meta.reasons : []), ...groups.flatMap((g) => g.reasons)])];
@@ -3804,6 +3867,7 @@ function renderAdminTickets(res, doc, viewer, meta, flash) {
       .ag-check input { width: 18px; height: 18px; flex: 0 0 auto; margin: 0; }
       .ag-check small { color: var(--muted); }
       .ag-role { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+      .ag-lock { border: 0; padding: 0; margin: 0; display: grid; gap: 16px; min-width: 0; }
       .ag-hint { margin: 0; color: var(--muted); font-size: 13px; }
       .ag-actions { display: flex; gap: 8px; flex-wrap: wrap; }
       .ag-add { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -3814,7 +3878,7 @@ function renderAdminTickets(res, doc, viewer, meta, flash) {
       <section class="card">
         <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
           <h1 style="margin:0;">Tickets · groupes locaux</h1>
-          <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/modo/tickets" class="link-button secondary">Voir les tickets</a></span>
+          <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/admin/equipe" class="link-button secondary">Equipe</a><a href="/modo/tickets" class="link-button secondary">Voir les tickets</a></span>
         </div>
         <p class="ag-hint" style="margin-top:8px;">Une categorie cochee dans un groupe est reservee a ses membres. Les categories qu'aucun groupe ne reserve restent visibles par tous les modos, sans groupe. Le streamer et les admins voient tout. Les droits « Tickets » de rooky-tv (voir / repondre) s'appliquent en plus.</p>
         ${renderMessages(flash)}
@@ -3822,14 +3886,166 @@ function renderAdminTickets(res, doc, viewer, meta, flash) {
         ${summary}
         <p class="ag-hint" style="margin-top:8px;">Modos connectes (${users.length}) : ${users.length ? users.map((u) => escapeHtml(u.name || u.id)).join(", ") : "aucun pour l'instant — ils apparaissent apres leur premier « Acces modo »."}</p>
       </section>
+      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et le proprietaire modifient les groupes locaux.</div>`}
+      <fieldset class="ag-lock"${canEdit ? "" : " disabled"}>
       ${groupCards}
       <form method="post" class="card ag-add">
         <input type="text" name="name" maxlength="40" placeholder="Nom du nouveau groupe (ex. Collabs)" required />
         <button type="submit" name="action" value="add">Creer le groupe</button>
       </form>
+      </fieldset>
     </main>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Tickets", content, { wide: true }));
+}
+
+// Onglet Equipe : cartes (total, vus aujourd'hui, par role d'acces), recherche et tableau des membres
+// avec leurs groupes locaux (ajout de plusieurs / retrait). Les roles viennent toujours de rooky-tv.
+function renderAdminTeam(res, doc, team, flash, canEdit = true) {
+  const groups = readModoGroups();
+  const seen = new Map(readModoUsers().map((u) => [u.id, u]));
+  const roles = Array.isArray(team.roles) ? team.roles : [];
+  const accessRoles = Array.isArray(team.accessRoles) ? team.accessRoles : [];
+  const roleName = (id) => roles.find((r) => r.id === id)?.name || "";
+  const roleColor = (id) => {
+    const c = roles.find((r) => r.id === id)?.color || 0;
+    return c ? `#${c.toString(16).padStart(6, "0")}` : "";
+  };
+  // Membres : streamer, modos de rooky-tv, puis les personnes deja venues (admins...) hors equipe.
+  const people = [];
+  if (team.streamer?.id) people.push({ ...team.streamer, roles: [], kind: "Streamer" });
+  for (const m of team.members || []) if (!people.some((p) => p.id === m.id)) people.push({ ...m, kind: "Modo" });
+  for (const u of seen.values()) {
+    if (!people.some((p) => p.id === u.id)) people.push({ id: u.id, name: u.name, roles: [], kind: u.role === "admin" ? "Admin" : "Ancien modo" });
+  }
+  for (const p of people) p.name = p.name || seen.get(p.id)?.name || p.id;
+  people.sort((a, b) => (a.kind === "Streamer" ? -1 : b.kind === "Streamer" ? 1 : String(a.name).localeCompare(String(b.name), "fr")));
+
+  const dayMs = 86400000;
+  const activity = (id) => {
+    const at = seen.get(id)?.lastAt;
+    if (!at) return { label: "Jamais venu", cls: "off" };
+    const days = Math.floor((Date.now() - at) / dayMs);
+    return days <= 0 ? { label: "Aujourd'hui", cls: "on" } : { label: `${days} jour${days > 1 ? "s" : ""}`, cls: days <= 7 ? "mid" : "off" };
+  };
+  const groupsOf = (p) => groups.filter((g) => g.members.includes(p.id) || g.roles.some((r) => (p.roles || []).includes(r)));
+  const cards = [
+    { label: "Total", value: people.length, icon: "\ud83d\udc65" },
+    { label: "Vus aujourd'hui", value: people.filter((p) => activity(p.id).cls === "on").length, icon: "\u2705" },
+    { label: "Modos", value: people.filter((p) => p.kind === "Modo").length, icon: "\ud83d\udee1\ufe0f" },
+    ...accessRoles.map((r) => ({ label: `@${r.name}`, value: people.filter((p) => (p.roles || []).includes(r.id)).length, icon: r.kind === "site" ? "\ud83c\udf10" : "\ud83d\udd11" })),
+    { label: "Groupes locaux", value: groups.length, icon: "\ud83d\uddc2\ufe0f" }
+  ];
+  const rows = people
+    .map((p) => {
+      const act = activity(p.id);
+      const visible = (p.roles || []).filter((r) => accessRoles.some((a) => a.id === r) || groups.some((g) => g.roles.includes(r)));
+      const mine = groupsOf(p);
+      const chips = mine
+        .map((g) => {
+          const viaRole = !g.members.includes(p.id);
+          return viaRole
+            ? `<span class="tm-chip role" title="Par le role @${escapeHtml(roleName(g.roles[0]))}">${escapeHtml(g.name)}</span>`
+            : canEdit
+              ? `<form method="post" class="tm-chip-form"><input type="hidden" name="member" value="${escapeHtml(p.id)}" /><input type="hidden" name="group" value="${escapeHtml(g.id)}" /><span class="tm-chip">${escapeHtml(g.name)}<button type="submit" name="action" value="remove" aria-label="Retirer de ${escapeHtml(g.name)}">\u00d7</button></span></form>`
+              : `<span class="tm-chip" style="padding-right:9px;">${escapeHtml(g.name)}</span>`;
+        })
+        .join("");
+      const picker = groups.length
+        ? `<details class="tm-pick"><summary aria-label="Gerer les groupes">+</summary>
+            <form method="post" class="tm-pick-box"><input type="hidden" name="member" value="${escapeHtml(p.id)}" />
+              ${groups
+                .map((g) => {
+                  const viaRole = !g.members.includes(p.id) && g.roles.some((r) => (p.roles || []).includes(r));
+                  return `<label><input type="checkbox" name="group" value="${escapeHtml(g.id)}"${g.members.includes(p.id) ? " checked" : ""} /> ${escapeHtml(g.name)}${viaRole ? ` <small>(deja par role)</small>` : ""}</label>`;
+                })
+                .join("")}
+              <button type="submit" name="action" value="set">Enregistrer</button>
+            </form>
+          </details>`
+        : "";
+      return `<tr id="m-${escapeHtml(p.id)}" data-search="${escapeHtml(`${p.name} ${p.id}`.toLowerCase())}">
+        <td><div class="tm-name">${escapeHtml(p.name)}</div><div class="tm-id">${escapeHtml(p.id)}</div></td>
+        <td><span class="tm-kind ${p.kind === "Streamer" ? "st" : p.kind === "Admin" ? "ad" : ""}">${escapeHtml(p.kind)}</span></td>
+        <td>${visible.length ? visible.map((r) => `<span class="tm-role" style="${roleColor(r) ? `border-color:${roleColor(r)};color:${roleColor(r)}` : ""}">@${escapeHtml(roleName(r) || r)}</span>`).join("") : `<span class="tm-none">\u2014</span>`}</td>
+        <td><div class="tm-groups">${p.kind === "Streamer" ? `<span class="tm-none">voit tout</span>` : `${chips || `<span class="tm-none">\u2014</span>`}${canEdit ? picker : ""}`}</div></td>
+        <td>${seen.get(p.id)?.lastAt ? escapeHtml(new Date(seen.get(p.id).lastAt).toLocaleDateString("fr-FR", { timeZone: PLANNING_PARIS })) : "\u2014"}</td>
+        <td><span class="tm-act ${act.cls}">${act.label}</span></td>
+      </tr>`;
+    })
+    .join("");
+  const content = `
+    <style>
+      .tm { display: grid; gap: 16px; }
+      .tm-top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+      .tm-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+      .tm-card { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: rgba(22, 25, 34, 0.92); }
+      .tm-card:first-child { border-color: rgba(124, 92, 255, 0.6); }
+      .tm-card-icon { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: rgba(255, 255, 255, 0.06); font-size: 18px; flex: 0 0 auto; }
+      .tm-card small { display: block; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tm-card strong { font-size: 1.6rem; line-height: 1.1; }
+      .tm-search { width: 100%; box-sizing: border-box; }
+      .tm-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+      .tm-table { width: 100%; border-collapse: collapse; min-width: 820px; }
+      .tm-table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+      .tm-table td { padding: 10px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); vertical-align: middle; font-size: 14px; }
+      .tm-table tr:target td { background: rgba(124, 92, 255, 0.1); }
+      .tm-name { font-weight: 600; color: #8ab4ff; }
+      .tm-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+      .tm-kind { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); }
+      .tm-kind.st { background: rgba(254, 231, 92, 0.15); color: #fee75c; }
+      .tm-kind.ad { background: rgba(240, 85, 95, 0.15); color: #ff8a92; }
+      .tm-role { display: inline-block; margin: 2px 4px 2px 0; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+      .tm-groups { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .tm-chip-form { display: inline; margin: 0; }
+      .tm-chip { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; padding: 2px 4px 2px 9px; border-radius: 6px; background: rgba(124, 92, 255, 0.22); color: #c9bcff; }
+      .tm-chip.role { padding-right: 9px; background: rgba(69, 224, 210, 0.14); color: #45e0d2; }
+      .tm-chip button { all: unset; cursor: pointer; padding: 0 4px; border-radius: 4px; font-size: 14px; line-height: 1; }
+      .tm-chip button:hover { background: rgba(255, 255, 255, 0.15); }
+      .tm-pick { position: relative; }
+      .tm-pick summary { list-style: none; cursor: pointer; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; border: 1px dashed var(--line); color: var(--muted); }
+      .tm-pick summary::-webkit-details-marker { display: none; }
+      .tm-pick-box { position: absolute; z-index: 5; top: 28px; left: 0; min-width: 220px; display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: #151821; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
+      .tm-pick-box label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+      .tm-pick-box input { width: 16px; height: 16px; margin: 0; flex: 0 0 auto; }
+      .tm-pick-box small { color: var(--muted); }
+      .tm-none { color: var(--muted); }
+      .tm-act { font-size: 12px; padding: 3px 8px; border-radius: 6px; }
+      .tm-act.on { background: rgba(87, 242, 135, 0.15); color: #57f287; }
+      .tm-act.mid { background: rgba(254, 231, 92, 0.12); color: #fee75c; }
+      .tm-act.off { background: rgba(255, 255, 255, 0.06); color: var(--muted); }
+    </style>
+    <main class="tm">
+      <div class="tm-top">
+        <h1 style="margin:0;">Equipe${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
+        <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/admin/tickets" class="link-button secondary">Groupes locaux</a></span>
+      </div>
+      ${renderMessages(flash)}
+      ${team.error ? `<div class="message error">rooky-tv : ${escapeHtml(team.error)}</div>` : ""}
+      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et le proprietaire modifient les groupes locaux.</div>`}
+      <section class="tm-cards">${cards.map((c) => `<div class="tm-card"><span class="tm-card-icon">${c.icon}</span><div><small>${escapeHtml(c.label)}</small><strong>${c.value}</strong></div></div>`).join("")}</section>
+      <input type="search" class="tm-search" placeholder="Rechercher par nom ou identifiant..." aria-label="Rechercher un membre" />
+      <div class="tm-wrap"><table class="tm-table">
+        <thead><tr><th>Nom</th><th>Statut</th><th>Roles Discord</th><th>Groupes locaux</th><th>Derniere visite</th><th>Activite (site)</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="tm-none">Personne pour l'instant.</td></tr>`}</tbody>
+      </table></div>
+      <p class="md-hint" style="color:var(--muted);font-size:13px;margin:0;">Roles et equipe lus sur rooky-tv. Une pastille turquoise vient d'un role Discord lie au groupe (a changer sur Discord / rooky-tv) ; les autres se retirent avec \u00d7. « + » pour ajouter plusieurs groupes d'un coup. Creer ou supprimer un groupe : Groupes locaux.</p>
+    </main>
+    <script>
+      (() => {
+        const input = document.querySelector(".tm-search");
+        const rows = [...document.querySelectorAll(".tm-table tbody tr[data-search]")];
+        input.addEventListener("input", () => {
+          const q = input.value.trim().toLowerCase();
+          rows.forEach((row) => { row.hidden = q && !row.dataset.search.includes(q); });
+        });
+        document.addEventListener("keydown", (event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") { event.preventDefault(); input.focus(); }
+        });
+      })();
+    </script>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Equipe", content, { wide: true }));
 }
 
 /* ------------------------- Image du programme (Discord) ------------------------- */
