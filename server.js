@@ -21,8 +21,9 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
 const MONITOR_INTERVAL_MS = 60 * 1000;
-// Chaine Twitch de ce deploiement : son planning est le seul visible et publiable ici.
-const PLANNING_CHANNEL = normalizePlanningChannel(process.env.PLANNING_CHANNEL || "");
+// Bot Discord qui lit le message "Programme du stream" de rooky-tv (import / copie automatique).
+const PLANNING_BOT_TOKEN = String(process.env.DISCORD_BOT_TOKEN || "").trim();
+const PLANNING_SYNC_INTERVAL_MS = Math.max(60, Number(process.env.PLANNING_SYNC_MINUTES || 5) * 60) * 1000;
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -691,9 +692,32 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      const channel = PLANNING_CHANNEL
+      const channel = planningSiteChannel()
         || (url.searchParams.get("nouvelle") ? "" : normalizePlanningChannel(url.searchParams.get("chaine") || "") || listPlanningChannels()[0] || "");
       return renderPlanning(res, readPlanning(channel), getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/planning/site-channel" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      if (form.unlock === "1") {
+        const previous = planningSiteChannel();
+        writeSiteConfig({ planningChannel: "" });
+        redirect(res, `/admin/planning?chaine=${encodeURIComponent(previous)}&success=${encodeURIComponent("La chaine n'est plus fixee pour ce site")}`);
+        return;
+      }
+      const channel = normalizePlanningChannel(form.channel || "");
+      if (!channel) {
+        redirect(res, `/admin/planning?error=${encodeURIComponent("Chaine Twitch invalide.")}`);
+        return;
+      }
+      writeSiteConfig({ planningChannel: channel });
+      redirect(res, `/admin/planning?success=${encodeURIComponent(`Ce site est maintenant celui de #${channel}`)}`);
+      return;
     }
 
     if (pathname === "/admin/planning" && method === "POST") {
@@ -705,7 +729,7 @@ const requestListener = async (req, res) => {
       const params = await parseFormParams(req);
       const action = params.get("action") || "save";
       // Chaine du planning : celle du deploiement si elle est fixee, sinon celle du formulaire.
-      const channel = PLANNING_CHANNEL || normalizePlanningChannel(params.get("channel") || "");
+      const channel = planningSiteChannel() || normalizePlanningChannel(params.get("channel") || "");
       const back = (key, message) =>
         `/admin/planning?${channel ? `chaine=${encodeURIComponent(channel)}&` : "nouvelle=1&"}${key}=${encodeURIComponent(message)}`;
       if (!channel) {
@@ -723,6 +747,18 @@ const requestListener = async (req, res) => {
 
       if (action === "save") {
         redirect(res, back("success", "Programme enregistre"));
+        return;
+      }
+
+      if (action === "import") {
+        try {
+          const imported = await importPlanningFromDiscord(next);
+          writePlanning({ ...imported, lastSyncAt: Date.now(), lastSyncError: "" });
+          redirect(res, back("success", "Programme importe depuis Discord : verifie puis clique sur Publier"));
+        } catch (error) {
+          writePlanning({ ...readPlanning(channel), lastSyncError: error.message });
+          redirect(res, back("error", error.message));
+        }
         return;
       }
 
@@ -858,6 +894,10 @@ async function startServer() {
   setInterval(() => {
     runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
   }, MONITOR_INTERVAL_MS);
+
+  setInterval(() => {
+    runPlanningSync().catch((error) => console.error(`[planning] copie automatique : ${error.message}`));
+  }, PLANNING_SYNC_INTERVAL_MS);
 }
 
 function isDnsHostname(host) {
@@ -2270,12 +2310,18 @@ function normalizePlanningChannel(value) {
   return /^[a-z0-9_]{1,25}$/.test(channel) ? channel : "";
 }
 
+// Chaine Twitch fixee pour ce site (page Planning, gardee dans site-config.json) : son planning est
+// alors le seul visible et publiable ici. Vide = un planning par chaine.
+function planningSiteChannel() {
+  return normalizePlanningChannel(readSiteConfig().planningChannel || "");
+}
+
 const planningFile = (channel) => path.join(PLANNING_DIR, `${channel}.json`);
 
-// Chaines qui ont un planning dans ce dossier de donnees (une seule si PLANNING_CHANNEL est fixe).
+// Chaines qui ont un planning dans ce dossier de donnees (une seule si la chaine du site est fixee).
 function listPlanningChannels() {
-  if (PLANNING_CHANNEL) {
-    return [PLANNING_CHANNEL];
+  if (planningSiteChannel()) {
+    return [planningSiteChannel()];
   }
   try {
     return fs
@@ -2310,13 +2356,18 @@ function readPlanning(channel) {
     items: Array.isArray(parsed.items) ? parsed.items : [],
     messageId: parsed.messageId || "",
     threadId: parsed.threadId || "",
-    publishedAt: parsed.publishedAt || 0
+    publishedAt: parsed.publishedAt || 0,
+    sourceChannelId: parsed.sourceChannelId || "",
+    autoSync: !!parsed.autoSync,
+    lastShown: parsed.lastShown || "",
+    lastSyncAt: parsed.lastSyncAt || 0,
+    lastSyncError: parsed.lastSyncError || ""
   };
 }
 
 function writePlanning(doc) {
   const channel = normalizePlanningChannel(doc.channel);
-  if (!channel || (PLANNING_CHANNEL && channel !== PLANNING_CHANNEL)) {
+  if (!channel || (planningSiteChannel() && channel !== planningSiteChannel())) {
     throw new Error("Planning sans chaine valide : rien n'est enregistre.");
   }
   fs.mkdirSync(PLANNING_DIR, { recursive: true });
@@ -2354,6 +2405,15 @@ function planningFromForm(params, current) {
     throw new Error("L'image doit etre une adresse qui commence par https://");
   }
   next.imageUrl = imageUrl;
+
+  // Salon source : ID, ou lien d'un salon / d'un message Discord (on garde l'ID du salon).
+  const source = text("sourceChannel", 200);
+  const link = /discord(?:app)?\.com\/channels\/(?:\d+|@me)\/(\d{5,25})/.exec(source);
+  if (source && !link && !/^\d{5,25}$/.test(source)) {
+    throw new Error("Salon source : colle l'ID du salon Discord ou son lien.");
+  }
+  next.sourceChannelId = link ? link[1] : source;
+  next.autoSync = params.get("autoSync") === "1" && !!next.sourceChannelId;
 
   next.scheduleText = text("scheduleText", 1000);
   next.description = text("description", 1500);
@@ -2530,7 +2590,13 @@ async function publishPlanning(doc, ping) {
   if (!res || !res.ok) {
     throw planningDiscordError(res, body);
   }
-  writePlanning({ ...readPlanning(doc.channel), messageId: body?.id ? String(body.id) : "", threadId, publishedAt: Date.now() });
+  writePlanning({
+    ...readPlanning(doc.channel),
+    messageId: body?.id ? String(body.id) : "",
+    threadId,
+    publishedAt: Date.now(),
+    lastShown: planningShown(payload)
+  });
   return "Programme publie sur Discord";
 }
 
@@ -2538,10 +2604,11 @@ async function updatePlanningMessage(doc) {
   if (!doc.webhookUrl || !doc.messageId) {
     throw new Error("Aucun message publie a mettre a jour : clique sur Publier.");
   }
+  const message = await buildPlanningMessage(doc);
   const { res, body } = await planningDiscordCall(
     planningWithThread(`${doc.webhookUrl}/messages/${doc.messageId}`, doc.threadId),
     "PATCH",
-    { allowed_mentions: { parse: [] }, ...(await buildPlanningMessage(doc)) }
+    { allowed_mentions: { parse: [] }, ...message }
   );
   if (res && res.status === 404) {
     writePlanning({ ...readPlanning(doc.channel), messageId: "" });
@@ -2550,7 +2617,207 @@ async function updatePlanningMessage(doc) {
   if (!res || !res.ok) {
     throw planningDiscordError(res, body, "la mise a jour du message");
   }
+  writePlanning({ ...readPlanning(doc.channel), lastShown: planningShown(message) });
   return "Message Discord mis a jour (sans notification)";
+}
+
+// Ce que montre le message (sans l'horodatage) : la copie automatique ne modifie que si ca change.
+function planningShown(message) {
+  return JSON.stringify((message.embeds || []).map(({ timestamp, ...embed }) => embed));
+}
+
+/* ---------------------- Import du message Discord de rooky-tv ---------------------- */
+// Le bot lit les derniers messages du salon source et prend le plus recent "Programme du stream",
+// puis le decode dans l'autre sens (meme format que buildPlanningMessage / rooky-tv).
+
+const PLANNING_MONTHS = ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"];
+const planningFold = (value) => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+const planningUnescapeMd = (value) => String(value || "").replace(/\\([*_~`|\\])/g, "$1");
+
+async function fetchPlanningSourceMessage(doc) {
+  if (!PLANNING_BOT_TOKEN) {
+    throw new Error("Ajoute DISCORD_BOT_TOKEN dans l'environnement du site pour lire Discord.");
+  }
+  if (!doc.sourceChannelId) {
+    throw new Error("Renseigne le salon Discord ou rooky-tv publie le programme.");
+  }
+  const res = await fetch(`https://discord.com/api/v10/channels/${doc.sourceChannelId}/messages?limit=50`, {
+    headers: { Authorization: `Bot ${PLANNING_BOT_TOKEN}` },
+    signal: AbortSignal.timeout(10000)
+  }).catch(() => null);
+  if (!res) {
+    throw new Error("Discord ne repond pas.");
+  }
+  if (res.status === 401) {
+    throw new Error("Discord refuse le token du bot (DISCORD_BOT_TOKEN).");
+  }
+  if (res.status === 403) {
+    throw new Error("Le bot n'a pas acces a ce salon : il lui faut Voir le salon et Lire l'historique des messages.");
+  }
+  if (res.status === 404) {
+    throw new Error("Salon introuvable : verifie l'ID (pour un forum, prends le lien du post).");
+  }
+  if (!res.ok) {
+    throw new Error(`Discord a refuse la lecture du salon (${res.status}).`);
+  }
+  const messages = await res.json().catch(() => []);
+  const ownWebhookId = (/\/webhooks\/(\d+)\//.exec(doc.webhookUrl || "") || [])[1] || "";
+  const found = (Array.isArray(messages) ? messages : []).find((m) => {
+    if (m.id === doc.messageId || (ownWebhookId && m.webhook_id === ownWebhookId)) {
+      return false; // notre propre copie, si les deux sont dans le meme salon
+    }
+    const title = m.embeds?.[0]?.title || "";
+    return title.includes("Programme du stream") || title.includes("Mode vacances");
+  });
+  if (!found) {
+    const anyEmbed = (Array.isArray(messages) ? messages : []).some((m) => m.webhook_id && !(m.embeds || []).length);
+    throw new Error(
+      anyEmbed
+        ? "Le bot ne voit pas le contenu des messages : active l'intent Message Content du bot (portail developpeur Discord)."
+        : "Aucun message \u00ab Programme du stream \u00bb dans les 50 derniers messages de ce salon."
+    );
+  }
+  return found;
+}
+
+// "aujourd'hui", "samedi 15 novembre" -> "2026-11-15" (heure de Paris).
+function planningParseDay(text) {
+  const today = new Date().toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
+  const folded = planningFold(text);
+  if (folded.includes("aujourd")) {
+    return today;
+  }
+  const m = /(\d{1,2})\s+([a-z]+)/.exec(folded);
+  const month = m ? PLANNING_MONTHS.indexOf(m[2]) + 1 : 0;
+  if (!month) {
+    return "";
+  }
+  let year = Number(today.slice(0, 4));
+  const pad = (n) => String(n).padStart(2, "0");
+  let date = `${year}-${pad(month)}-${pad(Number(m[1]))}`;
+  if (date < today) {
+    year += 1; // "15 janvier" annonce en decembre
+    date = `${year}-${pad(month)}-${pad(Number(m[1]))}`;
+  }
+  return date;
+}
+
+const planningParseHour = (text) => {
+  const m = /(\d{1,2})h(\d{2})/.exec(String(text || ""));
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
+};
+
+function decodePlanningMessage(message) {
+  const [header = {}, ...cards] = message.embeds || [];
+  const result = { live: "", nextDate: "", nextTime: "", scheduleText: "", description: "", imageUrl: header.thumbnail?.url || "", items: [] };
+
+  // En-tete : [horaires] / etat du direct / annules / prochain stream / [description] / titre actuel.
+  const before = [];
+  const after = [];
+  let marker = false;
+  for (const line of String(header.description || "").split("\n")) {
+    const clean = line.trim();
+    if (clean === "\ud83d\udd34 **En direct**") {
+      result.live = "live";
+    } else if (clean === "\u26ab Hors ligne") {
+      result.live = "offline";
+    } else if (/^\ud83d\udcc5 \*\*Prochain stream/.test(clean)) {
+      const m = /Prochain stream\s*:\s*(.+?)\*\*/.exec(clean);
+      const when = m ? m[1] : "";
+      result.nextDate = planningParseDay(when.split(" \u00e0 ")[0]);
+      result.nextTime = result.nextDate ? planningParseHour(when.split(" \u00e0 ")[1]) : "";
+    } else if (/^\*\*Prochain stream le (\d{2})\/(\d{2})\/(\d{4})\*\*$/.test(clean)) {
+      const [, d, mo, y] = /(\d{2})\/(\d{2})\/(\d{4})/.exec(clean);
+      result.nextDate = `${y}-${mo}-${d}`; // mode vacances : date de reprise
+    } else if (/^\u274c /.test(clean) || /^Titre actuel :/.test(clean) || clean === "Le programme n'est pas encore annonc\u00e9.") {
+      // annulations, titre Twitch et message par defaut : recalcules / sans objet ici
+    } else {
+      (marker ? after : before).push(line);
+      continue;
+    }
+    marker = true;
+  }
+  const join = (lines) => lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (marker) {
+    result.scheduleText = join(before);
+    result.description = join(after);
+  } else {
+    // Sans ligne reperable : horaires puis description sont separes par une ligne vide double.
+    const parts = String(header.description || "").split(/\n{3,}/);
+    result.scheduleText = parts.length > 1 ? parts[0].trim() : "";
+    result.description = join(parts.length > 1 ? parts.slice(1) : parts);
+  }
+
+  // Cartes : "<icone> titre", puis "\ud83d\udd58 21h00 \u00b7 Categorie" et "**En cours**" / "*Termine*".
+  const STATUS_BY_ICON = { "\u25b6\ufe0f": "current", "\u2705": "done", "\u23f3": "upcoming", "\ud83d\udccc": "upcoming" };
+  for (const card of cards) {
+    const title = String(card.title || "");
+    const icon = Object.keys(STATUS_BY_ICON).find((i) => title.startsWith(i));
+    const subject = icon ? title.slice(icon.length).trim() : title.trim();
+    if (!subject) {
+      continue;
+    }
+    const meta = String(card.description || "").split("\n")[0] || "";
+    const parts = meta.split(" \u00b7 ");
+    const hasHour = /^\ud83d\udd58/.test(parts[0] || "");
+    const category = (hasHour ? parts.slice(1) : parts).join(" \u00b7 ").trim();
+    result.items.push({
+      time: hasHour ? planningParseHour(parts[0]) : "",
+      subject: planningUnescapeMd(subject).slice(0, 200),
+      category: category === "Organisation uniquement" ? "" : category.slice(0, 100),
+      imageUrl: card.thumbnail?.url || "",
+      status: icon ? STATUS_BY_ICON[icon] : "upcoming"
+    });
+    // Au-dela de 9 titres, rooky-tv liste la suite dans le pied de la derniere carte.
+    const rest = /^\+ \d+ autres? : (.+)$/s.exec(String(card.footer?.text || ""));
+    if (rest) {
+      for (const entry of rest[1].split(" \u00b7 ")) {
+        const m = /^(\d{1,2})h(\d{2}) (.+)$/.exec(entry.trim());
+        const extra = (m ? m[3] : entry).trim();
+        if (extra) {
+          result.items.push({ time: m ? `${m[1].padStart(2, "0")}:${m[2]}` : "", subject: extra.slice(0, 200), category: "", imageUrl: "", status: "upcoming" });
+        }
+      }
+    }
+  }
+  return result;
+}
+
+async function importPlanningFromDiscord(doc) {
+  const message = await fetchPlanningSourceMessage(doc);
+  return { ...doc, ...decodePlanningMessage(message) };
+}
+
+// Copie automatique : relit le programme de rooky-tv et corrige notre message deja publie, sans
+// notification, seulement si ce qu'il montre change. Sans message publie : rien (premier "Publier"
+// a faire a la main, pour choisir la mention).
+let planningSyncRunning = false;
+async function runPlanningSync() {
+  if (planningSyncRunning || !PLANNING_BOT_TOKEN) {
+    return;
+  }
+  planningSyncRunning = true;
+  try {
+    for (const channel of listPlanningChannels()) {
+      const doc = readPlanning(channel);
+      if (!doc.autoSync || !doc.sourceChannelId) {
+        continue;
+      }
+      try {
+        const next = await importPlanningFromDiscord(doc);
+        writePlanning({ ...next, lastSyncAt: Date.now(), lastSyncError: "" });
+        if (next.webhookUrl && next.messageId && planningShown(await buildPlanningMessage(next)) !== doc.lastShown) {
+          await updatePlanningMessage(readPlanning(channel));
+          console.log(`[planning:${channel}] copie automatique : message mis a jour`);
+        }
+      } catch (error) {
+        writePlanning({ ...readPlanning(channel), lastSyncAt: Date.now(), lastSyncError: error.message });
+        console.error(`[planning:${channel}] copie automatique : ${error.message}`);
+      }
+    }
+  } finally {
+    planningSyncRunning = false;
+  }
 }
 
 function renderPlanningItemRow(item = {}) {
@@ -2585,15 +2852,27 @@ function renderPlanning(res, doc, flash) {
     .map(([value, label]) => `<option value="${value}" ${doc.live === value ? "selected" : ""}>${label}</option>`)
     .join("");
   const rows = (doc.items.length ? doc.items : [{}]).map(renderPlanningItemRow).join("");
-  // Sans PLANNING_CHANNEL : un planning par chaine, on passe de l'un a l'autre.
-  const channelSwitcher = PLANNING_CHANNEL
-    ? ""
+  // Chaine du site non fixee : un planning par chaine, on passe de l'un a l'autre.
+  const siteChannel = planningSiteChannel();
+  const channelSwitcher = siteChannel
+    ? `<section class="card planning-switcher">
+        <span>Chaine de ce site : <strong>#${escapeHtml(siteChannel)}</strong></span>
+        <span class="planning-hint">Seul ce planning est visible et publiable ici.</span>
+        <form method="post" action="/admin/planning/site-channel" style="margin-left:auto;">
+          <input type="hidden" name="unlock" value="1" />
+          <button type="submit" class="secondary">Ne plus fixer</button>
+        </form>
+      </section>`
     : `<section class="card planning-switcher">
         <span class="planning-hint">Plannings :</span>
         ${listPlanningChannels()
           .map((c) => `<a href="/admin/planning?chaine=${encodeURIComponent(c)}" class="link-button ${c === doc.channel ? "" : "secondary"}">#${escapeHtml(c)}</a>`)
           .join("")}
         <a href="/admin/planning?nouvelle=1" class="link-button ${doc.channel ? "secondary" : ""}">+ Autre chaine</a>
+        <form method="post" action="/admin/planning/site-channel" class="planning-lock">
+          <input type="text" name="channel" value="${escapeHtml(doc.channel)}" placeholder="chaine" required aria-label="Chaine du site" />
+          <button type="submit">Fixer pour ce site</button>
+        </form>
       </section>`;
 
   const content = `
@@ -2626,6 +2905,8 @@ function renderPlanning(res, doc, flash) {
         .planning-item input[name="item_subject"] { grid-column: 1 / -1; }
       }
       .planning-switcher { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 14px 18px; }
+      .planning-lock { display: flex; gap: 8px; margin-left: auto; }
+      .planning-lock input { width: 160px; padding: 10px 12px; }
       .planning-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
     </style>
     <header class="topbar">
@@ -2669,13 +2950,43 @@ function renderPlanning(res, doc, flash) {
       </section>
 
       <section class="card">
+        <h2>Source Discord (programme de rooky-tv)</h2>
+        <div class="form-grid">
+          ${
+            PLANNING_BOT_TOKEN
+              ? ""
+              : `<div class="message error">Pour lire Discord, ajoute <code>DISCORD_BOT_TOKEN</code> dans l'environnement du site puis redeploie.</div>`
+          }
+          <label>
+            <span>Salon ou rooky-tv publie \u00ab Programme du stream \u00bb (ID ou lien ; pour un forum, le lien du post)</span>
+            <input type="text" name="sourceChannel" value="${escapeHtml(doc.sourceChannelId)}" placeholder="https://discord.com/channels/... ou 123456789012345678" />
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" name="autoSync" value="1" ${doc.autoSync ? "checked" : ""} />
+            <span>Copie automatique : relire toutes les ${Math.round(PLANNING_SYNC_INTERVAL_MS / 60000)} min et mettre a jour mon message (sans notification)</span>
+          </label>
+          <p class="planning-status">${
+            doc.lastSyncError
+              ? `<span class="status-missing">Derniere lecture en echec : ${escapeHtml(doc.lastSyncError)}</span>`
+              : doc.lastSyncAt
+                ? `<strong>Derniere lecture</strong> le ${escapeHtml(new Date(doc.lastSyncAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS }))}.`
+                : "Jamais lu."
+          }${doc.autoSync && !doc.messageId ? " La copie automatique demarrera apres ton premier \u00ab Publier \u00bb." : ""}</p>
+          <div class="planning-actions">
+            <button type="submit" name="action" value="import" class="secondary" formnovalidate>Importer depuis Discord</button>
+          </div>
+          <p class="planning-hint">L'import remplace l'en-tete et les titres ci-dessous par ceux du message Discord. Le webhook et la chaine ne changent pas.</p>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>En-tete</h2>
         <div class="form-grid">
           <div class="planning-two">
             <label>
-              <span>Chaine Twitch${PLANNING_CHANNEL ? " (fixee pour ce site)" : doc.channel ? " (planning de cette chaine)" : ""}</span>
+              <span>Chaine Twitch${planningSiteChannel() ? " (fixee pour ce site)" : doc.channel ? " (planning de cette chaine)" : ""}</span>
               ${
-                PLANNING_CHANNEL || doc.channel
+                planningSiteChannel() || doc.channel
                   ? `<input type="text" value="${escapeHtml(doc.channel)}" readonly /><input type="hidden" name="channel" value="${escapeHtml(doc.channel)}" />`
                   : `<input type="text" name="channel" placeholder="ex : rooky" required />`
               }

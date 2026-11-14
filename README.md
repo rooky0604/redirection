@@ -43,9 +43,11 @@ La page `/admin/planning` publie dans un salon Discord le message "Programme du 
 - "Mettre a jour le message" corrige le message deja poste, sans notification
 - Les salons forum sont geres (un post "Programme du stream" est cree)
 
+Import depuis Discord : avec `DISCORD_BOT_TOKEN` (un bot present sur le serveur de rooky-tv, avec Voir le salon, Lire l'historique et l'intent Message Content), renseignez le salon ou rooky-tv publie "Programme du stream". "Importer depuis Discord" remplit le formulaire ; "Copie automatique" relit le message toutes les `PLANNING_SYNC_MINUTES` minutes (5 par defaut) et met a jour le message deja publie, sans notification.
+
 Chaque planning appartient a une chaine Twitch et est stocke dans `planning/<chaine>.json` du dossier `DATA_DIR`.
 
-Plusieurs sites redirection : definissez `PLANNING_CHANNEL=<chaine>` sur chaque deploiement. Le site ne montre et ne publie alors que le planning de cette chaine, meme si deux deploiements partagent le meme volume. Sans cette variable, la page gere un planning par chaine (bouton "+ Autre chaine").
+Plusieurs sites redirection : sur chaque site, ouvrez `/admin/planning` et cliquez sur "Fixer pour ce site" avec la chaine du site (reglage garde dans `site-config.json`). Le site ne montre et ne publie alors que le planning de cette chaine. Tant qu'aucune chaine n'est fixee, la page gere un planning par chaine (bouton "+ Autre chaine").
 
 ## Persistance Dokploy
 
