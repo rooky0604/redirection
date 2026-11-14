@@ -21,9 +21,6 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
 const MONITOR_INTERVAL_MS = 60 * 1000;
-// Bot Discord qui lit le message "Programme du stream" de rooky-tv (import / copie automatique).
-const PLANNING_BOT_TOKEN = String(process.env.DISCORD_BOT_TOKEN || "").trim();
-const PLANNING_SYNC_INTERVAL_MS = Math.max(60, Number(process.env.PLANNING_SYNC_MINUTES || 5) * 60) * 1000;
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -64,6 +61,14 @@ const requestListener = async (req, res) => {
       clearCookie(res, "session");
       redirect(res, "/login");
       return;
+    }
+
+    if (pathname === "/planning" && method === "GET") {
+      return renderPublicPlanning(res, readPlanning(planningSiteChannel()));
+    }
+
+    if (pathname === "/api/planning/sync" && method === "POST") {
+      return handlePlanningSync(req, res);
     }
 
     if (pathname === "/go" && method === "GET") {
@@ -692,7 +697,7 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      return renderPlanning(res, readPlanning(planningSiteChannel()), getFlashMessage(url));
+      return renderPlanning(res, readPlanning(planningSiteChannel()), getFlashMessage(url), requestOrigin(req));
     }
 
     if (pathname === "/admin/planning" && method === "POST") {
@@ -701,10 +706,9 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      const params = await parseFormParams(req);
+      const form = await parseForm(req);
       const back = (key, message) => `/admin/planning?${key}=${encodeURIComponent(message)}`;
-      // Une seule chaine par site : celle du formulaire devient celle du site.
-      const channel = normalizePlanningChannel(params.get("channel") || "") || planningSiteChannel();
+      const channel = normalizePlanningChannel(form.channel || "") || planningSiteChannel();
       if (!channel) {
         redirect(res, back("error", "Indique la chaine Twitch de ce site."));
         return;
@@ -712,31 +716,13 @@ const requestListener = async (req, res) => {
       if (channel !== planningSiteChannel()) {
         writeSiteConfig({ planningChannel: channel });
       }
-      let next;
-      try {
-        next = liaisonFromForm(params, readPlanning(channel));
-      } catch (error) {
-        redirect(res, back("error", error.message));
-        return;
-      }
-      writePlanning(next);
-
-      if (params.get("action") !== "publish") {
-        redirect(res, back("success", "Liaison enregistree"));
-        return;
-      }
-
-      // Publier maintenant : relit le programme de rooky-tv sur Discord puis le publie.
-      try {
-        const imported = await importPlanningFromDiscord(next);
-        writePlanning({ ...imported, lastSyncAt: Date.now(), lastSyncError: "" });
-        await publishPlanning(readPlanning(channel), params.get("ping") || "");
-        redirect(res, back("success", "Programme de rooky-tv publie sur Discord"));
-      } catch (error) {
-        console.error(`[planning:${channel}] ${error.message}`);
-        writePlanning({ ...readPlanning(channel), lastSyncError: error.message });
-        redirect(res, back("error", error.message));
-      }
+      const doc = readPlanning(channel);
+      const newKey = form.action === "newkey" || !doc.syncKey;
+      writePlanning({ ...doc, syncKey: newKey ? crypto.randomBytes(24).toString("base64url") : doc.syncKey });
+      redirect(
+        res,
+        back("success", form.action === "newkey" ? "Nouveau code cree : colle-le dans rooky-tv (l'ancien ne marche plus)" : "Enregistre")
+      );
       return;
     }
 
@@ -862,10 +848,6 @@ async function startServer() {
   setInterval(() => {
     runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
   }, MONITOR_INTERVAL_MS);
-
-  setInterval(() => {
-    runPlanningSync().catch((error) => console.error(`[planning] copie automatique : ${error.message}`));
-  }, PLANNING_SYNC_INTERVAL_MS);
 }
 
 function isDnsHostname(host) {
@@ -1019,7 +1001,9 @@ function validateRedirectInput(source, target, redirects = []) {
     sourcePath.startsWith("/admin/") ||
     sourcePath === "/login" ||
     sourcePath === "/logout" ||
-    sourcePath === "/go"
+    sourcePath === "/go" ||
+    sourcePath === "/planning" ||
+    sourcePath.startsWith("/api/")
   ) {
     return "Ce chemin est reserve a l'administration.";
   }
@@ -2256,16 +2240,12 @@ function renderMonitoring(res, config, flash) {
 }
 
 /* ------------------------------ Planning ---------------------------------- */
-// Message Discord "Programme du stream", le meme que sur rooky-tv (src/streamProgramWebhook.js) :
-// un en-tete (horaires, etat du direct, prochain stream, description) puis une carte par titre avec
-// la jaquette Twitch du jeu. Ici tout est saisi a la main. "Publier" efface le message precedent et
-// en poste un nouveau ; "Mettre a jour" corrige le message deja poste, sans notification.
-// L'adresse du webhook est un secret : elle n'est jamais renvoyee au navigateur.
+// Page publique /planning : le programme du stream de la chaine, tel que rooky-tv le montre dans son
+// message Discord « Programme du stream ». Rien ne se saisit ici : rooky-tv envoie le programme sur
+// POST /api/planning/sync avec le code de liaison du site (page /admin/planning), a chaque changement.
 
-const PLANNING_WEBHOOK = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
-const PLANNING_COLORS = { live: 0xff6b87, idle: 0x45e0d2, current: 0xff6b87, done: 0x475569, upcoming: 0x45e0d2 };
-const PLANNING_MAX_CARDS = 9; // Discord : 10 embeds par message, le 1er sert d'en-tete
 const PLANNING_PARIS = "Europe/Paris";
+const PLANNING_MAX_BODY = 256 * 1024;
 
 function normalizePlanningChannel(value) {
   const channel = String(value || "")
@@ -2277,8 +2257,7 @@ function normalizePlanningChannel(value) {
   return /^[a-z0-9_]{1,25}$/.test(channel) ? channel : "";
 }
 
-// Chaine Twitch de ce site (page Planning, gardee dans site-config.json) : son planning est le seul
-// lu et publie ici.
+// Chaine Twitch de ce site (gardee dans site-config.json).
 function planningSiteChannel() {
   return normalizePlanningChannel(readSiteConfig().planningChannel || "");
 }
@@ -2294,471 +2273,348 @@ function readPlanning(channel) {
     parsed = {};
   }
   return {
-    webhookUrl: parsed.webhookUrl || "",
-    webhookName: parsed.webhookName || "",
     channel,
-    imageUrl: parsed.imageUrl || "",
-    scheduleText: parsed.scheduleText || "",
-    live: ["live", "offline"].includes(parsed.live) ? parsed.live : "",
-    nextDate: parsed.nextDate || "",
-    nextTime: parsed.nextTime || "",
-    description: parsed.description || "",
-    items: Array.isArray(parsed.items) ? parsed.items : [],
-    messageId: parsed.messageId || "",
-    threadId: parsed.threadId || "",
-    publishedAt: parsed.publishedAt || 0,
-    sourceChannelId: parsed.sourceChannelId || "",
-    autoSync: !!parsed.autoSync,
-    lastShown: parsed.lastShown || "",
-    lastSyncAt: parsed.lastSyncAt || 0,
-    lastSyncError: parsed.lastSyncError || ""
+    syncKey: parsed.syncKey || "",
+    program: parsed.program && typeof parsed.program === "object" ? parsed.program : null,
+    receivedAt: parsed.receivedAt || 0
   };
 }
 
 function writePlanning(doc) {
   const channel = normalizePlanningChannel(doc.channel);
-  if (!channel || (planningSiteChannel() && channel !== planningSiteChannel())) {
+  if (!channel || channel !== planningSiteChannel()) {
     throw new Error("Planning sans chaine valide : rien n'est enregistre.");
   }
   fs.mkdirSync(PLANNING_DIR, { recursive: true });
   fs.writeFileSync(planningFile(channel), `${JSON.stringify({ ...doc, channel }, null, 2)}\n`, "utf8");
 }
 
-// Reglages de la liaison. Le programme lui-meme vient toujours du message Discord de rooky-tv.
-function liaisonFromForm(params, current) {
-  const text = (name, max) => String(params.get(name) || "").trim().slice(0, max);
-  const next = { ...current };
-
-  const webhookUrl = text("webhookUrl", 300);
-  if (params.get("removeWebhook") === "1") {
-    next.webhookUrl = "";
-    next.messageId = "";
-    next.threadId = "";
-  } else if (webhookUrl) {
-    if (!PLANNING_WEBHOOK.test(webhookUrl)) {
-      throw new Error("Ce n'est pas une adresse de webhook Discord (https://discord.com/api/webhooks/...).");
-    }
-    if (webhookUrl !== current.webhookUrl) {
-      next.webhookUrl = webhookUrl;
-      next.messageId = "";
-      next.threadId = "";
-    }
-  }
-
-  const webhookName = text("webhookName", 80).replace(/\s+/g, " ");
-  if (/discord|clyde/i.test(webhookName)) {
-    throw new Error("Discord refuse les noms de webhook qui contiennent \u00ab discord \u00bb ou \u00ab clyde \u00bb.");
-  }
-  next.webhookName = webhookName;
-
-  // Salon source : ID, ou lien d'un salon / d'un message Discord (on garde l'ID du salon).
-  const source = text("sourceChannel", 200);
-  const link = /discord(?:app)?\.com\/channels\/(?:\d+|@me)\/(\d{5,25})/.exec(source);
-  if (source && !link && !/^\d{5,25}$/.test(source)) {
-    throw new Error("Salon de rooky-tv : colle l'ID du salon Discord ou son lien.");
-  }
-  next.sourceChannelId = link ? link[1] : source;
-  next.autoSync = params.get("autoSync") === "1" && !!next.sourceChannelId;
-  return next;
+function requestOrigin(req) {
+  const host = String(req.headers.host || "localhost");
+  const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwarded || (/^(localhost|127\.|\[::1\])/.test(host) ? "http" : "https");
+  return `${proto}://${host}`;
 }
 
-// "aujourd'hui" pour le jour meme, sinon "samedi 15 novembre".
-function planningDayText(date) {
-  const today = new Date().toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
-  if (date === today) {
-    return "aujourd'hui";
-  }
-  const [y, m, d] = date.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("fr-FR", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
+// Garde seulement ce que la page affiche, avec des tailles bornees.
+function cleanPlanningProgram(body) {
+  const str = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
+  const httpsUrl = (value) => (/^https:\/\/\S+$/i.test(String(value || "")) ? String(value).slice(0, 1000) : "");
+  const date = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? value : "");
+  const time = (value) => (/^\d{2}:\d{2}$/.test(String(value || "")) ? value : "");
+  const list = (value, max) => (Array.isArray(value) ? value.slice(0, max) : []);
+  return {
+    live: body.live === true ? true : body.live === false ? false : null,
+    scheduleText: str(body.scheduleText, 1000),
+    imageUrl: httpsUrl(body.imageUrl),
+    vacation: body.vacation && date(body.vacation.until) ? { until: body.vacation.until, message: str(body.vacation.message, 500) } : null,
+    days: list(body.days, 21)
+      .map((day) => ({
+        date: date(day?.date),
+        time: time(day?.time),
+        cancelled: day?.cancelled === true,
+        postponed: day?.postponed === true,
+        description: str(day?.description, 1500),
+        items: list(day?.items, 30)
+          .map((item) => ({
+            time: time(item?.time),
+            subject: str(item?.subject, 200),
+            category: str(item?.category, 100),
+            thumbnail: httpsUrl(item?.thumbnail),
+            status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming"
+          }))
+          .filter((item) => item.subject)
+      }))
+      .filter((day) => day.date)
+  };
 }
 
-const planningEscapeMd = (value) => String(value || "").replace(/([*_~`|\\])/g, "\\$1");
+function sendJson(res, status, body) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+// Reception du programme envoye par rooky-tv :
+// { channel, event: "hello" | "program", live, scheduleText, imageUrl, vacation, days: [{ date, time,
+//   cancelled, postponed, description, items: [{ time, subject, category, thumbnail, status }] }] }.
+async function handlePlanningSync(req, res) {
+  let raw = "";
+  try {
+    raw = await new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk.toString("utf8");
+        if (body.length > PLANNING_MAX_BODY) {
+          reject(new Error("too_large"));
+          req.destroy();
+        }
+      });
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
+    });
+  } catch {
+    return sendJson(res, 413, { error: "Programme trop volumineux." });
+  }
+
+  const channel = planningSiteChannel();
+  if (!channel) {
+    return sendJson(res, 409, { error: "Ce site redirection n'a pas encore de chaine : renseigne-la dans sa page Planning." });
+  }
+  const doc = readPlanning(channel);
+  const given = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const a = Buffer.from(given);
+  const b = Buffer.from(doc.syncKey || "");
+  if (!doc.syncKey || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return sendJson(res, 401, { error: "Code de liaison refuse : recopie le code affiche dans la page Planning du site redirection." });
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw || "{}");
+  } catch {
+    return sendJson(res, 400, { error: "Programme illisible." });
+  }
+  if (normalizePlanningChannel(body.channel) !== channel) {
+    return sendJson(res, 409, { error: `Ce site redirection est celui de #${channel}.` });
+  }
+  if (body.event === "hello") {
+    return sendJson(res, 200, { ok: true, channel });
+  }
+  if (body.event !== "program") {
+    return sendJson(res, 400, { error: "Evenement inconnu." });
+  }
+  writePlanning({ ...doc, program: cleanPlanningProgram(body), receivedAt: Date.now() });
+  return sendJson(res, 200, { ok: true });
+}
+
+// Mise en forme Discord minimale : **gras**, *italique*, caracteres echappes, retours a la ligne.
+function planningMarkdown(text) {
+  const kept = [];
+  let html = String(text || "").replace(/\\([*_~`|\\])/g, (_, char) => {
+    kept.push(char);
+    return `\u0000${kept.length - 1}\u0000`;
+  });
+  html = escapeHtml(html)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => escapeHtml(kept[Number(i)]));
+  return html.replace(/\n/g, "<br />");
+}
+
+const PLANNING_DAYS = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"];
+const PLANNING_MONTHS_SHORT = ["janv.", "fevr.", "mars", "avr.", "mai", "juin", "juil.", "aout", "sept.", "oct.", "nov.", "dec."];
 const planningHour = (time) => String(time || "").replace(":", "h");
 
-// Jaquette Twitch d'apres le nom exact de la categorie (Twitch redirige vers une image "404" sinon).
-async function planningBoxArt(category, cache) {
-  const name = String(category || "").trim();
-  if (!name) {
-    return "";
-  }
-  if (cache.has(name)) {
-    return cache.get(name);
-  }
-  const url = `https://static-cdn.jtvnw.net/ttv-boxart/${encodeURIComponent(name)}-144x192.jpg`;
-  const res = await fetch(url, { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(5000) }).catch(() => null);
-  const found = res && res.status === 200 ? url : "";
-  cache.set(name, found);
-  return found;
+function planningToday() {
+  return new Date().toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
 }
 
-async function buildPlanningMessage(doc) {
-  const live = doc.live === "live" ? true : doc.live === "offline" ? false : null;
-  const items = doc.items.filter((item) => item.subject);
-  const nextLine =
-    live !== true && doc.nextDate
-      ? `📅 **Prochain stream : ${planningDayText(doc.nextDate)}${doc.nextTime ? ` à ${planningHour(doc.nextTime)}` : ""}**`
-      : null;
-
-  const header = {
-    title: "📅 Programme du stream",
-    ...(doc.channel ? { url: `https://twitch.tv/${doc.channel}` } : {}),
-    description:
-      [
-        doc.scheduleText ? `${doc.scheduleText}\n` : null,
-        live === null ? null : live ? "🔴 **En direct**" : "⚫ Hors ligne",
-        nextLine,
-        doc.description ? `\n${doc.description}\n` : null,
-        items.length ? null : "Le programme n'est pas encore annoncé."
-      ]
-        .filter(Boolean)
-        .join("\n") || undefined,
-    color: live ? PLANNING_COLORS.live : PLANNING_COLORS.idle,
-    ...(doc.imageUrl ? { thumbnail: { url: doc.imageUrl } } : {}),
-    ...(doc.channel ? { footer: { text: `#${doc.channel}` } } : {}),
-    timestamp: new Date().toISOString()
-  };
-
-  const cache = new Map();
-  const statusOf = (item) => (item.status === "current" && live === false ? "upcoming" : item.status);
-  const shown = items.slice(0, PLANNING_MAX_CARDS);
-  const cards = [];
-  for (const item of shown) {
-    const status = statusOf(item);
-    const icon = status === "current" ? "▶️" : status === "done" ? "✅" : "⏳";
-    const thumb = item.imageUrl || (await planningBoxArt(item.category, cache));
-    const meta = [item.time ? `🕘 ${planningHour(item.time)}` : null, item.category || null].filter(Boolean).join(" · ");
-    const statusLine = status === "current" ? "**En cours**" : status === "done" ? "*Terminé*" : null;
-    cards.push({
-      title: `${icon} ${item.subject}`.slice(0, 250),
-      description: [meta, statusLine].filter(Boolean).join("\n") || undefined,
-      color: PLANNING_COLORS[status],
-      ...(thumb ? { thumbnail: { url: thumb } } : {})
-    });
-  }
-  const rest = items.slice(PLANNING_MAX_CARDS);
-  if (rest.length) {
-    cards[cards.length - 1].footer = {
-      text: `+ ${rest.length} autre${rest.length > 1 ? "s" : ""} : ${rest
-        .map((item) => `${item.time ? `${planningHour(item.time)} ` : ""}${item.subject}`)
-        .join(" · ")}`.slice(0, 2000)
-    };
-  }
-  return { embeds: [header, ...cards] };
+function planningAddDays(date, offset) {
+  const [y, m, d] = date.split("-").map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + offset, 12));
+  return next.toISOString().slice(0, 10);
 }
 
-const planningWithThread = (url, threadId) => (threadId ? `${url}${url.includes("?") ? "&" : "?"}thread_id=${threadId}` : url);
-
-async function planningDiscordCall(url, method, payload) {
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    ...(payload ? { body: JSON.stringify(payload) } : {}),
-    signal: AbortSignal.timeout(10000)
-  }).catch(() => null);
-  const body = res ? await res.json().catch(() => null) : null;
-  return { res, body };
+function planningDayParts(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  const weekday = new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay();
+  return { name: PLANNING_DAYS[weekday], short: `${d} ${PLANNING_MONTHS_SHORT[m - 1]}`, weekday };
 }
 
-function planningDiscordError(res, body, what = "le message") {
-  if (!res) {
-    return new Error("Discord ne repond pas.");
-  }
-  if (body?.code === 10015 || res.status === 401 || (res.status === 404 && body?.code !== 10003)) {
-    return new Error("Discord ne reconnait pas ce webhook : il a ete supprime ou son adresse est incomplete.");
-  }
-  if (body?.code === 220003) {
-    return new Error("Ce forum impose un tag sur chaque post : desactive « Exiger des tags » dans les reglages du forum.");
-  }
-  return new Error(`Discord a refuse ${what} (${res.status}${body?.message ? ` : ${body.message}` : ""}).`);
+function renderPlanningItem(item) {
+  const icon = item.status === "current" ? "\u25b6\ufe0f" : item.status === "done" ? "\u2705" : item.status === "planning" ? "\ud83d\udccc" : "";
+  return `
+    <li class="pw-item pw-${item.status}">
+      ${
+        item.thumbnail
+          ? `<img src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+          : `<span class="pw-noimg" aria-hidden="true"></span>`
+      }
+      <div>
+        <div class="pw-subject">${icon ? `${icon} ` : ""}${escapeHtml(item.subject)}</div>
+        <div class="pw-meta">${escapeHtml([item.time ? planningHour(item.time) : "", item.category].filter(Boolean).join(" \u00b7 "))}${
+          item.status === "current" ? ` <strong class="pw-now">En cours</strong>` : ""
+        }</div>
+      </div>
+    </li>`;
 }
 
-// Mention a la publication : "" (personne), "everyone", "here" ou l'id d'un role.
-function planningPing(ping) {
-  const value = String(ping || "").trim().replace(/^<@&(\d+)>$/, "$1").replace(/^@/, "");
-  if (value === "everyone" || value === "here") {
-    return { content: `@${value}`, allowed_mentions: { parse: ["everyone"] } };
-  }
-  if (/^\d{5,25}$/.test(value)) {
-    return { content: `<@&${value}>`, allowed_mentions: { parse: [], roles: [value] } };
-  }
-  return { allowed_mentions: { parse: [] } };
-}
+// Semaine glissante : aujourd'hui et les 6 jours suivants, un stream (ou "Pas de stream") par jour.
+function renderPublicPlanning(res, doc) {
+  const siteConfig = getSiteConfig();
+  const program = doc.program;
+  const today = planningToday();
+  const channel = doc.channel;
+  const updated = doc.receivedAt
+    ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })
+    : "";
 
-async function publishPlanning(doc, ping) {
-  if (!doc.webhookUrl) {
-    throw new Error("Enregistre d'abord l'adresse du webhook.");
-  }
-  if (doc.messageId) {
-    await planningDiscordCall(planningWithThread(`${doc.webhookUrl}/messages/${doc.messageId}`, doc.threadId), "DELETE");
-  }
-  const payload = {
-    ...(doc.webhookName ? { username: doc.webhookName } : {}),
-    ...planningPing(ping),
-    ...(await buildPlanningMessage(doc))
-  };
-  const base = `${doc.webhookUrl}?wait=true`;
-  let threadId = doc.threadId || "";
-  let { res, body } = await planningDiscordCall(planningWithThread(base, threadId), "POST", payload);
-  // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
-  if (res && !res.ok && (body?.code === 220001 || (threadId && body?.code === 10003))) {
-    ({ res, body } = await planningDiscordCall(base, "POST", { ...payload, thread_name: "Programme du stream" }));
-    threadId = res?.ok && body?.channel_id ? String(body.channel_id) : "";
-  }
-  if (!res || !res.ok) {
-    throw planningDiscordError(res, body);
-  }
-  writePlanning({
-    ...readPlanning(doc.channel),
-    messageId: body?.id ? String(body.id) : "",
-    threadId,
-    publishedAt: Date.now(),
-    lastShown: planningShown(payload)
-  });
-  return "Programme publie sur Discord";
-}
-
-async function updatePlanningMessage(doc) {
-  if (!doc.webhookUrl || !doc.messageId) {
-    throw new Error("Aucun message publie a mettre a jour : clique sur Publier.");
-  }
-  const message = await buildPlanningMessage(doc);
-  const { res, body } = await planningDiscordCall(
-    planningWithThread(`${doc.webhookUrl}/messages/${doc.messageId}`, doc.threadId),
-    "PATCH",
-    { allowed_mentions: { parse: [] }, ...message }
-  );
-  if (res && res.status === 404) {
-    writePlanning({ ...readPlanning(doc.channel), messageId: "" });
-    throw new Error("Le message a ete supprime dans Discord : clique sur Publier.");
-  }
-  if (!res || !res.ok) {
-    throw planningDiscordError(res, body, "la mise a jour du message");
-  }
-  writePlanning({ ...readPlanning(doc.channel), lastShown: planningShown(message) });
-  return "Message Discord mis a jour (sans notification)";
-}
-
-// Ce que montre le message (sans l'horodatage) : la copie automatique ne modifie que si ca change.
-function planningShown(message) {
-  return JSON.stringify((message.embeds || []).map(({ timestamp, ...embed }) => embed));
-}
-
-/* ---------------------- Import du message Discord de rooky-tv ---------------------- */
-// Le bot lit les derniers messages du salon source et prend le plus recent "Programme du stream",
-// puis le decode dans l'autre sens (meme format que buildPlanningMessage / rooky-tv).
-
-const PLANNING_MONTHS = ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"];
-const planningFold = (value) => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-const planningUnescapeMd = (value) => String(value || "").replace(/\\([*_~`|\\])/g, "$1");
-
-async function fetchPlanningSourceMessage(doc) {
-  if (!PLANNING_BOT_TOKEN) {
-    throw new Error("Ajoute DISCORD_BOT_TOKEN dans l'environnement du site pour lire Discord.");
-  }
-  if (!doc.sourceChannelId) {
-    throw new Error("Renseigne le salon Discord ou rooky-tv publie le programme.");
-  }
-  const res = await fetch(`https://discord.com/api/v10/channels/${doc.sourceChannelId}/messages?limit=50`, {
-    headers: { Authorization: `Bot ${PLANNING_BOT_TOKEN}` },
-    signal: AbortSignal.timeout(10000)
-  }).catch(() => null);
-  if (!res) {
-    throw new Error("Discord ne repond pas.");
-  }
-  if (res.status === 401) {
-    throw new Error("Discord refuse le token du bot (DISCORD_BOT_TOKEN).");
-  }
-  if (res.status === 403) {
-    throw new Error("Le bot n'a pas acces a ce salon : il lui faut Voir le salon et Lire l'historique des messages.");
-  }
-  if (res.status === 404) {
-    throw new Error("Salon introuvable : verifie l'ID (pour un forum, prends le lien du post).");
-  }
-  if (!res.ok) {
-    throw new Error(`Discord a refuse la lecture du salon (${res.status}).`);
-  }
-  const messages = await res.json().catch(() => []);
-  const ownWebhookId = (/\/webhooks\/(\d+)\//.exec(doc.webhookUrl || "") || [])[1] || "";
-  const found = (Array.isArray(messages) ? messages : []).find((m) => {
-    if (m.id === doc.messageId || (ownWebhookId && m.webhook_id === ownWebhookId)) {
-      return false; // notre propre copie, si les deux sont dans le meme salon
-    }
-    const title = m.embeds?.[0]?.title || "";
-    return title.includes("Programme du stream") || title.includes("Mode vacances");
-  });
-  if (!found) {
-    const anyEmbed = (Array.isArray(messages) ? messages : []).some((m) => m.webhook_id && !(m.embeds || []).length);
-    throw new Error(
-      anyEmbed
-        ? "Le bot ne voit pas le contenu des messages : active l'intent Message Content du bot (portail developpeur Discord)."
-        : "Aucun message \u00ab Programme du stream \u00bb dans les 50 derniers messages de ce salon."
-    );
-  }
-  return found;
-}
-
-// "aujourd'hui", "samedi 15 novembre" -> "2026-11-15" (heure de Paris).
-function planningParseDay(text) {
-  const today = new Date().toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
-  const folded = planningFold(text);
-  if (folded.includes("aujourd")) {
-    return today;
-  }
-  const m = /(\d{1,2})\s+([a-z]+)/.exec(folded);
-  const month = m ? PLANNING_MONTHS.indexOf(m[2]) + 1 : 0;
-  if (!month) {
-    return "";
-  }
-  let year = Number(today.slice(0, 4));
-  const pad = (n) => String(n).padStart(2, "0");
-  let date = `${year}-${pad(month)}-${pad(Number(m[1]))}`;
-  if (date < today) {
-    year += 1; // "15 janvier" annonce en decembre
-    date = `${year}-${pad(month)}-${pad(Number(m[1]))}`;
-  }
-  return date;
-}
-
-const planningParseHour = (text) => {
-  const m = /(\d{1,2})h(\d{2})/.exec(String(text || ""));
-  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
-};
-
-function decodePlanningMessage(message) {
-  const [header = {}, ...cards] = message.embeds || [];
-  const result = { live: "", nextDate: "", nextTime: "", scheduleText: "", description: "", imageUrl: header.thumbnail?.url || "", items: [] };
-
-  // En-tete : [horaires] / etat du direct / annules / prochain stream / [description] / titre actuel.
-  const before = [];
-  const after = [];
-  let marker = false;
-  for (const line of String(header.description || "").split("\n")) {
-    const clean = line.trim();
-    if (clean === "\ud83d\udd34 **En direct**") {
-      result.live = "live";
-    } else if (clean === "\u26ab Hors ligne") {
-      result.live = "offline";
-    } else if (/^\ud83d\udcc5 \*\*Prochain stream/.test(clean)) {
-      const m = /Prochain stream\s*:\s*(.+?)\*\*/.exec(clean);
-      const when = m ? m[1] : "";
-      result.nextDate = planningParseDay(when.split(" \u00e0 ")[0]);
-      result.nextTime = result.nextDate ? planningParseHour(when.split(" \u00e0 ")[1]) : "";
-    } else if (/^\*\*Prochain stream le (\d{2})\/(\d{2})\/(\d{4})\*\*$/.test(clean)) {
-      const [, d, mo, y] = /(\d{2})\/(\d{2})\/(\d{4})/.exec(clean);
-      result.nextDate = `${y}-${mo}-${d}`; // mode vacances : date de reprise
-    } else if (/^\u274c /.test(clean) || /^Titre actuel :/.test(clean) || clean === "Le programme n'est pas encore annonc\u00e9.") {
-      // annulations, titre Twitch et message par defaut : recalcules / sans objet ici
-    } else {
-      (marker ? after : before).push(line);
+  // Seulement les jours qui ont un stream, sur les 7 prochains jours (3 streams = 3 colonnes).
+  const lastDay = planningAddDays(today, 6);
+  const streamsByDay = new Map();
+  for (const stream of program?.days || []) {
+    if (stream.date < today || stream.date > lastDay) {
       continue;
     }
-    marker = true;
-  }
-  const join = (lines) => lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  if (marker) {
-    result.scheduleText = join(before);
-    result.description = join(after);
-  } else {
-    // Sans ligne reperable : horaires puis description sont separes par une ligne vide double.
-    const parts = String(header.description || "").split(/\n{3,}/);
-    result.scheduleText = parts.length > 1 ? parts[0].trim() : "";
-    result.description = join(parts.length > 1 ? parts.slice(1) : parts);
-  }
-
-  // Cartes : "<icone> titre", puis "\ud83d\udd58 21h00 \u00b7 Categorie" et "**En cours**" / "*Termine*".
-  const STATUS_BY_ICON = { "\u25b6\ufe0f": "current", "\u2705": "done", "\u23f3": "upcoming", "\ud83d\udccc": "upcoming" };
-  for (const card of cards) {
-    const title = String(card.title || "");
-    const icon = Object.keys(STATUS_BY_ICON).find((i) => title.startsWith(i));
-    const subject = icon ? title.slice(icon.length).trim() : title.trim();
-    if (!subject) {
-      continue;
+    if (!streamsByDay.has(stream.date)) {
+      streamsByDay.set(stream.date, []);
     }
-    const meta = String(card.description || "").split("\n")[0] || "";
-    const parts = meta.split(" \u00b7 ");
-    const hasHour = /^\ud83d\udd58/.test(parts[0] || "");
-    const category = (hasHour ? parts.slice(1) : parts).join(" \u00b7 ").trim();
-    result.items.push({
-      time: hasHour ? planningParseHour(parts[0]) : "",
-      subject: planningUnescapeMd(subject).slice(0, 200),
-      category: category === "Organisation uniquement" ? "" : category.slice(0, 100),
-      imageUrl: card.thumbnail?.url || "",
-      status: icon ? STATUS_BY_ICON[icon] : "upcoming"
-    });
-    // Au-dela de 9 titres, rooky-tv liste la suite dans le pied de la derniere carte.
-    const rest = /^\+ \d+ autres? : (.+)$/s.exec(String(card.footer?.text || ""));
-    if (rest) {
-      for (const entry of rest[1].split(" \u00b7 ")) {
-        const m = /^(\d{1,2})h(\d{2}) (.+)$/.exec(entry.trim());
-        const extra = (m ? m[3] : entry).trim();
-        if (extra) {
-          result.items.push({ time: m ? `${m[1].padStart(2, "0")}:${m[2]}` : "", subject: extra.slice(0, 200), category: "", imageUrl: "", status: "upcoming" });
-        }
-      }
-    }
+    streamsByDay.get(stream.date).push(stream);
   }
-  return result;
-}
+  const days = [...streamsByDay.keys()].sort();
 
-async function importPlanningFromDiscord(doc) {
-  const message = await fetchPlanningSourceMessage(doc);
-  return { ...doc, ...decodePlanningMessage(message) };
-}
+  const columns = days
+    .map((date) => {
+      const { name, short } = planningDayParts(date);
+      const streams = streamsByDay.get(date) || [];
+      const isToday = date === today;
+      const body = streams
+            .map((stream) => {
+              const badges = [
+                isToday && program?.live === true && !stream.cancelled ? `<span class="pw-badge pw-live">\ud83d\udd34 En direct</span>` : "",
+                stream.cancelled ? `<span class="pw-badge pw-cancel">Annule</span>` : "",
+                stream.postponed ? `<span class="pw-badge">Reporte</span>` : ""
+              ].join("");
+              return `
+            <div class="pw-stream${stream.cancelled ? " is-cancelled" : ""}">
+              <div class="pw-time">${stream.time ? escapeHtml(planningHour(stream.time)) : "Heure a venir"}</div>
+              ${badges ? `<div class="pw-badges">${badges}</div>` : ""}
+              ${stream.description ? `<p class="pw-desc">${planningMarkdown(stream.description)}</p>` : ""}
+              ${
+                stream.items.length
+                  ? `<ul class="pw-items">${stream.items.map(renderPlanningItem).join("")}</ul>`
+                  : stream.cancelled
+                    ? ""
+                    : `<p class="pw-empty">Programme bientot annonce</p>`
+              }
+            </div>`;
+            })
+            .join("");
+      return `
+      <section class="pw-day${isToday ? " is-today" : ""}">
+        <header class="pw-day-head">
+          <span class="pw-day-name">${isToday ? "Aujourd'hui" : name}</span>
+          <span class="pw-day-date">${escapeHtml(short)}</span>
+        </header>
+        ${body}
+      </section>`;
+    })
+    .join("");
 
-// Copie automatique : relit le programme de rooky-tv et corrige notre message deja publie, sans
-// notification, seulement si ce qu'il montre change. Sans message publie : rien (premier "Publier"
-// a faire a la main, pour choisir la mention).
-let planningSyncRunning = false;
-async function runPlanningSync() {
-  if (planningSyncRunning || !PLANNING_BOT_TOKEN) {
-    return;
-  }
-  planningSyncRunning = true;
-  try {
-    for (const channel of [planningSiteChannel()].filter(Boolean)) {
-      const doc = readPlanning(channel);
-      if (!doc.autoSync || !doc.sourceChannelId) {
-        continue;
-      }
-      try {
-        const next = await importPlanningFromDiscord(doc);
-        writePlanning({ ...next, lastSyncAt: Date.now(), lastSyncError: "" });
-        if (next.webhookUrl && next.messageId && planningShown(await buildPlanningMessage(next)) !== doc.lastShown) {
-          await updatePlanningMessage(readPlanning(channel));
-          console.log(`[planning:${channel}] copie automatique : message mis a jour`);
-        }
-      } catch (error) {
-        writePlanning({ ...readPlanning(channel), lastSyncAt: Date.now(), lastSyncError: error.message });
-        console.error(`[planning:${channel}] copie automatique : ${error.message}`);
-      }
-    }
-  } finally {
-    planningSyncRunning = false;
-  }
-}
-
-function renderPlanning(res, doc, flash) {
-  const messages = renderMessages(flash);
-  const when = (at) => new Date(at).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS });
-  const minutes = Math.round(PLANNING_SYNC_INTERVAL_MS / 60000);
-
-  // Resume du dernier programme lu (lecture seule).
-  const items = doc.items.filter((item) => item.subject);
-  const summary = doc.lastSyncAt
-    ? [
-        doc.live === "live" ? "\ud83d\udd34 En direct" : doc.nextDate ? `Prochain stream : ${planningDayText(doc.nextDate)}${doc.nextTime ? ` a ${planningHour(doc.nextTime)}` : ""}` : "",
-        items.length
-          ? `${items.length} titre${items.length > 1 ? "s" : ""} : ${items.map((item) => `${item.time ? `${planningHour(item.time)} ` : ""}${item.subject}`).join(" \u00b7 ")}`
-          : "Programme pas encore annonce"
-      ].filter(Boolean)
-    : [];
+  const vacation = program?.vacation;
+  const status =
+    program?.live === true
+      ? `<span class="pw-badge pw-live">\ud83d\udd34 En direct</span>`
+      : program?.live === false
+        ? `<span class="pw-badge">\u26ab Hors ligne</span>`
+        : "";
 
   const content = `
     <style>
-      .planning-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-      .planning-hint { font-size: 13px; color: var(--muted); margin: 0; }
-      .planning-steps { margin: 0; padding-left: 20px; color: var(--muted); line-height: 1.7; }
+      .pw { display: grid; gap: 18px; }
+      .pw-hero {
+        display: flex; gap: 18px; align-items: center; justify-content: space-between;
+        background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 22px 24px;
+      }
+      .pw-hero h1 { margin: 0 0 6px; font-size: 1.7rem; }
+      .pw-hero p { margin: 0; color: var(--muted); line-height: 1.55; }
+      .pw-hero-side { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+      .pw-hero img { width: 84px; height: 84px; border-radius: 16px; object-fit: cover; }
+      .pw-hero-status { display: flex; gap: 8px; align-items: center; margin: 10px 0 0; flex-wrap: wrap; }
+      .pw-vacation { background: rgba(254, 231, 92, 0.1); border: 1px solid rgba(254, 231, 92, 0.35); border-radius: 16px; padding: 16px 20px; }
+      .pw-vacation strong { color: #fee75c; }
+      .pw-week { display: grid; grid-template-columns: repeat(var(--pw-cols, 7), minmax(0, 1fr)); gap: 12px; align-items: start; }
+      .pw-day {
+        background: rgba(22, 25, 34, 0.95); border: 1px solid rgba(69, 224, 210, 0.35); border-radius: 16px; padding: 14px;
+        display: grid; gap: 10px; align-content: start;
+      }
+      .pw-day.is-today { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+      .pw-day-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+      .pw-day-name { font-weight: 700; }
+      .pw-day.is-today .pw-day-name { color: var(--accent); }
+      .pw-day-date { font-size: 12px; color: var(--muted); }
+      .pw-off { margin: 0; color: var(--muted); font-size: 13px; opacity: 0.7; }
+      .pw-stream { display: grid; gap: 8px; }
+      .pw-stream.is-cancelled .pw-time { text-decoration: line-through; opacity: 0.6; }
+      .pw-time { font-size: 1.35rem; font-weight: 800; color: #45e0d2; letter-spacing: 0.01em; }
+      .pw-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+      .pw-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: var(--ink); }
+      .pw-live { background: rgba(255, 107, 135, 0.18); color: #ff6b87; }
+      .pw-cancel { background: rgba(240, 85, 95, 0.18); color: var(--danger); }
+      .pw-desc { margin: 0; font-size: 13px; line-height: 1.5; color: var(--ink); }
+      .pw-empty { margin: 0; font-size: 13px; color: var(--muted); font-style: italic; }
+      .pw-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+      .pw-item { display: flex; gap: 8px; align-items: center; }
+      .pw-item img, .pw-noimg { width: 34px; height: 45px; border-radius: 5px; object-fit: cover; flex: 0 0 auto; background: rgba(255, 255, 255, 0.06); }
+      .pw-subject { font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+      .pw-meta { font-size: 12px; color: var(--muted); }
+      .pw-now { color: #ff6b87; font-weight: 700; }
+      .pw-done { opacity: 0.55; }
+      .pw-current .pw-subject { color: #ff6b87; }
+      .pw-foot { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+      .pw-foot a { color: var(--muted); }
+      @media (max-width: 1100px) { .pw-week { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); } }
+      @media (max-width: 760px) {
+        .pw-week { grid-template-columns: 1fr; }
+        .pw-hero { flex-direction: column-reverse; align-items: flex-start; }
+      }
+    </style>
+    <main class="pw">
+      <section class="pw-hero">
+        <div>
+          <h1>Programme de la semaine</h1>
+          ${program?.scheduleText ? `<p>${planningMarkdown(program.scheduleText)}</p>` : ""}
+          <div class="pw-hero-status">
+            ${status}
+            ${channel ? `<a class="link-button" href="https://twitch.tv/${escapeHtml(channel)}" target="_blank" rel="noreferrer">Regarder sur Twitch</a>` : ""}
+          </div>
+        </div>
+        ${program?.imageUrl ? `<div class="pw-hero-side"><img src="${escapeHtml(program.imageUrl)}" alt="" referrerpolicy="no-referrer" /></div>` : ""}
+      </section>
+      ${
+        vacation
+          ? `<section class="pw-vacation"><strong>\ud83c\udfd6\ufe0f En vacances</strong> \u2014 retour le ${escapeHtml(vacation.until.split("-").reverse().join("/"))}${
+              vacation.message ? `<br />${planningMarkdown(vacation.message)}` : ""
+            }</section>`
+          : ""
+      }
+      ${
+        !program
+          ? `<section class="pw-vacation">Le programme n'est pas encore disponible.</section>`
+          : days.length
+            ? `<div class="pw-week" style="--pw-cols:${days.length}">${columns}</div>`
+            : vacation
+              ? ""
+              : `<section class="pw-vacation">Aucun stream prevu dans les 7 prochains jours.</section>`
+      }
+      <footer class="pw-foot">
+        <span>${updated ? `Mis a jour le ${escapeHtml(updated)}` : ""}</span>
+        <a href="/">Retour a ${escapeHtml(siteConfig.title)}</a>
+      </footer>
+    </main>
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Programme de la semaine", content, { wide: true }));
+}
+
+function renderPlanning(res, doc, flash, origin) {
+  const messages = renderMessages(flash);
+  const code = doc.channel && doc.syncKey ? `${origin}/api/planning/sync#${doc.syncKey}` : "";
+  const received = doc.receivedAt
+    ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS })
+    : "";
+  const today = planningToday();
+  const lastDay = planningAddDays(today, 6);
+  const upcoming = (doc.program?.days || []).filter((day) => day.date >= today && day.date <= lastDay);
+
+  const content = `
+    <style>
+      .planning-steps { margin: 0; padding-left: 20px; color: var(--muted); line-height: 1.8; }
       .planning-steps strong { color: var(--ink); }
+      .planning-code { display: flex; gap: 8px; }
+      .planning-code input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+      .planning-hint { font-size: 13px; color: var(--muted); margin: 0; }
       .planning-state { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
       .planning-state strong { color: var(--ink); }
       .planning-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -2766,7 +2622,7 @@ function renderPlanning(res, doc, flash) {
     <header class="topbar">
       <div>
         <h1>Planning</h1>
-        <p>Recopie le message \u00ab Programme du stream \u00bb de rooky-tv dans un autre salon Discord.</p>
+        <p>Affiche le programme du stream de rooky-tv sur la page publique <a href="/planning" target="_blank" rel="noreferrer">/planning</a>.</p>
       </div>
       <div class="topbar-actions">
         <a href="/admin" class="link-button secondary">Redirections</a>
@@ -2777,77 +2633,73 @@ function renderPlanning(res, doc, flash) {
       </div>
     </header>
     ${messages}
-    ${
-      PLANNING_BOT_TOKEN
-        ? ""
-        : `<div class="message error">Ajoute <code>DISCORD_BOT_TOKEN</code> dans l'environnement du site (Dokploy &rarr; Environment) puis redeploie : sans bot, le site ne peut pas lire le programme.</div>`
-    }
     <section class="card">
       <h2>Comment ca marche</h2>
       <ol class="planning-steps">
-        <li>Le programme se prepare <strong>sur rooky-tv</strong>, rien a saisir ici.</li>
-        <li>Indique la <strong>chaine</strong>, le <strong>salon ou rooky-tv publie</strong> le programme et le <strong>webhook du salon</strong> ou le recopier.</li>
-        <li>Clique sur <strong>Publier maintenant</strong>.</li>
-        <li>Avec la <strong>copie automatique</strong>, le message se met a jour tout seul (toutes les ${minutes} min, sans notification).</li>
+        <li>Indique la <strong>chaine Twitch</strong> de ce site et enregistre.</li>
+        <li>Copie le <strong>code de liaison</strong> ci-dessous.</li>
+        <li>Sur <strong>rooky-tv</strong> : Programme &rarr; Programme sur Discord &rarr; <strong>Sites redirection</strong>, colle le code puis \u00ab Relier \u00bb.</li>
+        <li>Le programme s'affiche sur <a href="/planning" target="_blank" rel="noreferrer">/planning</a> et se met a jour a chaque changement sur rooky-tv.</li>
       </ol>
     </section>
     <form method="post" action="/admin/planning" class="card">
       <h2>Liaison</h2>
       <div class="form-grid">
-        <div class="planning-two">
-          <label>
-            <span>Chaine Twitch de ce site</span>
-            <input type="text" name="channel" value="${escapeHtml(doc.channel)}" placeholder="ex : rooky" required />
-          </label>
-          <label>
-            <span>Salon ou rooky-tv publie le programme (lien ou ID)</span>
-            <input type="text" name="sourceChannel" value="${escapeHtml(doc.sourceChannelId)}" placeholder="https://discord.com/channels/..." />
-          </label>
-          <label>
-            <span>Webhook du salon ou recopier ${doc.webhookUrl ? "(enregistre \u2714, vide = le garder)" : ""}</span>
-            <input type="password" name="webhookUrl" autocomplete="off" placeholder="https://discord.com/api/webhooks/..." />
-          </label>
-          <label>
-            <span>Nom affiche (optionnel)</span>
-            <input type="text" name="webhookName" value="${escapeHtml(doc.webhookName)}" maxlength="80" />
-          </label>
-          <label>
-            <span>Mentionner a la publication (optionnel)</span>
-            <input type="text" name="ping" placeholder="everyone, here ou ID d'un role" />
-          </label>
-        </div>
-        <label class="checkbox-label">
-          <input type="checkbox" name="autoSync" value="1" ${doc.autoSync ? "checked" : ""} />
-          <span>Copie automatique</span>
+        <label>
+          <span>Chaine Twitch de ce site</span>
+          <input type="text" name="channel" value="${escapeHtml(doc.channel)}" placeholder="ex : rooky" required />
         </label>
         ${
-          doc.webhookUrl
-            ? `<label class="checkbox-label"><input type="checkbox" name="removeWebhook" value="1" /><span>Retirer le webhook</span></label>`
+          code
+            ? `<label>
+                <span>Code de liaison (a coller dans rooky-tv, a garder pour toi)</span>
+                <div class="planning-code">
+                  <input type="text" id="planning-code" value="${escapeHtml(code)}" readonly />
+                  <button type="button" class="secondary" id="planning-copy">Copier</button>
+                </div>
+              </label>`
             : ""
         }
         <div class="planning-actions">
-          <button type="submit" name="action" value="publish">Publier maintenant</button>
-          <button type="submit" name="action" value="save" class="secondary">Enregistrer</button>
+          <button type="submit" name="action" value="save">Enregistrer</button>
+          ${
+            code
+              ? `<button type="submit" name="action" value="newkey" class="secondary" onclick="return confirm('L\\'ancien code ne marchera plus : il faudra recoller le nouveau dans rooky-tv. Continuer ?')">Nouveau code</button>`
+              : ""
+          }
         </div>
-        <p class="planning-hint">\u00ab Publier maintenant \u00bb efface l'ancien message et en poste un nouveau. Pour un salon forum, colle le lien du post.</p>
       </div>
     </form>
     <section class="card">
       <h2>Etat</h2>
       <div class="planning-state">
-        <div>${
-          doc.lastSyncError
-            ? `<span class="status-missing">Derniere lecture en echec : ${escapeHtml(doc.lastSyncError)}</span>`
-            : doc.lastSyncAt
-              ? `<strong>Derniere lecture</strong> le ${escapeHtml(when(doc.lastSyncAt))}`
-              : "Jamais lu."
-        }</div>
-        ${summary.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
-        <div>${doc.messageId ? `<strong>Publie</strong>${doc.publishedAt ? ` le ${escapeHtml(when(doc.publishedAt))}` : ""}` : "Pas encore publie."}${
-          doc.autoSync && !doc.messageId ? " La copie automatique demarre apres la premiere publication." : ""
-        }</div>
+        <div>${received ? `<strong>Dernier programme recu</strong> le ${escapeHtml(received)}` : "Aucun programme recu pour l'instant."}</div>
+        ${
+          upcoming.length
+            ? `<div>${escapeHtml(
+                `${upcoming.length} stream${upcoming.length > 1 ? "s" : ""} cette semaine : ${upcoming
+                  .map((day) => `${planningDayParts(day.date).name} ${day.time ? planningHour(day.time) : ""}${day.cancelled ? " (annule)" : ""}`.trim())
+                  .join(" \u00b7 ")}`
+              )}</div>`
+            : doc.receivedAt
+              ? "<div>Aucun stream prevu dans les 7 prochains jours.</div>"
+              : ""
+        }
       </div>
     </section>
+    <script>
+      (function () {
+        var button = document.getElementById("planning-copy");
+        if (!button) return;
+        button.addEventListener("click", function () {
+          var input = document.getElementById("planning-code");
+          input.select();
+          var done = function () { button.textContent = "Copie !"; setTimeout(function () { button.textContent = "Copier"; }, 1500); };
+          if (navigator.clipboard) navigator.clipboard.writeText(input.value).then(done, function () { document.execCommand("copy"); done(); });
+          else { document.execCommand("copy"); done(); }
+        });
+      })();
+    </script>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });

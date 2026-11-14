@@ -34,16 +34,15 @@ Ouvrez `http://localhost:3000`.
 
 Important pour le wildcard `*.monsite.com`: cote DNS et Dokploy, un domaine wildcard doit aussi etre declare (DNS `*.monsite.com` et domaine `*.monsite.com` cote Dokploy/Traefik) pour que le trafic des sous-domaines non prevus atteigne bien le conteneur. Sans ca, seuls les sous-domaines explicitement declares dans Dokploy fonctionneront, meme si la redirection est bien enregistree dans l'application.
 
-## Planning (liaison Discord)
+## Planning (page publique)
 
-La page `/admin/planning` recopie dans un autre salon Discord le message "Programme du stream" publie par rooky-tv. Le programme se prepare sur rooky-tv : rien n'est saisi sur ce site.
+La page publique `/planning` affiche la semaine de streams de la chaine (aujourd'hui et les 6 jours suivants) avec le programme de chaque stream, envoyes par rooky-tv. Rien ne se saisit sur ce site et rien n'est publie sur Discord.
 
-1. Ajoutez `DISCORD_BOT_TOKEN` dans l'environnement du site : un bot present sur le serveur de rooky-tv, avec Voir le salon, Lire l'historique et l'intent Message Content.
-2. Dans la page : chaine Twitch du site, salon ou rooky-tv publie le programme, webhook du salon ou le recopier.
-3. "Publier maintenant" lit le message de rooky-tv et le publie (l'ancien message est efface).
-4. "Copie automatique" relit le message toutes les `PLANNING_SYNC_MINUTES` minutes (5 par defaut) et met a jour le message publie, sans notification, seulement s'il change.
+1. Dans `/admin/planning`, indiquez la chaine Twitch du site et enregistrez : un code de liaison s'affiche.
+2. Sur rooky-tv (Programme > Programme sur Discord > Sites redirection), collez ce code puis "Relier".
+3. rooky-tv envoie ensuite le programme a chaque changement (`POST /api/planning/sync`, protege par le code).
 
-La liaison est stockee dans `planning/<chaine>.json` du dossier `DATA_DIR`, la chaine du site dans `site-config.json`.
+"Nouveau code" invalide l'ancien (a recoller dans rooky-tv). Le programme recu est stocke dans `planning/<chaine>.json` du dossier `DATA_DIR`, la chaine du site dans `site-config.json`. Aucune variable d'environnement n'est necessaire.
 
 ## Persistance Dokploy
 
