@@ -2475,8 +2475,9 @@ async function handlePlanningSync(req, res) {
     return sendJson(res, 400, { error: "Evenement inconnu." });
   }
   writePlanning({ ...doc, program: cleanPlanningProgram(body), receivedAt: Date.now() });
-  // L'image Discord suit le planning (modifiee sur place, seulement si elle change).
-  queuePlanningImage("auto").catch(() => {});
+  // L'image Discord suit le planning (modifiee sur place, seulement si elle change) ; programme publie
+  // sur Discord par rooky-tv : toujours mise a jour.
+  queuePlanningImage(body.reason === "publish" ? "update" : "auto").catch(() => {});
   return sendJson(res, 200, { ok: true });
 }
 
