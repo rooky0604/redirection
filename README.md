@@ -42,6 +42,8 @@ La page publique `/planning` affiche la grille de la semaine (lundi a dimanche) 
 2. Sur rooky-tv (Programme > Programme sur Discord > Sites redirection), collez ce code puis "Relier".
 3. rooky-tv envoie ensuite le programme a chaque changement (`POST /api/planning/sync`, protege par le code).
 
+Image sur Discord : dans `/admin/planning`, collez le webhook d'un salon. Le programme de la semaine y est publie en image (meme grille que la page) et le message est mis a jour tout seul, sans notification, a chaque changement du planning et a chaque nouveau jour. "Republier" poste un nouveau message (mention optionnelle). L'image est generee avec `sharp` ; l'image Docker installe la police DejaVu (`font-dejavu`) et les dependances (`npm ci`).
+
 "Nouveau code" invalide l'ancien (a recoller dans rooky-tv). Le programme recu est stocke dans `planning/<chaine>.json` du dossier `DATA_DIR`, la chaine du site dans `site-config.json`. Aucune variable d'environnement n'est necessaire.
 
 ## Persistance Dokploy

@@ -700,6 +700,78 @@ const requestListener = async (req, res) => {
       return renderPlanning(res, readPlanning(planningSiteChannel()), getFlashMessage(url), requestOrigin(req));
     }
 
+    if (pathname === "/admin/planning/image.png" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      try {
+        const png = await renderPlanningImage({ ...readPlanning(planningSiteChannel()), siteUrl: requestOrigin(req) });
+        res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store" });
+        res.end(png);
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(error.message);
+      }
+      return;
+    }
+
+    if (pathname === "/admin/planning/image" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const form = await parseForm(req);
+      const back = (key, message) => `/admin/planning?${key}=${encodeURIComponent(message)}`;
+      const channel = planningSiteChannel();
+      if (!channel) {
+        redirect(res, back("error", "Indique d'abord la chaine Twitch de ce site."));
+        return;
+      }
+      const doc = readPlanning(channel);
+      const next = { ...doc, siteUrl: requestOrigin(req) };
+      if (form.action === "remove") {
+        if (doc.imageWebhookUrl && doc.imageMessageId) {
+          await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${doc.imageMessageId}`, doc.imageThreadId), "DELETE");
+        }
+        writePlanning({ ...next, imageWebhookUrl: "", imageMessageId: "", imageThreadId: "", imageKey: "", imageError: "" });
+        redirect(res, back("success", "Webhook retire, image effacee"));
+        return;
+      }
+      const url = String(form.webhookUrl || "").trim();
+      if (url && !PLANNING_WEBHOOK.test(url)) {
+        redirect(res, back("error", "Ce n'est pas une adresse de webhook Discord (https://discord.com/api/webhooks/...)."));
+        return;
+      }
+      const name = String(form.webhookName || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (/discord|clyde/i.test(name)) {
+        redirect(res, back("error", "Discord refuse les noms de webhook qui contiennent « discord » ou « clyde »."));
+        return;
+      }
+      const changedUrl = url && url !== doc.imageWebhookUrl;
+      if (changedUrl && doc.imageWebhookUrl && doc.imageMessageId) {
+        // Nouveau salon : l'image de l'ancien salon est effacee.
+        await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${doc.imageMessageId}`, doc.imageThreadId), "DELETE");
+      }
+      writePlanning({
+        ...next,
+        imageWebhookUrl: changedUrl ? url : doc.imageWebhookUrl,
+        imageWebhookName: name,
+        ...(changedUrl ? { imageMessageId: "", imageThreadId: "", imageKey: "" } : {})
+      });
+      try {
+        // Premier webhook ou "Republier" : nouveau message (avec la mention choisie) ; sinon mise a jour.
+        const fresh = changedUrl || form.action === "publish";
+        await queuePlanningImage(fresh ? "new" : "update", { ping: form.ping || "" });
+        redirect(res, back("success", fresh ? "Image publiee sur Discord : elle suivra le planning toute seule" : "Enregistre, image mise a jour"));
+      } catch (error) {
+        redirect(res, back("error", error.message));
+      }
+      return;
+    }
+
     if (pathname === "/admin/planning" && method === "POST") {
       if (!isAuthenticated(req)) {
         redirect(res, "/login");
@@ -848,6 +920,12 @@ async function startServer() {
   setInterval(() => {
     runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
   }, MONITOR_INTERVAL_MS);
+
+  // Image Discord du programme : passe au jour suivant ("Aujourd'hui", jours passes) meme sans envoi.
+  // (startServer tourne avant l'initialisation des constantes du bas du fichier : valeur ecrite ici.)
+  setInterval(() => {
+    queuePlanningImage("auto").catch(() => {});
+  }, 10 * 60 * 1000);
 }
 
 function isDnsHostname(host) {
@@ -2276,7 +2354,16 @@ function readPlanning(channel) {
     channel,
     syncKey: parsed.syncKey || "",
     program: parsed.program && typeof parsed.program === "object" ? parsed.program : null,
-    receivedAt: parsed.receivedAt || 0
+    receivedAt: parsed.receivedAt || 0,
+    siteUrl: parsed.siteUrl || "",
+    // Image du programme sur Discord (webhook) : l'adresse est un secret, jamais renvoyee au navigateur.
+    imageWebhookUrl: parsed.imageWebhookUrl || "",
+    imageWebhookName: parsed.imageWebhookName || "",
+    imageMessageId: parsed.imageMessageId || "",
+    imageThreadId: parsed.imageThreadId || "",
+    imageKey: parsed.imageKey || "",
+    imagePublishedAt: parsed.imagePublishedAt || 0,
+    imageError: parsed.imageError || ""
   };
 }
 
@@ -2387,6 +2474,8 @@ async function handlePlanningSync(req, res) {
     return sendJson(res, 400, { error: "Evenement inconnu." });
   }
   writePlanning({ ...doc, program: cleanPlanningProgram(body), receivedAt: Date.now() });
+  // L'image Discord suit le planning (modifiee sur place, seulement si elle change).
+  queuePlanningImage("auto").catch(() => {});
   return sendJson(res, 200, { ok: true });
 }
 
@@ -2442,21 +2531,14 @@ function renderPlanningItem(item) {
     </li>`;
 }
 
-// Semaine glissante : aujourd'hui et les 6 jours suivants, un stream (ou "Pas de stream") par jour.
-function renderPublicPlanning(res, doc) {
-  const siteConfig = getSiteConfig();
-  const program = doc.program;
+// Grille de la semaine, du lundi au dimanche, toujours complete pour ne jamais etre vide : jours passes =
+// streams termines (agenda de la chaine, via rooky-tv), aujourd'hui et apres = planning. Partagee par
+// la page publique et l'image Discord.
+function planningWeek(program) {
   const today = planningToday();
-  const channel = doc.channel;
-  const updated = doc.receivedAt
-    ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })
-    : "";
-
-  // Grille de la semaine, du lundi au dimanche, toujours affichee pour que la page ne soit jamais vide :
-  // jours passes = streams termines (agenda de la chaine, via rooky-tv), a venir = planning.
   const monday = planningAddDays(today, -((planningDayParts(today).weekday + 6) % 7));
   const lastDay = planningAddDays(monday, 6);
-  const vacation = program?.vacation;
+  const vacation = program?.vacation || null;
   const streamsByDay = new Map();
   for (const stream of program?.days || []) {
     if (stream.date < monday || stream.date > lastDay) {
@@ -2471,20 +2553,41 @@ function renderPublicPlanning(res, doc) {
     }
     streamsByDay.get(stream.date).push(stream);
   }
-  const days = Array.from({ length: 7 }, (_, i) => planningAddDays(monday, i));
-  const emptyText = (date) =>
-    date < today
-      ? program?.history ? "Pas de stream" : "—"
-      : !program ? "Programme bientot disponible" : vacation ? "En vacances" : "Pas de stream";
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const date = planningAddDays(monday, i);
+    const { name, short } = planningDayParts(date);
+    return {
+      date,
+      name,
+      short,
+      isToday: date === today,
+      isPast: date < today,
+      streams: streamsByDay.get(date) || [],
+      emptyText:
+        date < today
+          ? program?.history ? "Pas de stream" : "—"
+          : !program ? "Programme bientot disponible" : vacation ? "En vacances" : "Pas de stream"
+    };
+  });
+  return { today, monday, lastDay, vacation, days };
+}
 
-  const columns = days
-    .map((date) => {
-      const { name, short } = planningDayParts(date);
-      const streams = streamsByDay.get(date) || [];
-      const isToday = date === today;
-      const isPast = date < today;
+function renderPublicPlanning(res, doc) {
+  const siteConfig = getSiteConfig();
+  const program = doc.program;
+  const today = planningToday();
+  const channel = doc.channel;
+  const updated = doc.receivedAt
+    ? new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })
+    : "";
+
+  const week = planningWeek(program);
+  const vacation = week.vacation;
+
+  const columns = week.days
+    .map(({ date, name, short, streams, isToday, isPast, emptyText }) => {
       const body = !streams.length
-        ? `<p class="pw-off">${emptyText(date)}</p>`
+        ? `<p class="pw-off">${emptyText}</p>`
         : streams
             .map((stream) => {
               const badges = [
@@ -2570,7 +2673,10 @@ function renderPublicPlanning(res, doc) {
       .pw-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
       .pw-item { display: flex; gap: 8px; align-items: center; }
       .pw-item img, .pw-noimg { width: 34px; height: 45px; border-radius: 5px; object-fit: cover; flex: 0 0 auto; background: rgba(255, 255, 255, 0.06); }
-      .pw-subject { font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+      .pw-subject {
+        font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere;
+        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+      }
       .pw-meta { font-size: 12px; color: var(--muted); }
       .pw-now { color: #ff6b87; font-weight: 700; }
       .pw-done { opacity: 0.55; }
@@ -2615,6 +2721,420 @@ function renderPublicPlanning(res, doc) {
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Programme de la semaine", content, { wide: true }));
+}
+
+/* ------------------------- Image du programme (Discord) ------------------------- */
+// Le programme de la semaine dessine en image (meme grille que /planning) et publie par webhook dans
+// un salon Discord. L'image suit le planning : a chaque programme recu de rooky-tv (et au changement
+// de jour), le message est modifie sur place, sans notification. SVG -> PNG avec sharp (police
+// DejaVu installee dans l'image Docker) ; jaquettes telechargees et integrees dans l'image.
+
+const PLANNING_WEBHOOK = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
+const IMG = {
+  width: 1600,
+  pad: 40,
+  gap: 12,
+  font: "DejaVu Sans, Segoe UI, Arial, sans-serif",
+  bg: "#0b0d12",
+  panel: "#161922",
+  panelSoft: "#11141b",
+  line: "#262b38",
+  ink: "#eef0f5",
+  muted: "#939aad",
+  accent: "#6d5ef7",
+  cyan: "#45e0d2",
+  rose: "#ff6b87",
+  danger: "#f0555f"
+};
+
+const svgText = (value) => escapeHtml(value);
+// Pas d'emoji dans l'image (police sans emoji) ; pas de mise en forme Discord.
+function imagePlain(value) {
+  return String(value || "")
+    .replace(/\\([*_~`|\\])/g, "$1")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}‍️⃣]/gu, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+// Decoupe en lignes d'apres une largeur moyenne de caractere (DejaVu Sans ~0,6 em).
+function imageWrap(text, maxWidth, size, maxLines, ratio = 0.6) {
+  const maxChars = Math.max(4, Math.floor(maxWidth / (size * ratio)));
+  const lines = [];
+  for (const paragraph of imagePlain(text).split("\n")) {
+    let line = "";
+    for (let word of paragraph.split(" ").filter(Boolean)) {
+      while (word.length > maxChars) {
+        if (line) {
+          lines.push(line);
+          line = "";
+        }
+        lines.push(word.slice(0, maxChars));
+        word = word.slice(maxChars);
+      }
+      if (!line) {
+        line = word;
+      } else if (line.length + 1 + word.length <= maxChars) {
+        line += ` ${word}`;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) {
+      lines.push(line);
+    }
+  }
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    kept[maxLines - 1] = `${kept[maxLines - 1].slice(0, Math.max(1, maxChars - 1))}…`;
+    return kept;
+  }
+  return lines;
+}
+
+const imageThumbCache = new Map();
+async function imageThumb(url) {
+  if (!url) {
+    return "";
+  }
+  if (imageThumbCache.has(url)) {
+    return imageThumbCache.get(url);
+  }
+  let data = "";
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const type = res.headers.get("content-type") || "";
+    if (res.ok && /^image\/(png|jpeg|webp|gif)/.test(type)) {
+      data = `data:${type.split(";")[0]};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+    }
+  } catch {
+    data = "";
+  }
+  if (imageThumbCache.size > 300) {
+    imageThumbCache.clear();
+  }
+  imageThumbCache.set(url, data);
+  return data;
+}
+
+function imagePill(x, y, label, fill, color) {
+  const width = Math.round(label.length * 7.4 + 20);
+  return {
+    width,
+    svg: `<rect x="${x}" y="${y}" width="${width}" height="24" rx="12" fill="${fill}"/><text x="${x + width / 2}" y="${y + 16.5}" font-size="12" font-weight="700" fill="${color}" text-anchor="middle" letter-spacing="0.6">${svgText(label)}</text>`
+  };
+}
+
+// Ce que montre l'image : elle n'est regeneree / republiee que si ca change (ou au changement de jour).
+function planningImageKey(doc) {
+  const program = doc.program;
+  return crypto
+    .createHash("sha1")
+    .update(JSON.stringify({ week: planningWeek(program).days, live: program?.live, schedule: program?.scheduleText, image: program?.imageUrl, channel: doc.channel }))
+    .digest("hex");
+}
+
+async function buildPlanningSvg(doc) {
+  const program = doc.program;
+  const week = planningWeek(program);
+  const { width, pad, gap } = IMG;
+  const colW = (width - pad * 2 - gap * 6) / 7;
+  const inner = colW - 28;
+  const out = [];
+  let defs = "";
+  let clipId = 0;
+
+  // En-tete
+  const first = planningDayParts(week.monday);
+  const last = planningDayParts(week.lastDay);
+  const range = `Semaine du ${first.short.split(" ")[0]}${first.short.split(" ")[1] === last.short.split(" ")[1] ? "" : ` ${first.short.split(" ")[1]}`} au ${last.short}`;
+  const scheduleLines = program?.scheduleText ? imageWrap(program.scheduleText, width - pad * 2 - 260, 20, 2, 0.55) : [];
+  let y = pad;
+  out.push(`<text x="${pad}" y="${y + 42}" font-size="42" font-weight="700" fill="${IMG.ink}">Programme de la semaine</text>`);
+  out.push(
+    `<text x="${pad}" y="${y + 78}" font-size="21" fill="${IMG.cyan}" font-weight="700">${svgText(doc.channel ? `twitch.tv/${doc.channel}` : "")}<tspan fill="${IMG.muted}" font-weight="400">${doc.channel ? "  ·  " : ""}${svgText(range)}</tspan></text>`
+  );
+  scheduleLines.forEach((line, i) => out.push(`<text x="${pad}" y="${y + 112 + i * 27}" font-size="20" fill="${IMG.muted}">${svgText(line)}</text>`));
+  if (program?.live === true) {
+    const pill = imagePill(0, 0, "EN DIRECT", "rgba(255,107,135,0.18)", IMG.rose);
+    const px = width - pad - pill.width - 18;
+    out.push(`<g transform="translate(${px},${y + 22})">${pill.svg.replace(`x="0"`, `x="0"`)}<circle cx="-12" cy="12" r="7" fill="${IMG.rose}"/></g>`);
+  }
+  y += 112 + Math.max(0, scheduleLines.length) * 27 + (scheduleLines.length ? 8 : -10);
+  if (week.vacation) {
+    out.push(`<rect x="${pad}" y="${y}" width="${width - pad * 2}" height="44" rx="12" fill="rgba(254,231,92,0.10)" stroke="rgba(254,231,92,0.35)"/>`);
+    out.push(
+      `<text x="${pad + 18}" y="${y + 28}" font-size="17" fill="#fee75c" font-weight="700">En vacances — retour le ${svgText(week.vacation.until.split("-").reverse().join("/"))}<tspan fill="${IMG.ink}" font-weight="400">${week.vacation.message ? `  ${svgText(imageWrap(week.vacation.message, width - 600, 17, 1)[0] || "")}` : ""}</tspan></text>`
+    );
+    y += 60;
+  }
+  const gridTop = y;
+
+  // Colonnes : contenu a des positions relatives, hauteur commune = la plus haute.
+  const columns = [];
+  for (const day of week.days) {
+    const parts = [];
+    let cy = 0;
+    parts.push({ y: cy + 24, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="19" font-weight="700" fill="${day.isToday ? IMG.accent : day.streams.length ? IMG.ink : IMG.muted}">${svgText(day.isToday ? "Aujourd'hui" : day.name)}</text>` });
+    parts.push({ y: cy + 44, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="13" fill="${IMG.muted}">${svgText(day.short)}</text>` });
+    cy += 60;
+    if (!day.streams.length) {
+      parts.push({ y: cy + 18, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="15" fill="${IMG.muted}" opacity="0.8">${svgText(day.emptyText)}</text>` });
+      cy += 30;
+    }
+    for (const stream of day.streams) {
+      const timeText = stream.time ? planningHour(stream.time) : "Heure a venir";
+      const timeColor = day.isPast || stream.cancelled ? IMG.muted : IMG.cyan;
+      parts.push({
+        y: cy + 30,
+        svg: (ox, oy) =>
+          `<text x="${ox}" y="${oy}" font-size="30" font-weight="700" fill="${timeColor}">${svgText(timeText)}</text>` +
+          (stream.cancelled ? `<line x1="${ox}" y1="${oy - 10}" x2="${ox + timeText.length * 18}" y2="${oy - 10}" stroke="${IMG.danger}" stroke-width="3"/>` : "")
+      });
+      cy += 42;
+      const pills = [];
+      if (day.isToday && program?.live === true && !stream.cancelled) pills.push(["EN DIRECT", "rgba(255,107,135,0.18)", IMG.rose]);
+      if (stream.cancelled) pills.push(["ANNULE", "rgba(240,85,95,0.18)", IMG.danger]);
+      if (stream.past && !stream.cancelled) pills.push(["TERMINE", "rgba(255,255,255,0.08)", IMG.muted]);
+      if (stream.postponed) pills.push(["REPORTE", "rgba(255,255,255,0.08)", IMG.ink]);
+      if (pills.length) {
+        parts.push({
+          y: cy,
+          svg: (ox, oy) => {
+            let px = ox;
+            return pills
+              .map(([label, fill, color]) => {
+                const pill = imagePill(px, oy, label, fill, color);
+                px += pill.width + 6;
+                return pill.svg;
+              })
+              .join("");
+          }
+        });
+        cy += 34;
+      }
+      if (stream.description && !stream.cancelled) {
+        const lines = imageWrap(stream.description, inner, 14, 3);
+        lines.forEach((line, i) => parts.push({ y: cy + 15 + i * 19, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" fill="${IMG.ink}">${svgText(line)}</text>` }));
+        cy += lines.length * 19 + 10;
+      }
+      if (!stream.cancelled) {
+        if (!stream.items.length && !stream.past) {
+          parts.push({ y: cy + 15, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" font-style="italic" fill="${IMG.muted}">Programme bientot annonce</text>` });
+          cy += 26;
+        }
+        for (const item of stream.items) {
+          const thumb = await imageThumb(item.thumbnail);
+          const subjectLines = imageWrap(item.subject, inner - 46, 14, 2);
+          const meta = [item.time ? planningHour(item.time) : "", item.category].filter(Boolean).join(" · ");
+          const metaLine = imageWrap(meta, inner - 46, 12, 1)[0] || "";
+          const subjectColor = item.status === "current" ? IMG.rose : IMG.ink;
+          const faded = item.status === "done" ? ` opacity="0.55"` : "";
+          const id = `c${clipId++}`;
+          const current = item.status === "current";
+          const blockH = Math.max(48, subjectLines.length * 18 + (metaLine ? 18 : 0) + (current ? 17 : 0) + 4);
+          parts.push({
+            y: cy,
+            svg: (ox, oy) => {
+              defs += `<clipPath id="${id}"><rect x="${ox}" y="${oy}" width="36" height="48" rx="5"/></clipPath>`;
+              const image = thumb
+                ? `<image href="${thumb}" x="${ox}" y="${oy}" width="36" height="48" preserveAspectRatio="xMidYMid slice" clip-path="url(#${id})"/>`
+                : `<rect x="${ox}" y="${oy}" width="36" height="48" rx="5" fill="rgba(255,255,255,0.06)"/>`;
+              const tx = ox + 46;
+              const subject = subjectLines
+                .map((line, i) => `<text x="${tx}" y="${oy + 15 + i * 18}" font-size="14" font-weight="700" fill="${subjectColor}">${svgText(line)}</text>`)
+                .join("");
+              const metaY = oy + 15 + subjectLines.length * 18;
+              const metaSvg = metaLine ? `<text x="${tx}" y="${metaY}" font-size="12" fill="${IMG.muted}">${svgText(metaLine)}</text>` : "";
+              const currentSvg = current
+                ? `<text x="${tx}" y="${metaY + (metaLine ? 17 : 0)}" font-size="12" font-weight="700" fill="${IMG.rose}">En cours</text>`
+                : "";
+              return `<g${faded}>${image}${subject}${metaSvg}${currentSvg}</g>`;
+            }
+          });
+          cy += blockH + 10;
+        }
+      }
+      cy += 8;
+    }
+    columns.push({ day, parts, height: cy });
+  }
+  const colH = Math.max(220, ...columns.map((c) => c.height + 20));
+  columns.forEach((column, i) => {
+    const x = pad + i * (colW + gap);
+    const { day } = column;
+    const stroke = day.isToday ? IMG.accent : day.streams.length && !day.isPast ? "rgba(69,224,210,0.45)" : IMG.line;
+    out.push(
+      `<g${day.isPast ? ` opacity="0.62"` : ""}><rect x="${x}" y="${gridTop}" width="${colW}" height="${colH}" rx="16" fill="${day.streams.length ? IMG.panel : IMG.panelSoft}" stroke="${stroke}" stroke-width="${day.isToday ? 2 : 1}"${
+        day.streams.length || day.isToday ? "" : ` stroke-dasharray="6 5"`
+      }/>${column.parts.map((part) => part.svg(x + 14, gridTop + 14 + part.y)).join("")}</g>`
+    );
+  });
+
+  // Pied
+  const footY = gridTop + colH + 34;
+  const updated = doc.receivedAt
+    ? `Mis a jour le ${new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })}`
+    : "";
+  out.push(`<text x="${pad}" y="${footY}" font-size="15" fill="${IMG.muted}">${svgText(updated)}</text>`);
+  if (doc.siteUrl) {
+    out.push(`<text x="${width - pad}" y="${footY}" font-size="15" fill="${IMG.muted}" text-anchor="end">${svgText(`${doc.siteUrl.replace(/^https?:\/\//, "")}/planning`)}</text>`);
+  }
+  const height = footY + pad - 10;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${IMG.font}">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14112a"/><stop offset="0.45" stop-color="${IMG.bg}"/><stop offset="1" stop-color="#0c1512"/></linearGradient>${defs}</defs>
+<rect width="${width}" height="${height}" fill="url(#bg)"/>
+${out.join("\n")}
+</svg>`;
+}
+
+async function renderPlanningImage(doc) {
+  let sharp;
+  try {
+    sharp = require("sharp");
+  } catch {
+    throw new Error("La generation d'image n'est pas installee (module sharp) : redeploie le site.");
+  }
+  const svg = await buildPlanningSvg(doc);
+  return sharp(Buffer.from(svg)).png({ compressionLevel: 9 }).toBuffer();
+}
+
+const planningImageThread = (url, threadId) => (threadId ? `${url}${url.includes("?") ? "&" : "?"}thread_id=${threadId}` : url);
+
+async function planningImageCall(url, method, payload, png) {
+  let body;
+  let headers = {};
+  if (png) {
+    body = new FormData();
+    body.append("payload_json", JSON.stringify(payload));
+    body.append("files[0]", new Blob([png], { type: "image/png" }), "programme.png");
+  } else if (payload) {
+    body = JSON.stringify(payload);
+    headers = { "Content-Type": "application/json" };
+  }
+  const res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(20000) }).catch(() => null);
+  const data = res ? await res.json().catch(() => null) : null;
+  return { res, data };
+}
+
+function planningImageError(res, data) {
+  if (!res) {
+    return new Error("Discord ne repond pas.");
+  }
+  if (data?.code === 10015 || res.status === 401) {
+    return new Error("Discord ne reconnait pas ce webhook : il a ete supprime ou son adresse est incomplete.");
+  }
+  return new Error(`Discord a refuse l'image (${res.status}${data?.message ? ` : ${data.message}` : ""}).`);
+}
+
+// Mention a la publication manuelle : "" (personne), "everyone", "here" ou l'id d'un role.
+function planningImagePing(ping) {
+  const value = String(ping || "").trim().replace(/^<@&(\d+)>$/, "$1").replace(/^@/, "");
+  if (value === "everyone" || value === "here") {
+    return { content: `@${value}`, allowed_mentions: { parse: ["everyone"] } };
+  }
+  if (/^\d{5,25}$/.test(value)) {
+    return { content: `<@&${value}>`, allowed_mentions: { parse: [], roles: [value] } };
+  }
+  return { allowed_mentions: { parse: [] } };
+}
+
+// mode "new" : efface l'ancien message et en poste un nouveau (mention possible) ; "update" : modifie
+// le message sur place sans notification (nouveau message s'il n'existe plus).
+async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
+  if (!doc.imageWebhookUrl) {
+    throw new Error("Renseigne d'abord le webhook du salon.");
+  }
+  const png = await renderPlanningImage(doc);
+  const message = {
+    ...(doc.imageWebhookName ? { username: doc.imageWebhookName } : {}),
+    embeds: [
+      {
+        title: "Programme de la semaine",
+        ...(doc.siteUrl ? { url: `${doc.siteUrl}/planning` } : {}),
+        color: 0x6d5ef7,
+        image: { url: "attachment://programme.png" }
+      }
+    ],
+    attachments: [{ id: 0, filename: "programme.png" }]
+  };
+  let messageId = doc.imageMessageId;
+  let threadId = doc.imageThreadId || "";
+
+  if (mode === "update" && messageId) {
+    const { res, data } = await planningImageCall(
+      planningImageThread(`${doc.imageWebhookUrl}/messages/${messageId}`, threadId),
+      "PATCH",
+      { ...message, allowed_mentions: { parse: [] } },
+      png
+    );
+    if (res?.ok) {
+      return { messageId, threadId, edited: true };
+    }
+    if (!(res && res.status === 404)) {
+      throw planningImageError(res, data);
+    }
+    messageId = ""; // supprime a la main : on en reposte un
+  }
+  if (mode === "new" && messageId) {
+    await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${messageId}`, threadId), "DELETE");
+  }
+  const payload = { ...message, ...(mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } }) };
+  const base = `${doc.imageWebhookUrl}?wait=true`;
+  let { res, data } = await planningImageCall(planningImageThread(base, threadId), "POST", payload, png);
+  // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
+  if (res && !res.ok && (data?.code === 220001 || (threadId && data?.code === 10003))) {
+    ({ res, data } = await planningImageCall(base, "POST", { ...payload, thread_name: "Programme de la semaine" }, png));
+    threadId = res?.ok && data?.channel_id ? String(data.channel_id) : "";
+  }
+  if (!res || !res.ok) {
+    throw planningImageError(res, data);
+  }
+  return { messageId: data?.id ? String(data.id) : "", threadId, edited: false };
+}
+
+// Une publication a la fois. mode "auto" : seulement si l'image a change (programme recu, nouveau jour).
+let planningImageQueue = Promise.resolve();
+function queuePlanningImage(mode = "auto", options = {}) {
+  const run = planningImageQueue.catch(() => {}).then(async () => {
+    const channel = planningSiteChannel();
+    if (!channel) {
+      return null;
+    }
+    const doc = readPlanning(channel);
+    if (!doc.imageWebhookUrl) {
+      return null;
+    }
+    const key = planningImageKey(doc);
+    if (mode === "auto" && doc.imageMessageId && doc.imageKey === key) {
+      return null;
+    }
+    try {
+      const result = await publishPlanningImage(doc, { mode: mode === "new" ? "new" : "update", ping: options.ping });
+      writePlanning({
+        ...readPlanning(channel),
+        imageMessageId: result.messageId,
+        imageThreadId: result.threadId,
+        imageKey: key,
+        imagePublishedAt: Date.now(),
+        imageError: ""
+      });
+      return result;
+    } catch (error) {
+      console.error(`[planning:${channel}] image : ${error.message}`);
+      writePlanning({ ...readPlanning(channel), imageError: error.message });
+      if (mode !== "auto") {
+        throw error;
+      }
+      return null;
+    }
+  });
+  planningImageQueue = run;
+  return run;
 }
 
 function renderPlanning(res, doc, flash, origin) {
@@ -2689,6 +3209,50 @@ function renderPlanning(res, doc, flash, origin) {
         </div>
       </div>
     </form>
+    ${
+      doc.channel
+        ? `<form method="post" action="/admin/planning/image" class="card">
+      <h2>Image sur Discord</h2>
+      <p class="planning-hint" style="margin-bottom:14px;">Le programme de la semaine en image, publie par webhook dans un salon Discord. L'image <strong>suit le planning toute seule</strong> : a chaque changement sur rooky-tv (et chaque nouveau jour), le message est mis a jour sur place, sans notification.</p>
+      <div class="form-grid">
+        <label>
+          <span>Webhook du salon ${doc.imageWebhookUrl ? "(enregistre ✔, vide = le garder)" : ""}</span>
+          <input type="password" name="webhookUrl" autocomplete="off" placeholder="https://discord.com/api/webhooks/..." />
+        </label>
+        <label>
+          <span>Nom affiche (optionnel)</span>
+          <input type="text" name="webhookName" value="${escapeHtml(doc.imageWebhookName)}" maxlength="80" />
+        </label>
+        <label>
+          <span>Mentionner quand tu cliques sur Republier (optionnel)</span>
+          <input type="text" name="ping" placeholder="everyone, here ou ID d'un role" />
+        </label>
+        <div class="planning-actions">
+          <button type="submit" name="action" value="save">${doc.imageWebhookUrl ? "Enregistrer" : "Enregistrer et publier"}</button>
+          ${
+            doc.imageWebhookUrl
+              ? `<button type="submit" name="action" value="publish" class="secondary">Republier (nouveau message)</button>
+                 <button type="submit" name="action" value="remove" class="danger" formnovalidate onclick="return confirm('Retirer le webhook et effacer l\\'image du salon ?')">Retirer</button>`
+              : ""
+          }
+        </div>
+        <div class="planning-state">
+          <div>${
+            doc.imageError
+              ? `<span class="status-missing">Derniere publication en echec : ${escapeHtml(doc.imageError)}</span>`
+              : doc.imagePublishedAt
+                ? `<strong>Image a jour</strong> le ${escapeHtml(new Date(doc.imagePublishedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS }))}`
+                : "Pas encore publiee."
+          }</div>
+        </div>
+        <details>
+          <summary style="cursor:pointer;color:var(--muted);">Apercu de l'image</summary>
+          <img src="/admin/planning/image.png?t=${Date.now()}" alt="Apercu du programme" loading="lazy" style="width:100%;margin-top:12px;border-radius:12px;border:1px solid var(--line);" />
+        </details>
+      </div>
+    </form>`
+        : ""
+    }
     <section class="card">
       <h2>Etat</h2>
       <div class="planning-state">
