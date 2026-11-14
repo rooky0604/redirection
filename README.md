@@ -34,6 +34,19 @@ Ouvrez `http://localhost:3000`.
 
 Important pour le wildcard `*.monsite.com`: cote DNS et Dokploy, un domaine wildcard doit aussi etre declare (DNS `*.monsite.com` et domaine `*.monsite.com` cote Dokploy/Traefik) pour que le trafic des sous-domaines non prevus atteigne bien le conteneur. Sans ca, seuls les sous-domaines explicitement declares dans Dokploy fonctionneront, meme si la redirection est bien enregistree dans l'application.
 
+## Planning (message Discord)
+
+La page `/admin/planning` publie dans un salon Discord le message "Programme du stream" (le meme que sur rooky-tv) : un en-tete (horaires, etat du direct, prochain stream, description) puis une carte par titre avec la jaquette Twitch du jeu.
+
+- Collez l'adresse d'un webhook Discord (elle n'est jamais reaffichee)
+- Remplissez l'en-tete et les titres, puis "Publier" : l'ancien message est efface et un nouveau est poste (mention optionnelle `everyone`, `here` ou ID de role)
+- "Mettre a jour le message" corrige le message deja poste, sans notification
+- Les salons forum sont geres (un post "Programme du stream" est cree)
+
+Chaque planning appartient a une chaine Twitch et est stocke dans `planning/<chaine>.json` du dossier `DATA_DIR`.
+
+Plusieurs sites redirection : definissez `PLANNING_CHANNEL=<chaine>` sur chaque deploiement. Le site ne montre et ne publie alors que le planning de cette chaine, meme si deux deploiements partagent le meme volume. Sans cette variable, la page gere un planning par chaine (bouton "+ Autre chaine").
+
 ## Persistance Dokploy
 
 Les redirections sont stockees dans `redirects.json` dans le dossier `DATA_DIR`.

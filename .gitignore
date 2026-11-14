@@ -3,3 +3,4 @@ node_modules/
 data/redirects.json
 data/site-config.json
 data/monitors.json
+data/planning/

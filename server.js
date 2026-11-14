@@ -12,6 +12,7 @@ const STORAGE_DIR = process.env.DATA_DIR
 const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 const SITE_CONFIG_FILE = path.join(STORAGE_DIR, "site-config.json");
 const MONITORS_FILE = path.join(STORAGE_DIR, "monitors.json");
+const PLANNING_DIR = path.join(STORAGE_DIR, "planning");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -20,6 +21,8 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-moi";
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-moi-aussi";
 const MONITOR_INTERVAL_MS = 60 * 1000;
+// Chaine Twitch de ce deploiement : son planning est le seul visible et publiable ici.
+const PLANNING_CHANNEL = normalizePlanningChannel(process.env.PLANNING_CHANNEL || "");
 const sessions = new Map();
 let useSecureCookies = false;
 
@@ -678,6 +681,57 @@ const requestListener = async (req, res) => {
       res.end();
       if (!isPrefetchRequest(req)) {
         registerClick(match.source);
+      }
+      return;
+    }
+
+    if (pathname === "/admin/planning" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const channel = PLANNING_CHANNEL
+        || (url.searchParams.get("nouvelle") ? "" : normalizePlanningChannel(url.searchParams.get("chaine") || "") || listPlanningChannels()[0] || "");
+      return renderPlanning(res, readPlanning(channel), getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/planning" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+
+      const params = await parseFormParams(req);
+      const action = params.get("action") || "save";
+      // Chaine du planning : celle du deploiement si elle est fixee, sinon celle du formulaire.
+      const channel = PLANNING_CHANNEL || normalizePlanningChannel(params.get("channel") || "");
+      const back = (key, message) =>
+        `/admin/planning?${channel ? `chaine=${encodeURIComponent(channel)}&` : "nouvelle=1&"}${key}=${encodeURIComponent(message)}`;
+      if (!channel) {
+        redirect(res, back("error", "Indique une chaine Twitch valide : chaque planning appartient a une chaine."));
+        return;
+      }
+      let next;
+      try {
+        next = planningFromForm(params, readPlanning(channel));
+      } catch (error) {
+        redirect(res, back("error", error.message));
+        return;
+      }
+      writePlanning(next);
+
+      if (action === "save") {
+        redirect(res, back("success", "Programme enregistre"));
+        return;
+      }
+
+      try {
+        const done = action === "update" ? await updatePlanningMessage(next) : await publishPlanning(next, params.get("ping") || "");
+        redirect(res, back("success", done));
+      } catch (error) {
+        console.error(`[planning:${channel}] ${error.message}`);
+        redirect(res, back("error", error.message));
       }
       return;
     }
@@ -1434,7 +1488,12 @@ async function runMonitorChecks() {
   writeMonitorConfig(config);
 }
 
-function parseForm(req) {
+async function parseForm(req) {
+  return Object.fromEntries((await parseFormParams(req)).entries());
+}
+
+// Comme parseForm, mais garde les champs repetes (lignes du programme).
+function parseFormParams(req) {
   return new Promise((resolve, reject) => {
     let body = "";
 
@@ -1446,8 +1505,7 @@ function parseForm(req) {
     });
 
     req.on("end", () => {
-      const params = new URLSearchParams(body);
-      resolve(Object.fromEntries(params.entries()));
+      resolve(new URLSearchParams(body));
     });
 
     req.on("error", reject);
@@ -1615,6 +1673,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
+        <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -1850,6 +1909,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
+        <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -1976,6 +2036,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
+        <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2086,6 +2147,7 @@ function renderMonitoring(res, config, flash) {
         <a href="/admin" class="link-button secondary">Redirections</a>
         <a href="/admin/stats" class="link-button secondary">Statistiques</a>
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2183,6 +2245,524 @@ function renderMonitoring(res, config, flash) {
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Monitoring", content, { wide: true }));
+}
+
+/* ------------------------------ Planning ---------------------------------- */
+// Message Discord "Programme du stream", le meme que sur rooky-tv (src/streamProgramWebhook.js) :
+// un en-tete (horaires, etat du direct, prochain stream, description) puis une carte par titre avec
+// la jaquette Twitch du jeu. Ici tout est saisi a la main. "Publier" efface le message precedent et
+// en poste un nouveau ; "Mettre a jour" corrige le message deja poste, sans notification.
+// L'adresse du webhook est un secret : elle n'est jamais renvoyee au navigateur.
+
+const PLANNING_WEBHOOK = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
+const PLANNING_COLORS = { live: 0xff6b87, idle: 0x45e0d2, current: 0xff6b87, done: 0x475569, upcoming: 0x45e0d2 };
+const PLANNING_MAX_CARDS = 9; // Discord : 10 embeds par message, le 1er sert d'en-tete
+const PLANNING_STATUSES = { upcoming: "A venir", current: "En cours", done: "Termine" };
+const PLANNING_PARIS = "Europe/Paris";
+
+function normalizePlanningChannel(value) {
+  const channel = String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(www\.)?twitch\.tv\//i, "")
+    .replace(/^#/, "")
+    .replace(/\/.*$/, "")
+    .toLowerCase();
+  return /^[a-z0-9_]{1,25}$/.test(channel) ? channel : "";
+}
+
+const planningFile = (channel) => path.join(PLANNING_DIR, `${channel}.json`);
+
+// Chaines qui ont un planning dans ce dossier de donnees (une seule si PLANNING_CHANNEL est fixe).
+function listPlanningChannels() {
+  if (PLANNING_CHANNEL) {
+    return [PLANNING_CHANNEL];
+  }
+  try {
+    return fs
+      .readdirSync(PLANNING_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => normalizePlanningChannel(name.slice(0, -5)))
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function readPlanning(channel) {
+  channel = normalizePlanningChannel(channel);
+  let parsed = {};
+  try {
+    parsed = channel ? JSON.parse(fs.readFileSync(planningFile(channel), "utf8")) || {} : {};
+  } catch {
+    parsed = {};
+  }
+  return {
+    webhookUrl: parsed.webhookUrl || "",
+    webhookName: parsed.webhookName || "",
+    channel,
+    imageUrl: parsed.imageUrl || "",
+    scheduleText: parsed.scheduleText || "",
+    live: ["live", "offline"].includes(parsed.live) ? parsed.live : "",
+    nextDate: parsed.nextDate || "",
+    nextTime: parsed.nextTime || "",
+    description: parsed.description || "",
+    items: Array.isArray(parsed.items) ? parsed.items : [],
+    messageId: parsed.messageId || "",
+    threadId: parsed.threadId || "",
+    publishedAt: parsed.publishedAt || 0
+  };
+}
+
+function writePlanning(doc) {
+  const channel = normalizePlanningChannel(doc.channel);
+  if (!channel || (PLANNING_CHANNEL && channel !== PLANNING_CHANNEL)) {
+    throw new Error("Planning sans chaine valide : rien n'est enregistre.");
+  }
+  fs.mkdirSync(PLANNING_DIR, { recursive: true });
+  fs.writeFileSync(planningFile(channel), `${JSON.stringify({ ...doc, channel }, null, 2)}\n`, "utf8");
+}
+
+function planningFromForm(params, current) {
+  const text = (name, max) => String(params.get(name) || "").replace(/\r\n/g, "\n").trim().slice(0, max);
+  const next = { ...current };
+
+  const webhookUrl = text("webhookUrl", 300);
+  if (params.get("removeWebhook") === "1") {
+    next.webhookUrl = "";
+    next.messageId = "";
+    next.threadId = "";
+  } else if (webhookUrl) {
+    if (!PLANNING_WEBHOOK.test(webhookUrl)) {
+      throw new Error("Ce n'est pas une adresse de webhook Discord (https://discord.com/api/webhooks/...).");
+    }
+    if (webhookUrl !== current.webhookUrl) {
+      next.webhookUrl = webhookUrl;
+      next.messageId = "";
+      next.threadId = "";
+    }
+  }
+
+  const webhookName = text("webhookName", 80).replace(/\s+/g, " ");
+  if (/discord|clyde/i.test(webhookName)) {
+    throw new Error("Discord refuse les noms de webhook qui contiennent « discord » ou « clyde ».");
+  }
+  next.webhookName = webhookName;
+
+  const imageUrl = text("imageUrl", 1000);
+  if (imageUrl && !/^https:\/\/\S+$/i.test(imageUrl)) {
+    throw new Error("L'image doit etre une adresse qui commence par https://");
+  }
+  next.imageUrl = imageUrl;
+
+  next.scheduleText = text("scheduleText", 1000);
+  next.description = text("description", 1500);
+  const live = params.get("live");
+  next.live = live === "live" || live === "offline" ? live : "";
+
+  const nextDate = text("nextDate", 10);
+  const nextTime = text("nextTime", 5);
+  if ((nextDate && !/^\d{4}-\d{2}-\d{2}$/.test(nextDate)) || (nextTime && !/^\d{2}:\d{2}$/.test(nextTime))) {
+    throw new Error("Date ou heure du prochain stream invalide.");
+  }
+  next.nextDate = nextDate;
+  next.nextTime = nextDate ? nextTime : "";
+
+  const times = params.getAll("item_time");
+  const subjects = params.getAll("item_subject");
+  const categories = params.getAll("item_category");
+  const images = params.getAll("item_image");
+  const statuses = params.getAll("item_status");
+  next.items = subjects
+    .map((subject, i) => ({
+      time: /^\d{2}:\d{2}$/.test(times[i] || "") ? times[i] : "",
+      subject: String(subject || "").trim().slice(0, 200),
+      category: String(categories[i] || "").trim().slice(0, 100),
+      imageUrl: /^https:\/\/\S+$/i.test(String(images[i] || "").trim()) ? String(images[i]).trim().slice(0, 1000) : "",
+      status: PLANNING_STATUSES[statuses[i]] ? statuses[i] : "upcoming"
+    }))
+    .filter((item) => item.subject);
+  return next;
+}
+
+// "aujourd'hui" pour le jour meme, sinon "samedi 15 novembre".
+function planningDayText(date) {
+  const today = new Date().toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
+  if (date === today) {
+    return "aujourd'hui";
+  }
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("fr-FR", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
+}
+
+const planningEscapeMd = (value) => String(value || "").replace(/([*_~`|\\])/g, "\\$1");
+const planningHour = (time) => String(time || "").replace(":", "h");
+
+// Jaquette Twitch d'apres le nom exact de la categorie (Twitch redirige vers une image "404" sinon).
+async function planningBoxArt(category, cache) {
+  const name = String(category || "").trim();
+  if (!name) {
+    return "";
+  }
+  if (cache.has(name)) {
+    return cache.get(name);
+  }
+  const url = `https://static-cdn.jtvnw.net/ttv-boxart/${encodeURIComponent(name)}-144x192.jpg`;
+  const res = await fetch(url, { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(5000) }).catch(() => null);
+  const found = res && res.status === 200 ? url : "";
+  cache.set(name, found);
+  return found;
+}
+
+async function buildPlanningMessage(doc) {
+  const live = doc.live === "live" ? true : doc.live === "offline" ? false : null;
+  const items = doc.items.filter((item) => item.subject);
+  const nextLine =
+    live !== true && doc.nextDate
+      ? `📅 **Prochain stream : ${planningDayText(doc.nextDate)}${doc.nextTime ? ` à ${planningHour(doc.nextTime)}` : ""}**`
+      : null;
+
+  const header = {
+    title: "📅 Programme du stream",
+    ...(doc.channel ? { url: `https://twitch.tv/${doc.channel}` } : {}),
+    description:
+      [
+        doc.scheduleText ? `${doc.scheduleText}\n` : null,
+        live === null ? null : live ? "🔴 **En direct**" : "⚫ Hors ligne",
+        nextLine,
+        doc.description ? `\n${doc.description}\n` : null,
+        items.length ? null : "Le programme n'est pas encore annoncé."
+      ]
+        .filter(Boolean)
+        .join("\n") || undefined,
+    color: live ? PLANNING_COLORS.live : PLANNING_COLORS.idle,
+    ...(doc.imageUrl ? { thumbnail: { url: doc.imageUrl } } : {}),
+    ...(doc.channel ? { footer: { text: `#${doc.channel}` } } : {}),
+    timestamp: new Date().toISOString()
+  };
+
+  const cache = new Map();
+  const statusOf = (item) => (item.status === "current" && live === false ? "upcoming" : item.status);
+  const shown = items.slice(0, PLANNING_MAX_CARDS);
+  const cards = [];
+  for (const item of shown) {
+    const status = statusOf(item);
+    const icon = status === "current" ? "▶️" : status === "done" ? "✅" : "⏳";
+    const thumb = item.imageUrl || (await planningBoxArt(item.category, cache));
+    const meta = [item.time ? `🕘 ${planningHour(item.time)}` : null, item.category || null].filter(Boolean).join(" · ");
+    const statusLine = status === "current" ? "**En cours**" : status === "done" ? "*Terminé*" : null;
+    cards.push({
+      title: `${icon} ${item.subject}`.slice(0, 250),
+      description: [meta, statusLine].filter(Boolean).join("\n") || undefined,
+      color: PLANNING_COLORS[status],
+      ...(thumb ? { thumbnail: { url: thumb } } : {})
+    });
+  }
+  const rest = items.slice(PLANNING_MAX_CARDS);
+  if (rest.length) {
+    cards[cards.length - 1].footer = {
+      text: `+ ${rest.length} autre${rest.length > 1 ? "s" : ""} : ${rest
+        .map((item) => `${item.time ? `${planningHour(item.time)} ` : ""}${item.subject}`)
+        .join(" · ")}`.slice(0, 2000)
+    };
+  }
+  return { embeds: [header, ...cards] };
+}
+
+const planningWithThread = (url, threadId) => (threadId ? `${url}${url.includes("?") ? "&" : "?"}thread_id=${threadId}` : url);
+
+async function planningDiscordCall(url, method, payload) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    ...(payload ? { body: JSON.stringify(payload) } : {}),
+    signal: AbortSignal.timeout(10000)
+  }).catch(() => null);
+  const body = res ? await res.json().catch(() => null) : null;
+  return { res, body };
+}
+
+function planningDiscordError(res, body, what = "le message") {
+  if (!res) {
+    return new Error("Discord ne repond pas.");
+  }
+  if (body?.code === 10015 || res.status === 401 || (res.status === 404 && body?.code !== 10003)) {
+    return new Error("Discord ne reconnait pas ce webhook : il a ete supprime ou son adresse est incomplete.");
+  }
+  if (body?.code === 220003) {
+    return new Error("Ce forum impose un tag sur chaque post : desactive « Exiger des tags » dans les reglages du forum.");
+  }
+  return new Error(`Discord a refuse ${what} (${res.status}${body?.message ? ` : ${body.message}` : ""}).`);
+}
+
+// Mention a la publication : "" (personne), "everyone", "here" ou l'id d'un role.
+function planningPing(ping) {
+  const value = String(ping || "").trim().replace(/^<@&(\d+)>$/, "$1").replace(/^@/, "");
+  if (value === "everyone" || value === "here") {
+    return { content: `@${value}`, allowed_mentions: { parse: ["everyone"] } };
+  }
+  if (/^\d{5,25}$/.test(value)) {
+    return { content: `<@&${value}>`, allowed_mentions: { parse: [], roles: [value] } };
+  }
+  return { allowed_mentions: { parse: [] } };
+}
+
+async function publishPlanning(doc, ping) {
+  if (!doc.webhookUrl) {
+    throw new Error("Enregistre d'abord l'adresse du webhook.");
+  }
+  if (doc.messageId) {
+    await planningDiscordCall(planningWithThread(`${doc.webhookUrl}/messages/${doc.messageId}`, doc.threadId), "DELETE");
+  }
+  const payload = {
+    ...(doc.webhookName ? { username: doc.webhookName } : {}),
+    ...planningPing(ping),
+    ...(await buildPlanningMessage(doc))
+  };
+  const base = `${doc.webhookUrl}?wait=true`;
+  let threadId = doc.threadId || "";
+  let { res, body } = await planningDiscordCall(planningWithThread(base, threadId), "POST", payload);
+  // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
+  if (res && !res.ok && (body?.code === 220001 || (threadId && body?.code === 10003))) {
+    ({ res, body } = await planningDiscordCall(base, "POST", { ...payload, thread_name: "Programme du stream" }));
+    threadId = res?.ok && body?.channel_id ? String(body.channel_id) : "";
+  }
+  if (!res || !res.ok) {
+    throw planningDiscordError(res, body);
+  }
+  writePlanning({ ...readPlanning(doc.channel), messageId: body?.id ? String(body.id) : "", threadId, publishedAt: Date.now() });
+  return "Programme publie sur Discord";
+}
+
+async function updatePlanningMessage(doc) {
+  if (!doc.webhookUrl || !doc.messageId) {
+    throw new Error("Aucun message publie a mettre a jour : clique sur Publier.");
+  }
+  const { res, body } = await planningDiscordCall(
+    planningWithThread(`${doc.webhookUrl}/messages/${doc.messageId}`, doc.threadId),
+    "PATCH",
+    { allowed_mentions: { parse: [] }, ...(await buildPlanningMessage(doc)) }
+  );
+  if (res && res.status === 404) {
+    writePlanning({ ...readPlanning(doc.channel), messageId: "" });
+    throw new Error("Le message a ete supprime dans Discord : clique sur Publier.");
+  }
+  if (!res || !res.ok) {
+    throw planningDiscordError(res, body, "la mise a jour du message");
+  }
+  return "Message Discord mis a jour (sans notification)";
+}
+
+function renderPlanningItemRow(item = {}) {
+  const status = item.status || "upcoming";
+  return `
+    <div class="planning-item">
+      <input type="time" name="item_time" value="${escapeHtml(item.time || "")}" aria-label="Heure" />
+      <input type="text" name="item_subject" value="${escapeHtml(item.subject || "")}" placeholder="Titre (ex : Run any%)" aria-label="Titre" />
+      <input type="text" name="item_category" value="${escapeHtml(item.category || "")}" placeholder="Categorie Twitch (ex : Minecraft)" aria-label="Categorie" />
+      <input type="text" name="item_image" value="${escapeHtml(item.imageUrl || "")}" placeholder="Image https:// (optionnel)" aria-label="Image" />
+      <select name="item_status" aria-label="Statut">${Object.entries(PLANNING_STATUSES)
+        .map(([value, label]) => `<option value="${value}" ${value === status ? "selected" : ""}>${label}</option>`)
+        .join("")}</select>
+      <div class="planning-item-actions">
+        <button type="button" class="secondary move-button" data-move="-1" title="Monter">&uarr;</button>
+        <button type="button" class="secondary move-button" data-move="1" title="Descendre">&darr;</button>
+        <button type="button" class="danger move-button" data-remove title="Retirer">&times;</button>
+      </div>
+    </div>`;
+}
+
+function renderPlanning(res, doc, flash) {
+  const messages = renderMessages(flash);
+  const publishedAt = doc.publishedAt
+    ? new Date(doc.publishedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short", timeZone: PLANNING_PARIS })
+    : "";
+  const liveOptions = [
+    ["", "Ne pas afficher"],
+    ["offline", "⚫ Hors ligne"],
+    ["live", "🔴 En direct"]
+  ]
+    .map(([value, label]) => `<option value="${value}" ${doc.live === value ? "selected" : ""}>${label}</option>`)
+    .join("");
+  const rows = (doc.items.length ? doc.items : [{}]).map(renderPlanningItemRow).join("");
+  // Sans PLANNING_CHANNEL : un planning par chaine, on passe de l'un a l'autre.
+  const channelSwitcher = PLANNING_CHANNEL
+    ? ""
+    : `<section class="card planning-switcher">
+        <span class="planning-hint">Plannings :</span>
+        ${listPlanningChannels()
+          .map((c) => `<a href="/admin/planning?chaine=${encodeURIComponent(c)}" class="link-button ${c === doc.channel ? "" : "secondary"}">#${escapeHtml(c)}</a>`)
+          .join("")}
+        <a href="/admin/planning?nouvelle=1" class="link-button ${doc.channel ? "secondary" : ""}">+ Autre chaine</a>
+      </section>`;
+
+  const content = `
+    <style>
+      textarea {
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--ink);
+        font: inherit;
+        resize: vertical;
+      }
+      textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(109, 94, 247, 0.25); }
+      .planning-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+      .planning-items { display: grid; gap: 10px; }
+      .planning-item {
+        display: grid;
+        grid-template-columns: 110px minmax(160px, 2fr) minmax(140px, 1.3fr) minmax(140px, 1.3fr) 120px auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .planning-item-actions { display: flex; gap: 6px; }
+      .planning-hint { font-size: 13px; color: var(--muted); margin: 0; }
+      .planning-status { font-size: 14px; color: var(--muted); }
+      .planning-status strong { color: var(--success); }
+      @media (max-width: 900px) {
+        .planning-item { grid-template-columns: 1fr 1fr; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+        .planning-item input[name="item_subject"] { grid-column: 1 / -1; }
+      }
+      .planning-switcher { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 14px 18px; }
+      .planning-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    </style>
+    <header class="topbar">
+      <div>
+        <h1>Planning</h1>
+        <p>Publie le message Discord « Programme du stream », le meme que sur rooky-tv : un en-tete puis une carte par titre avec la jaquette du jeu.</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/admin" class="link-button secondary">Redirections</a>
+        <a href="/admin/stats" class="link-button secondary">Statistiques</a>
+        <a href="/admin/site" class="link-button secondary">Personnalisation</a>
+        <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
+        <a href="/logout" class="link-button">Deconnexion</a>
+      </div>
+    </header>
+    ${messages}
+    ${channelSwitcher}
+    <form method="post" action="/admin/planning" id="planning-form">
+      <section class="card">
+        <h2>Salon Discord</h2>
+        <div class="form-grid">
+          <div class="planning-two">
+            <label>
+              <span>Adresse du webhook ${doc.webhookUrl ? "(enregistree ✔ — laisser vide pour la garder)" : ""}</span>
+              <input type="password" name="webhookUrl" autocomplete="off" placeholder="https://discord.com/api/webhooks/..." />
+            </label>
+            <label>
+              <span>Nom affiche (optionnel)</span>
+              <input type="text" name="webhookName" value="${escapeHtml(doc.webhookName)}" maxlength="80" placeholder="Nom du webhook dans Discord" />
+            </label>
+          </div>
+          ${
+            doc.webhookUrl
+              ? `<label class="checkbox-label"><input type="checkbox" name="removeWebhook" value="1" /><span>Retirer l'adresse du webhook</span></label>`
+              : ""
+          }
+          <p class="planning-status">${
+            doc.messageId ? `<strong>Message publie</strong>${publishedAt ? ` le ${escapeHtml(publishedAt)}` : ""}.` : "Aucun message publie pour l'instant."
+          }</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>En-tete</h2>
+        <div class="form-grid">
+          <div class="planning-two">
+            <label>
+              <span>Chaine Twitch${PLANNING_CHANNEL ? " (fixee pour ce site)" : doc.channel ? " (planning de cette chaine)" : ""}</span>
+              ${
+                PLANNING_CHANNEL || doc.channel
+                  ? `<input type="text" value="${escapeHtml(doc.channel)}" readonly /><input type="hidden" name="channel" value="${escapeHtml(doc.channel)}" />`
+                  : `<input type="text" name="channel" placeholder="ex : rooky" required />`
+              }
+            </label>
+            <label>
+              <span>Etat du direct</span>
+              <select name="live">${liveOptions}</select>
+            </label>
+            <label>
+              <span>Prochain stream : date</span>
+              <input type="date" name="nextDate" value="${escapeHtml(doc.nextDate)}" />
+            </label>
+            <label>
+              <span>Prochain stream : heure</span>
+              <input type="time" name="nextTime" value="${escapeHtml(doc.nextTime)}" />
+            </label>
+          </div>
+          <label>
+            <span>Image en haut a droite (adresse https://, optionnel)</span>
+            <input type="text" name="imageUrl" value="${escapeHtml(doc.imageUrl)}" placeholder="https://..." />
+          </label>
+          <label>
+            <span>Horaires / texte en haut (optionnel)</span>
+            <textarea name="scheduleText" rows="3" maxlength="1000" placeholder="Ex : Lundi, mercredi, vendredi a 20h">${escapeHtml(doc.scheduleText)}</textarea>
+          </label>
+          <label>
+            <span>Description du stream (optionnel)</span>
+            <textarea name="description" rows="3" maxlength="1500">${escapeHtml(doc.description)}</textarea>
+          </label>
+          <p class="planning-hint">« Prochain stream » n'est pas affiche quand l'etat est « En direct ».</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Titres du programme</h2>
+        <p class="planning-hint" style="margin-bottom:14px;">Une carte par titre (9 max, les suivants sont listes sous la derniere). La jaquette vient de Twitch si la categorie porte le nom exact du jeu ; sinon renseigne une image.</p>
+        <div class="planning-items" id="planning-items">${rows}</div>
+        <template id="planning-item-template">${renderPlanningItemRow()}</template>
+        <div style="margin-top:14px;">
+          <button type="button" class="secondary" id="planning-add">+ Ajouter un titre</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Publication</h2>
+        <div class="form-grid">
+          <label>
+            <span>Mentionner a la publication</span>
+            <input type="text" name="ping" placeholder="Vide = personne · everyone · here · ou l'ID d'un role" />
+          </label>
+          <div class="planning-actions">
+            <button type="submit" name="action" value="publish">Publier</button>
+            ${doc.messageId ? `<button type="submit" name="action" value="update" class="secondary">Mettre a jour le message (sans notification)</button>` : ""}
+            <button type="submit" name="action" value="save" class="secondary">Enregistrer sans publier</button>
+          </div>
+          <p class="planning-hint">« Publier » efface le message precedent et en poste un nouveau en bas du salon.</p>
+        </div>
+      </section>
+    </form>
+    <script>
+      (function () {
+        var list = document.getElementById("planning-items");
+        var template = document.getElementById("planning-item-template");
+        document.getElementById("planning-add").addEventListener("click", function () {
+          list.appendChild(template.content.cloneNode(true));
+          var rows = list.querySelectorAll(".planning-item");
+          var input = rows[rows.length - 1].querySelector('input[name="item_subject"]');
+          if (input) input.focus();
+        });
+        list.addEventListener("click", function (event) {
+          var button = event.target.closest("button");
+          if (!button) return;
+          var row = button.closest(".planning-item");
+          if (button.hasAttribute("data-remove")) {
+            row.remove();
+          } else if (button.dataset.move === "-1" && row.previousElementSibling) {
+            list.insertBefore(row, row.previousElementSibling);
+          } else if (button.dataset.move === "1" && row.nextElementSibling) {
+            list.insertBefore(row.nextElementSibling, row);
+          }
+        });
+      })();
+    </script>
+  `;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Planning", content, { wide: true }));
 }
 
 const ICON_LINK =
