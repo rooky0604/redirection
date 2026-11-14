@@ -188,6 +188,28 @@ const requestListener = async (req, res) => {
         return renderModoTickets(res, doc, viewer, live, flash, url.searchParams.get("vue") || "");
       }
 
+      // Etat en direct du ticket (toutes les 3 s depuis sa page) : le membre ecrit-il, nouveaux messages ;
+      // typing = le modo tape sa reponse (le membre le voit dans son MP).
+      const liveMatch = /^\/modo\/tickets\/(\d{1,12})\/live$/.exec(pathname);
+      if (liveMatch && method === "POST") {
+        let body = {};
+        try {
+          body = JSON.parse(await new Promise((resolve, reject) => {
+            let raw = "";
+            req.on("data", (chunk) => { raw += chunk; if (raw.length > 2000) req.destroy(); });
+            req.on("end", () => resolve(raw || "{}"));
+            req.on("error", reject);
+          }));
+        } catch {}
+        try {
+          const state = await modoApi(doc, viewer, "ticket.live", { id: Number(liveMatch[1]), typing: body.typing === true });
+          if (!canSeeTicket(viewer, state, { reason: state.reason }, doc)) return sendJson(res, 404, { error: "Ticket introuvable." });
+          return sendJson(res, 200, { memberTyping: !!state.memberTyping, lastId: Number(state.lastId) || 0, status: state.status });
+        } catch (error) {
+          return sendJson(res, 502, { error: error.message });
+        }
+      }
+
       const ticketMatch = /^\/modo\/tickets\/(\d{1,12})$/.exec(pathname);
       if (ticketMatch && method === "GET") {
         const id = Number(ticketMatch[1]);
@@ -223,9 +245,10 @@ const requestListener = async (req, res) => {
             redirect(res, `${back}?success=${encodeURIComponent(form.action === "offer_accept" ? "Creneau valide : programme modifie, l'invite est prevenu en MP" : "Creneau refuse, l'invite est prevenu")}`);
             return;
           }
-          if (form.action === "reply") {
-            await modoApi(doc, viewer, "ticket.reply", { id, content: form.content });
-            redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en MP")}`);
+          if (form.action === "reply" || form.action === "note") {
+            const note = form.action === "note";
+            await modoApi(doc, viewer, "ticket.reply", { id, content: form.content, note, anonymous: !note && form.anonymous === "1" });
+            redirect(res, `${back}?success=${encodeURIComponent(note ? "Note staff ajoutee (le membre ne la voit pas)" : form.anonymous === "1" ? "Reponse anonyme envoyee en MP" : "Reponse envoyee en MP")}`);
           } else if (form.action === "ban") {
             // Ban tickets : inscrit au casier du membre par rooky-tv (meme source que les salons ticket).
             await modoApi(doc, viewer, "ticket.ban", { id, reason: form.reason, duration: form.duration });
@@ -3522,7 +3545,41 @@ const TICKET_DESK_CSS = `
   .td-item { display: flex; gap: 10px; align-items: center; padding: 9px 14px; margin: 2px 8px; border-radius: 10px; border-left: 3px solid transparent; color: var(--ink); text-decoration: none; }
   .td-item:hover { background: rgba(255, 255, 255, 0.04); }
   .td-item.on { background: rgba(124, 92, 255, 0.14); border-left-color: #f5c542; }
-  .td-avatar { width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(124, 92, 255, 0.3); color: #fff; }
+  .td-avatar { width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(124, 92, 255, 0.3); color: #fff; object-fit: cover; }
+  .cm-chat { display: grid; gap: 2px; }
+  .cm-day { display: flex; align-items: center; gap: 12px; margin: 14px 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+  .cm-day::before, .cm-day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .cm-sys { text-align: center; color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .cm-row { display: flex; gap: 12px; padding: 6px 8px; border-radius: 8px; margin-top: 10px; }
+  .cm-row.grouped { margin-top: 0; padding-top: 1px; padding-bottom: 1px; }
+  .cm-row:hover { background: rgba(255, 255, 255, 0.025); }
+  .cm-row.note { background: rgba(245, 197, 66, 0.07); border-left: 3px solid rgba(245, 197, 66, 0.6); }
+  .cm-av { width: 40px; height: 40px; border-radius: 50%; flex: 0 0 auto; object-fit: cover; display: grid; place-items: center; font-weight: 700; background: rgba(124, 92, 255, 0.3); color: #fff; }
+  .cm-gutter { width: 40px; flex: 0 0 auto; font-size: 10px; color: transparent; text-align: right; padding-top: 3px; }
+  .cm-row.grouped:hover .cm-gutter { color: var(--muted); }
+  .cm-main { min-width: 0; flex: 1; }
+  .cm-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .cm-head strong { font-size: 15px; }
+  .cm-head strong.staff { color: #8ab4ff; }
+  .cm-head time { font-size: 12px; color: var(--muted); }
+  .cm-badge { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .cm-badge.staff { background: rgba(124, 92, 255, 0.25); color: #c9bcff; }
+  .cm-badge.note { background: rgba(245, 197, 66, 0.18); color: #f5c542; }
+  .cm-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; font-size: 15px; }
+  .cm-img { max-width: min(100%, 420px); max-height: 300px; border-radius: 8px; margin-top: 6px; display: block; }
+  .cm-anon { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+  .cm-anon input { width: 16px; height: 16px; margin: 0; }
+  .cm-anon small { opacity: .8; }
+  .cm-actions { display: flex; gap: 8px; }
+  .td-typing { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); padding: 0 18px 8px; }
+  .td-typing[hidden] { display: none; }
+  .td-dots { display: inline-flex; gap: 3px; }
+  .td-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: td-blink 1.2s infinite ease-in-out; }
+  .td-dots i:nth-child(2) { animation-delay: .2s; }
+  .td-dots i:nth-child(3) { animation-delay: .4s; }
+  @keyframes td-blink { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+  .td-new { margin: 0 18px 8px; padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(245, 197, 66, 0.5); background: rgba(245, 197, 66, 0.1); color: #f5c542; font-size: 13px; cursor: pointer; text-align: left; }
+  .td-new[hidden] { display: none; }
   .td-item-main { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .td-item-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
   .td-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3569,12 +3626,17 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
   const closedTab = tab === "fermes" || (!tab && ticket && ticket.status !== "open");
   const q = closedTab ? "?vue=fermes" : "";
   const initial = (name) => escapeHtml((String(name || "?").trim()[0] || "?").toUpperCase());
+  // Avatar Discord de la personne qui a ouvert le ticket (sinon son initiale).
+  const avatar = (t) =>
+    /^https:\/\//.test(String(t?.avatar || ""))
+      ? `<img class="td-avatar" src="${escapeHtml(t.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+      : `<span class="td-avatar" aria-hidden="true">${initial(t?.owner)}</span>`;
   const item = (t) => {
     const unread = t.status === "open" && t.unread;
     const dot = t.status !== "open" ? "off" : unread ? "new" : "";
     const sub = unread ? t.lastMessage || "Nouveau message" : t.reason || t.lastMessage || "Sans raison";
     return `<a class="td-item${ticket && ticket.id === t.id ? " on" : ""}${unread ? " unread" : ""}" href="/modo/tickets/${t.id}${q}">
-      <span class="td-avatar" aria-hidden="true">${initial(t.owner)}</span>
+      ${avatar(t)}
       <span class="td-item-main">
         <span class="td-item-top"><span class="td-name">${escapeHtml(t.owner)}</span><span class="td-id">#${t.id}</span></span>
         <span class="td-sub"><span class="td-dot ${dot}"></span>${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>
@@ -3598,18 +3660,49 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
   }
   if (ticket) {
     const messages = Array.isArray(data.messages) ? data.messages : [];
+    // Messages facon Discord : avatar, nom, badge, date ; messages suivis du meme auteur regroupes ;
+    // separateur par jour ; notes staff (jamais envoyees au membre) sur fond ambre.
+    const dayKey = (at) => new Date(at).toLocaleDateString("fr-CA", { timeZone: PLANNING_PARIS });
+    const dayLabelOf = (at) => new Date(at).toLocaleDateString("fr-FR", { timeZone: PLANNING_PARIS, day: "numeric", month: "short", year: "numeric" });
+    const timeOf = (at) => new Date(at).toLocaleTimeString("fr-FR", { timeZone: PLANNING_PARIS, hour: "2-digit", minute: "2-digit" });
+    const face = (url, name) =>
+      /^https:\/\//.test(String(url || ""))
+        ? `<img class="cm-av" src="${escapeHtml(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+        : `<span class="cm-av">${initial(name)}</span>`;
+    let prev = null;
+    let prevDay = "";
     const bubbles = messages
       .map((m) => {
         const images = (m.attachments || [])
           .filter((a) => /^https:\/\//.test(a.url || ""))
           .map((a) =>
             /^image\//.test(a.type || "")
-              ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(a.url)}" alt="" referrerpolicy="no-referrer" /></a>`
-              : `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer">📎 ${escapeHtml(a.name || "piece jointe")}</a>`
+              ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer"><img class="cm-img" src="${escapeHtml(a.url)}" alt="" referrerpolicy="no-referrer" /></a>`
+              : `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer">\ud83d\udcce ${escapeHtml(a.name || "piece jointe")}</a>`
           )
           .join("");
-        const who = m.direction === "in" ? ticket.owner || "Membre" : m.direction === "out" ? `${m.author || "Equipe"} (equipe)` : "";
-        return `<div class="mt-msg ${m.direction}">${escapeHtml(m.content)}${images}<small>${escapeHtml([who, modoDateTime(m.at)].filter(Boolean).join(" · "))}</small></div>`;
+        const day = dayKey(m.at);
+        const sep = day !== prevDay ? `<div class="cm-day"><span>${escapeHtml(dayLabelOf(m.at))}</span></div>` : "";
+        prevDay = day;
+        if (m.direction === "system") {
+          prev = null;
+          return `${sep}<div class="cm-sys">${escapeHtml(m.content)} · ${escapeHtml(timeOf(m.at))}</div>`;
+        }
+        const isMember = m.direction === "in";
+        const name = isMember ? ticket.owner || "Membre" : m.author || "Equipe";
+        const authorKey = `${m.direction}:${isMember ? "membre" : m.author || ""}`;
+        const grouped = !sep && prev && prev.key === authorKey && new Date(m.at) - new Date(prev.at) < 7 * 60000;
+        prev = { key: authorKey, at: m.at };
+        const badge = isMember
+          ? `<span class="cm-badge">Membre</span>`
+          : m.direction === "note"
+            ? `<span class="cm-badge note">\ud83d\udd12 Note staff</span>`
+            : `<span class="cm-badge staff">Equipe</span>${m.anonymous ? `<span class="cm-badge">anonyme</span>` : ""}`;
+        const body = `<div class="cm-text">${escapeHtml(m.content)}</div>${images}`;
+        return `${sep}<div class="cm-row${m.direction === "note" ? " note" : ""}${grouped ? " grouped" : ""}">
+          ${grouped ? `<span class="cm-gutter">${escapeHtml(timeOf(m.at))}</span>` : face(isMember ? ticket.avatar : m.avatar, name)}
+          <div class="cm-main">${grouped ? "" : `<div class="cm-head"><strong class="${isMember ? "" : "staff"}">${escapeHtml(name)}</strong>${badge}<time>${escapeHtml(timeOf(m.at))}</time></div>`}${body}</div>
+        </div>`;
       })
       .join("");
     const ban = ticket.ban
@@ -3632,7 +3725,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
       <header class="td-head">
         <div class="td-head-main">
           <a class="td-back" href="/modo/tickets${q}">←</a>
-          <span class="td-avatar" aria-hidden="true">${initial(ticket.owner)}</span>
+          ${avatar(ticket)}
           <div>
             <h2>${escapeHtml(ticket.owner)} <span class="td-id">#${ticket.id}</span> ${ticket.status === "open" ? `<span class="md-tag ok">Ouvert</span>` : `<span class="md-tag">Ferme${ticket.closedBy ? ` par ${escapeHtml(ticket.closedBy)}` : ""}</span>`}</h2>
             <p>${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))} · echange en MP avec le bot</p>
@@ -3649,17 +3742,25 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         ${data.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
         ${ban}
         ${renderSlotOffer(doc, ticket, data.canDecide === true)}
-        <div class="mt-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
+        <div class="cm-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
         ${banForm}
       </div>
+      <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
+      <button type="button" class="td-new" id="td-new" hidden>Nouveau message — afficher</button>
       ${
         canReply
           ? ticket.status === "open"
             ? `<form method="post" class="td-compose mt-reply">
-                <textarea name="content" rows="3" maxlength="3500" placeholder="Ta reponse (envoyee en MP au membre, signee « l'equipe »)"></textarea>
-                <div class="td-compose-row"><span class="md-hint">Le membre recoit ta reponse en MP.</span><button type="submit" name="action" value="reply">Envoyer</button></div>
+                <textarea name="content" rows="3" maxlength="3500" placeholder="Repondre a ${escapeHtml(ticket.owner)}"></textarea>
+                <div class="td-compose-row">
+                  <label class="cm-anon"><input type="checkbox" name="anonymous" value="1" /> Anonyme <small>(signe « l'equipe » au lieu de ton nom)</small></label>
+                  <span class="cm-actions"><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
+                </div>
               </form>`
-            : ""
+            : `<form method="post" class="td-compose mt-reply">
+                <textarea name="content" rows="2" maxlength="3500" placeholder="Note staff (ticket ferme : le membre ne la voit pas)"></textarea>
+                <div class="td-compose-row"><span class="md-hint">Ticket ferme : seules les notes staff sont possibles.</span><button type="submit" name="action" value="note" class="secondary">\ud83d\udd12 Note staff</button></div>
+              </form>`
           : `<div class="td-compose"><p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p></div>`
       }`;
   }
@@ -3669,7 +3770,11 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     ${modoNav("tickets", live, rights)}
     ${!ticket ? renderMessages(flash) : ""}
     ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
-    <section class="td${ticket || data?.error ? " has-ticket" : ""}">
+    <section class="td${ticket || data?.error ? " has-ticket" : ""}"${
+      ticket
+        ? ` data-ticket="${ticket.id}" data-last="${Math.max(0, ...(Array.isArray(data.messages) ? data.messages.map((m) => Number(m.id) || 0) : [0]))}" data-status="${escapeHtml(ticket.status)}"`
+        : ""
+    }>
       <aside class="td-list">
         ${
           live.rookyAdmin && Array.isArray(live.channels)
@@ -3693,10 +3798,44 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         const body = document.getElementById("td-body");
         if (body) body.scrollTop = body.scrollHeight;
         let touched = false;
-        document.addEventListener("input", () => { touched = true; });
+        let lastKey = 0;
+        document.addEventListener("input", (event) => { touched = true; if (event.target.matches(".td-compose textarea")) lastKey = Date.now(); });
         document.addEventListener("change", () => { touched = true; });
         document.querySelectorAll(".td details").forEach((d) => d.addEventListener("toggle", () => { touched = true; }));
-        setInterval(() => { if (!touched) location.reload(); }, ${ticket ? 20000 : 30000});
+        const desk = document.querySelector(".td[data-ticket]");
+        if (!desk) {
+          setInterval(() => { if (!touched) location.reload(); }, 30000);
+          return;
+        }
+        // Page d'un ticket : toutes les 3 s, « en train d'ecrire » dans les deux sens et nouveaux messages.
+        const typingBox = document.getElementById("td-typing");
+        const newBox = document.getElementById("td-new");
+        const box = document.querySelector(".td-compose textarea");
+        newBox.addEventListener("click", () => location.reload());
+        let busy = false;
+        const tick = async () => {
+          if (busy || document.hidden) return;
+          busy = true;
+          try {
+            const res = await fetch(location.pathname + "/live", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ typing: Date.now() - lastKey < 4000 && !!(box && box.value.trim()) })
+            });
+            if (res.ok) {
+              const state = await res.json();
+              typingBox.hidden = !state.memberTyping;
+              const changed = state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status;
+              if (changed) {
+                if (!touched && !(box && box.value.trim())) location.reload();
+                else newBox.hidden = false;
+              }
+            }
+          } catch {}
+          busy = false;
+        };
+        setInterval(tick, 3000);
+        tick();
       })();
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -5149,10 +5288,10 @@ function renderSideNav(side) {
       <div class="side-fly" role="menu"><div class="side-fly-title">${label}</div>${items
         .map((i) => `<a role="menuitem" href="${i.href}" class="${i.key === a ? "on" : ""}">${i.label}</a>`)
         .join("")}</div></div>`;
+  // Groupes locaux : sous Equipe seulement (admins, proprietaire, streamer du site).
   const ticketItems = [
     { key: "tickets", href: "/modo/tickets", label: "Ouverts" },
-    { key: "tickets-closed", href: "/modo/tickets?vue=fermes", label: "Fermes" },
-    ...(side.who !== "modo" ? [{ key: "groups", href: "/admin/tickets", label: "Groupes locaux" }] : [])
+    { key: "tickets-closed", href: "/modo/tickets?vue=fermes", label: "Fermes" }
   ];
   const parts = [];
   if (side.who === "admin") {
