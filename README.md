@@ -34,20 +34,16 @@ Ouvrez `http://localhost:3000`.
 
 Important pour le wildcard `*.monsite.com`: cote DNS et Dokploy, un domaine wildcard doit aussi etre declare (DNS `*.monsite.com` et domaine `*.monsite.com` cote Dokploy/Traefik) pour que le trafic des sous-domaines non prevus atteigne bien le conteneur. Sans ca, seuls les sous-domaines explicitement declares dans Dokploy fonctionneront, meme si la redirection est bien enregistree dans l'application.
 
-## Planning (message Discord)
+## Planning (liaison Discord)
 
-La page `/admin/planning` publie dans un salon Discord le message "Programme du stream" (le meme que sur rooky-tv) : un en-tete (horaires, etat du direct, prochain stream, description) puis une carte par titre avec la jaquette Twitch du jeu.
+La page `/admin/planning` recopie dans un autre salon Discord le message "Programme du stream" publie par rooky-tv. Le programme se prepare sur rooky-tv : rien n'est saisi sur ce site.
 
-- Collez l'adresse d'un webhook Discord (elle n'est jamais reaffichee)
-- Remplissez l'en-tete et les titres, puis "Publier" : l'ancien message est efface et un nouveau est poste (mention optionnelle `everyone`, `here` ou ID de role)
-- "Mettre a jour le message" corrige le message deja poste, sans notification
-- Les salons forum sont geres (un post "Programme du stream" est cree)
+1. Ajoutez `DISCORD_BOT_TOKEN` dans l'environnement du site : un bot present sur le serveur de rooky-tv, avec Voir le salon, Lire l'historique et l'intent Message Content.
+2. Dans la page : chaine Twitch du site, salon ou rooky-tv publie le programme, webhook du salon ou le recopier.
+3. "Publier maintenant" lit le message de rooky-tv et le publie (l'ancien message est efface).
+4. "Copie automatique" relit le message toutes les `PLANNING_SYNC_MINUTES` minutes (5 par defaut) et met a jour le message publie, sans notification, seulement s'il change.
 
-Import depuis Discord : avec `DISCORD_BOT_TOKEN` (un bot present sur le serveur de rooky-tv, avec Voir le salon, Lire l'historique et l'intent Message Content), renseignez le salon ou rooky-tv publie "Programme du stream". "Importer depuis Discord" remplit le formulaire ; "Copie automatique" relit le message toutes les `PLANNING_SYNC_MINUTES` minutes (5 par defaut) et met a jour le message deja publie, sans notification.
-
-Chaque planning appartient a une chaine Twitch et est stocke dans `planning/<chaine>.json` du dossier `DATA_DIR`.
-
-Plusieurs sites redirection : sur chaque site, ouvrez `/admin/planning` et cliquez sur "Fixer pour ce site" avec la chaine du site (reglage garde dans `site-config.json`). Le site ne montre et ne publie alors que le planning de cette chaine. Tant qu'aucune chaine n'est fixee, la page gere un planning par chaine (bouton "+ Autre chaine").
+La liaison est stockee dans `planning/<chaine>.json` du dossier `DATA_DIR`, la chaine du site dans `site-config.json`.
 
 ## Persistance Dokploy
 
