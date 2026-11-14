@@ -201,11 +201,15 @@ const requestListener = async (req, res) => {
             req.on("error", reject);
           }));
         } catch {}
+        const ticketId = Number(liveMatch[1]);
         try {
-          const state = await modoApi(doc, viewer, "ticket.live", { id: Number(liveMatch[1]), typing: body.typing === true });
+          const state = await modoApi(doc, viewer, "ticket.live", { id: ticketId, typing: body.typing === true });
           if (!canSeeTicket(viewer, state, { reason: state.reason }, doc)) return sendJson(res, 404, { error: "Ticket introuvable." });
+          logTicketLive(ticketId, `membre ${state.memberTyping ? "en train d'ecrire" : "n'ecrit pas"}`, state.memberTyping ? "typing" : "idle");
+          if (body.typing === true) logTicketLive(ticketId, `${viewer.n || "modo"} tape une reponse (signal envoye au MP)`, `mod:${Math.floor(Date.now() / 30000)}`);
           return sendJson(res, 200, { memberTyping: !!state.memberTyping, lastId: Number(state.lastId) || 0, status: state.status });
         } catch (error) {
+          logTicketLive(ticketId, `ERREUR suivi en direct : ${error.message}`, `err:${error.message}:${Math.floor(Date.now() / 60000)}`);
           return sendJson(res, 502, { error: error.message });
         }
       }
@@ -3580,6 +3584,8 @@ const TICKET_DESK_CSS = `
   @keyframes td-blink { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
   .td-new { margin: 0 18px 8px; padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(245, 197, 66, 0.5); background: rgba(245, 197, 66, 0.1); color: #f5c542; font-size: 13px; cursor: pointer; text-align: left; }
   .td-new[hidden] { display: none; }
+  .td-livewarn { margin: 0 18px 8px; font-size: 12px; color: #ff8a92; }
+  .td-livewarn[hidden] { display: none; }
   .td-item-main { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .td-item-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
   .td-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3746,6 +3752,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         ${banForm}
       </div>
       <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
+      <p class="td-livewarn" id="td-livewarn" hidden></p>
       <button type="button" class="td-new" id="td-new" hidden>Nouveau message — afficher</button>
       ${
         canReply
@@ -3822,7 +3829,14 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ typing: Date.now() - lastKey < 4000 && !!(box && box.value.trim()) })
             });
-            if (res.ok) {
+            const warn = document.getElementById("td-livewarn");
+            if (!res.ok) {
+              // rooky-tv pas a jour ou injoignable : on le dit au lieu d'echouer en silence.
+              const err = await res.json().catch(() => ({}));
+              warn.textContent = "Suivi en direct indisponible (en train d'ecrire, nouveaux messages)" + (err.error ? " : " + err.error : "") + ".";
+              warn.hidden = false;
+            } else {
+              warn.hidden = true;
               const state = await res.json();
               typingBox.hidden = !state.memberTyping;
               const changed = state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status;
@@ -3840,6 +3854,19 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Tickets", modoShell(doc, viewer, inner), { wide: true, side: modoSide(viewer, live, rights, closedTab ? "tickets-closed" : "tickets") }));
+}
+
+// Journal du suivi en direct des tickets (logs du conteneur) : une ligne quand l'etat change
+// (le membre commence / arrete d'ecrire), quand un modo tape (30 s au plus) et a chaque erreur
+// (1 par minute au plus) — pas une ligne toutes les 3 s.
+const ticketLiveLog = new Map();
+function logTicketLive(ticketId, message, stateKey) {
+  const key = `${ticketId}:${stateKey.startsWith("mod:") ? "mod" : stateKey.startsWith("err:") ? "err" : "member"}`;
+  if (ticketLiveLog.get(key) === stateKey) return;
+  const first = !ticketLiveLog.has(key);
+  ticketLiveLog.set(key, stateKey);
+  if (first && stateKey === "idle") return;
+  console.log(`[tickets-live] ticket #${ticketId} : ${message}`);
 }
 
 /* ------------------------- Groupes locaux (visibilite des tickets) ------------------------- */
