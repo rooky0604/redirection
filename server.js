@@ -2618,7 +2618,9 @@ function renderPublicPlanning(res, doc) {
             })
             .join("");
       return `
-      <section class="pw-day${isToday ? " is-today" : ""}${isPast ? " is-past" : ""}${streams.length ? " has-stream" : ""}">
+      <section class="pw-day${isToday ? " is-today" : ""}${isPast ? " is-past" : ""}${streams.length ? " has-stream" : ""}"${
+        streams.length ? ` tabindex="0" role="button" aria-label="Voir ${isToday ? "aujourd'hui" : escapeHtml(name)} en grand"` : ""
+      }>
         <header class="pw-day-head">
           <span class="pw-day-name">${isToday ? "Aujourd'hui" : name}</span>
           <span class="pw-day-date">${escapeHtml(short)}</span>
@@ -2687,6 +2689,30 @@ function renderPublicPlanning(res, doc) {
       .pw-current .pw-subject { color: #ff6b87; }
       .pw-foot { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
       .pw-foot a { color: var(--muted); }
+      .pw-day.has-stream { cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
+      .pw-day.has-stream:hover, .pw-day.has-stream:focus-visible { border-color: #45e0d2; transform: translateY(-2px); outline: none; }
+      .pw-zoom {
+        width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 0;
+        background: transparent; color: var(--ink); overflow: visible;
+      }
+      .pw-zoom::backdrop { background: rgba(5, 6, 10, 0.75); backdrop-filter: blur(3px); }
+      .pw-zoom-box { position: relative; max-height: calc(100vh - 48px); overflow-y: auto; border-radius: 20px; }
+      .pw-zoom .pw-day { opacity: 1; padding: 22px 24px; gap: 16px; min-height: 0; cursor: default; transform: none; display: grid; }
+      .pw-zoom .pw-day-name { font-size: 1.5rem; }
+      .pw-zoom .pw-day-date { font-size: 15px; }
+      .pw-zoom .pw-time { font-size: 2.2rem; }
+      .pw-zoom .pw-desc { font-size: 15px; }
+      .pw-zoom .pw-items { gap: 14px; }
+      .pw-zoom .pw-item { gap: 14px; }
+      .pw-zoom .pw-item img, .pw-zoom .pw-noimg { width: 72px; height: 96px; border-radius: 8px; }
+      .pw-zoom .pw-subject { font-size: 17px; -webkit-line-clamp: unset; display: block; }
+      .pw-zoom .pw-meta { font-size: 14px; margin-top: 4px; }
+      .pw-zoom-close {
+        position: absolute; top: 12px; right: 12px; width: 36px; height: 36px; border-radius: 50%; border: 0;
+        background: rgba(255, 255, 255, 0.08); color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer;
+      }
+      .pw-zoom-close:hover { background: rgba(255, 255, 255, 0.16); }
+      .pw-zoom .pw-day-head { padding-right: 44px; justify-content: flex-start; gap: 12px; }
       @media (max-width: 1100px) { .pw-week { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
       @media (max-width: 760px) {
         .pw-week { grid-template-columns: 1fr; }
@@ -2721,6 +2747,41 @@ function renderPublicPlanning(res, doc) {
         <a href="/">Retour a ${escapeHtml(siteConfig.title)}</a>
       </footer>
     </main>
+    <dialog class="pw-zoom" aria-label="Programme du jour">
+      <div class="pw-zoom-box"><button type="button" class="pw-zoom-close" aria-label="Fermer">×</button><div class="pw-zoom-day"></div></div>
+    </dialog>
+    <script>
+      (() => {
+        // Clic sur un jour : le meme contenu, en grand, dans une fenetre (Echap, croix ou clic a cote ferme).
+        const dialog = document.querySelector(".pw-zoom");
+        if (!dialog || typeof dialog.showModal !== "function") return;
+        const slot = dialog.querySelector(".pw-zoom-day");
+        const open = (day) => {
+          const copy = day.cloneNode(true);
+          copy.removeAttribute("tabindex");
+          copy.removeAttribute("role");
+          copy.removeAttribute("aria-label");
+          slot.replaceChildren(copy);
+          dialog.showModal();
+        };
+        document.querySelectorAll(".pw-week .pw-day.has-stream").forEach((day) => {
+          day.addEventListener("click", (event) => {
+            if (event.target.closest("a")) return;
+            open(day);
+          });
+          day.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              open(day);
+            }
+          });
+        });
+        dialog.querySelector(".pw-zoom-close").addEventListener("click", () => dialog.close());
+        dialog.addEventListener("click", (event) => {
+          if (event.target === dialog) dialog.close();
+        });
+      })();
+    </script>
   `;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -2799,7 +2860,28 @@ function imageWrap(text, maxWidth, size, maxLines, ratio = 0.6) {
   return lines;
 }
 
+// Jaquettes telechargees pour l'image. Seules les reussites sont gardees : un echec (delai depasse,
+// erreur passagere du CDN) n'est retenu que 5 min, sinon la jaquette manquait jusqu'au redemarrage.
 const imageThumbCache = new Map();
+const imageThumbFailed = new Map(); // url -> date de l'echec
+const IMAGE_THUMB_RETRY_MS = 5 * 60_000;
+async function fetchImageThumb(url) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000), headers: { "User-Agent": "Mozilla/5.0 (planning)" } });
+      const type = res.headers.get("content-type") || "";
+      if (res.ok && /^image\/(png|jpeg|webp|gif)/.test(type)) {
+        return `data:${type.split(";")[0]};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+      }
+      if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+        return "";
+      }
+    } catch {
+      // nouvelle tentative
+    }
+  }
+  return "";
+}
 async function imageThumb(url) {
   if (!url) {
     return "";
@@ -2807,16 +2889,15 @@ async function imageThumb(url) {
   if (imageThumbCache.has(url)) {
     return imageThumbCache.get(url);
   }
-  let data = "";
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    const type = res.headers.get("content-type") || "";
-    if (res.ok && /^image\/(png|jpeg|webp|gif)/.test(type)) {
-      data = `data:${type.split(";")[0]};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
-    }
-  } catch {
-    data = "";
+  if (Date.now() - (imageThumbFailed.get(url) || 0) < IMAGE_THUMB_RETRY_MS) {
+    return "";
   }
+  const data = await fetchImageThumb(url);
+  if (!data) {
+    imageThumbFailed.set(url, Date.now());
+    return "";
+  }
+  imageThumbFailed.delete(url);
   if (imageThumbCache.size > 300) {
     imageThumbCache.clear();
   }
@@ -2841,9 +2922,16 @@ function planningImageKey(doc) {
     .digest("hex");
 }
 
+// Vrai si la derniere image generee n'a pas pu recuperer toutes ses jaquettes : elle sera refaite.
+let planningThumbsMissing = false;
+
 async function buildPlanningSvg(doc) {
   const program = doc.program;
   const week = planningWeek(program);
+  // Jaquettes telechargees en parallele (le dessin les relit ensuite dans le cache).
+  const thumbUrls = [...new Set(week.days.flatMap((day) => (day.streams || []).flatMap((s) => (s.items || []).map((i) => i.thumbnail))).filter(Boolean))];
+  const thumbResults = await Promise.all(thumbUrls.map((url) => imageThumb(url)));
+  planningThumbsMissing = thumbResults.some((data) => !data);
   const { width, pad, gap } = IMG;
   const colW = (width - pad * 2 - gap * 6) / 7;
   const inner = colW - 28;
@@ -3176,7 +3264,8 @@ function queuePlanningImage(mode = "auto", options = {}) {
         imagePostedName: webhookName,
         imageMessageId: result.messageId,
         imageThreadId: result.threadId,
-        imageKey: key,
+        // Jaquette manquante : cle differente -> l'image est refaite au prochain passage automatique.
+        imageKey: planningThumbsMissing ? `${key}|jaquettes` : key,
         imagePublishedAt: Date.now(),
         imageError: ""
       });
