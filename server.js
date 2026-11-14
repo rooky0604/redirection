@@ -2412,7 +2412,9 @@ function cleanPlanningProgram(body) {
             subject: str(item?.subject, 200),
             category: str(item?.category, 100),
             thumbnail: httpsUrl(item?.thumbnail),
-            status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming"
+            status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
+            // Titre masque sur Discord (rooky-tv) : dans l'image seulement, pas sur la page /planning.
+            imageOnly: item?.imageOnly === true
           }))
           .filter((item) => item.subject)
       }))
@@ -2576,6 +2578,10 @@ function planningWeek(program) {
   return { today, monday, lastDay, vacation, days };
 }
 
+// Page publique /planning : sans les titres d'organisation ni ceux masques sur Discord, qui ne
+// figurent que dans l'image du programme.
+const publicItems = (stream) => (stream.items || []).filter((item) => item.status !== "planning" && !item.imageOnly);
+
 function renderPublicPlanning(res, doc) {
   const siteConfig = getSiteConfig();
   const program = doc.program;
@@ -2608,8 +2614,8 @@ function renderPublicPlanning(res, doc) {
               ${
                 stream.cancelled
                   ? ""
-                  : stream.items.length
-                    ? `<ul class="pw-items">${stream.items.map(renderPlanningItem).join("")}</ul>`
+                  : publicItems(stream).length
+                    ? `<ul class="pw-items">${publicItems(stream).map(renderPlanningItem).join("")}</ul>`
                     : stream.past
                       ? ""
                       : `<p class="pw-empty">Programme bientot annonce</p>`
