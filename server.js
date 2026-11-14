@@ -3068,12 +3068,29 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   let messageId = doc.imageMessageId;
   let threadId = doc.imageThreadId || "";
 
+  // Bouton lien « Aller voir le planning » sous l'image (webhook : ?with_components=true). Refuse par
+  // Discord (formulaire invalide) : l'image part sans le bouton.
+  const button = /^https?:\/\/\S+$/.test(doc.siteUrl || "")
+    ? [{ type: 1, components: [{ type: 2, style: 5, label: "Aller voir le planning", url: `${doc.siteUrl}/planning` }] }]
+    : null;
+  const withComponents = (url) => `${url}${url.includes("?") ? "&" : "?"}with_components=true`;
+  const call = async (url, method, payload) => {
+    if (button) {
+      const first = await planningImageCall(withComponents(url), method, { ...payload, components: button }, png);
+      const rejected = first.res && first.res.status === 400 && ![220001, 10003].includes(first.data?.code);
+      if (!rejected) {
+        return first;
+      }
+      console.error(`[planning] bouton refuse par Discord : ${first.data?.message || first.res.status}`);
+    }
+    return planningImageCall(url, method, { ...payload, components: [] }, png);
+  };
+
   if (mode === "update" && messageId) {
-    const { res, data } = await planningImageCall(
+    const { res, data } = await call(
       planningImageThread(`${doc.imageWebhookUrl}/messages/${messageId}`, threadId),
       "PATCH",
-      { ...message, allowed_mentions: { parse: [] } },
-      png
+      { ...message, allowed_mentions: { parse: [] } }
     );
     if (res?.ok) {
       return { messageId, threadId, edited: true };
@@ -3088,10 +3105,10 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   }
   const payload = { ...message, ...(mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } }) };
   const base = `${doc.imageWebhookUrl}?wait=true`;
-  let { res, data } = await planningImageCall(planningImageThread(base, threadId), "POST", payload, png);
+  let { res, data } = await call(planningImageThread(base, threadId), "POST", payload);
   // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
   if (res && !res.ok && (data?.code === 220001 || (threadId && data?.code === 10003))) {
-    ({ res, data } = await planningImageCall(base, "POST", { ...payload, thread_name: "Programme de la semaine" }, png));
+    ({ res, data } = await call(base, "POST", { ...payload, thread_name: "Programme de la semaine" }));
     threadId = res?.ok && data?.channel_id ? String(data.channel_id) : "";
   }
   if (!res || !res.ok) {
