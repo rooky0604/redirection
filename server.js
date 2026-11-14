@@ -13,6 +13,9 @@ const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
 const SITE_CONFIG_FILE = path.join(STORAGE_DIR, "site-config.json");
 const MONITORS_FILE = path.join(STORAGE_DIR, "monitors.json");
 const PLANNING_DIR = path.join(STORAGE_DIR, "planning");
+// Espace modo : modos deja connectes par « Acces modo » et groupes locaux de visibilite des tickets.
+const MODO_USERS_FILE = path.join(STORAGE_DIR, "modo-users.json");
+const MODO_GROUPS_FILE = path.join(STORAGE_DIR, "modo-groups.json");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -93,6 +96,7 @@ const requestListener = async (req, res) => {
         redirect(res, "/login?error=" + encodeURIComponent("Connexion modo refusee ou expiree : reclique sur Acces modo."));
         return;
       }
+      rememberModoUser(claims);
       setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
         httpOnly: true,
         secure: useSecureCookies,
@@ -122,9 +126,21 @@ const requestListener = async (req, res) => {
         return;
       }
       const flash = getFlashMessage(url);
+      // Admin de rooky-tv : chaine des tickets choisie (cookie), verifiee par rooky-tv.
+      if (viewer.admin && viewer.u) {
+        const asked = url.searchParams.get("chaine");
+        if (asked !== null) {
+          const value = /^[a-z0-9_]{1,25}$/.test(asked) ? asked : "";
+          setCookie(res, "modo_chaine", value, { httpOnly: true, secure: useSecureCookies, maxAge: value ? MODO_SESSION_MS / 1000 : 1 });
+          viewer.ticketChannel = value;
+        } else {
+          viewer.ticketChannel = parseCookies(req.headers.cookie || "").modo_chaine || "";
+        }
+      }
+      const overview = async () => filterModoLive(await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message })), viewer, doc);
 
       if (pathname === "/modo" && method === "GET") {
-        const live = await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message }));
+        const live = await overview();
         return renderModoPlanning(res, doc, viewer, live, flash);
       }
 
@@ -154,18 +170,22 @@ const requestListener = async (req, res) => {
       }
 
       if (pathname === "/modo/tickets" && method === "GET") {
-        const live = await modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message }));
-        return renderModoTickets(res, doc, viewer, live, flash);
+        const live = await overview();
+        if (live.rookyAdmin) live.channels = (await modoApi(doc, viewer, "tickets.meta").catch(() => ({}))).channels || null;
+        return renderModoTickets(res, doc, viewer, live, flash, url.searchParams.get("vue") || "");
       }
 
       const ticketMatch = /^\/modo\/tickets\/(\d{1,12})$/.exec(pathname);
       if (ticketMatch && method === "GET") {
         const id = Number(ticketMatch[1]);
-        const [live, data] = await Promise.all([
-          modoApi(doc, viewer, "overview").catch((error) => ({ error: error.message })),
+        const [live, fetched] = await Promise.all([
+          overview(),
           modoApi(doc, viewer, "ticket.get", { id }).catch((error) => ({ error: error.message }))
         ]);
-        return renderModoTicket(res, doc, viewer, live, data, flash);
+        // Categorie reservee a un groupe local dont la personne n'est pas membre : introuvable.
+        const data = fetched.ticket && !canSeeTicket(viewer, fetched, fetched.ticket, doc) ? { error: "Ticket introuvable." } : fetched;
+        if (live.rookyAdmin) live.channels = (await modoApi(doc, viewer, "tickets.meta").catch(() => ({}))).channels || null;
+        return renderModoTicket(res, doc, viewer, live, data, flash, url.searchParams.get("vue") || "");
       }
 
       if (ticketMatch && method === "POST") {
@@ -174,6 +194,9 @@ const requestListener = async (req, res) => {
         const form = Object.fromEntries(params.entries());
         const back = `/modo/tickets/${id}`;
         try {
+          // Meme regle de visibilite que l'affichage, avant toute action.
+          const current = await modoApi(doc, viewer, "ticket.get", { id });
+          if (!current.ticket || !canSeeTicket(viewer, current, current.ticket, doc)) throw new Error("Ticket introuvable.");
           if (form.action === "propose") {
             // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
             const streams = params.getAll("stream").map((key) => ({ key, end: params.get(`end_${key}`) || "" }));
@@ -830,6 +853,49 @@ const requestListener = async (req, res) => {
         registerClick(match.source);
       }
       return;
+    }
+
+    // Tickets : groupes locaux (qui voit quelle categorie) et chaine des tickets pour les admins.
+    if (pathname === "/admin/tickets" && method === "GET") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+      const doc = readPlanning(planningSiteChannel());
+      const viewer = adminViewer(req, doc);
+      const meta = await modoApi(doc, viewer, "tickets.meta").catch((error) => ({ error: error.message }));
+      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/tickets" && method === "POST") {
+      if (!isAuthenticated(req)) {
+        redirect(res, "/login");
+        return;
+      }
+      const params = await parseFormParams(req);
+      const action = params.get("action") || "";
+      const groups = readModoGroups();
+      const back = (key, message) => redirect(res, `/admin/tickets?${key}=${encodeURIComponent(message)}`);
+      if (action === "add") {
+        const name = String(params.get("name") || "").trim().slice(0, 40);
+        if (!name) return back("error", "Donne un nom au groupe.");
+        if (groups.length >= 30) return back("error", "30 groupes maximum.");
+        groups.push({ id: crypto.randomBytes(5).toString("hex"), name, reasons: [], members: [], roles: [] });
+        writeModoGroups(groups);
+        return back("success", `Groupe « ${name} » cree : coche ses categories et ses membres.`);
+      }
+      const group = groups.find((g) => g.id === params.get("id"));
+      if (!group) return back("error", "Groupe introuvable.");
+      if (action === "delete") {
+        writeModoGroups(groups.filter((g) => g !== group));
+        return back("success", `Groupe « ${group.name} » supprime : ses categories redeviennent visibles par tous les modos.`);
+      }
+      group.name = String(params.get("name") || group.name).trim().slice(0, 40) || group.name;
+      group.reasons = [...new Set(params.getAll("reason").map((r) => String(r).slice(0, 120)))].slice(0, 50);
+      group.members = [...new Set(params.getAll("member").filter((id) => /^\d{5,25}$/.test(id)))].slice(0, 200);
+      group.roles = /^\d{5,25}$/.test(params.get("role") || "") ? [params.get("role")] : [];
+      writeModoGroups(groups);
+      return back("success", `Groupe « ${group.name} » enregistre.`);
     }
 
     if (pathname === "/admin/planning" && method === "GET") {
@@ -1901,6 +1967,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
+        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2138,6 +2205,7 @@ function renderSiteSettings(res, flash, siteConfig, redirects = []) {
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
+        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2266,6 +2334,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
         <a href="/admin/monitoring" class="link-button secondary">Monitoring</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
+        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -2378,6 +2447,7 @@ function renderMonitoring(res, config, flash) {
         <a href="/admin/site" class="link-button secondary">Personnalisation</a>
         <a href="/admin/planning" class="link-button secondary">Planning</a>
         <a href="/modo" class="link-button secondary">Espace modo</a>
+        <a href="/admin/tickets" class="link-button secondary">Tickets</a>
         <a href="/logout" class="link-button">Deconnexion</a>
       </div>
     </header>
@@ -3245,6 +3315,7 @@ async function modoApi(doc, viewer, action, extra = {}) {
     site: modoSiteId(doc.syncKey),
     ts: Date.now(),
     action,
+    ...(viewer.ticketChannel ? { ticketChannel: viewer.ticketChannel } : {}),
     user: viewer.admin ? { admin: true, ...(viewer.u ? { id: viewer.u } : {}), name: viewer.password ? "Admin du site" : viewer.n || "Admin" } : { id: viewer.u, name: viewer.n }
   });
   const signature = crypto.createHmac("sha256", doc.syncKey).update(body).digest("base64url");
@@ -3278,6 +3349,7 @@ const MODO_CSS = `
   .md-sugg small { color: var(--muted); }
   .md-decide { display: flex; gap: 6px; flex: 0 0 auto; }
   .md-slot { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .md-slot input[type=checkbox] { width: 18px; height: 18px; flex: 0 0 auto; margin: 0; }
   .md-slot > span:nth-child(2) { display: grid; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
   .md-slot small { color: var(--muted); }
   .md-slot-end { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
@@ -3335,31 +3407,8 @@ function modoShell(doc, viewer, inner) {
     </main>`;
 }
 
-function renderModoTickets(res, doc, viewer, live, flash) {
-  const rights = modoRights(viewer, live);
-  const tickets = Array.isArray(live.tickets) ? live.tickets : null;
-  const rows = (tickets || [])
-    .map(
-      (t) => `<a class="mt-row${t.status === "open" && t.unread ? " unread" : ""}${t.status !== "open" ? " closed" : ""}" href="/modo/tickets/${t.id}">
-        <span><strong>#${t.id} · ${escapeHtml(t.owner)}</strong><small>${escapeHtml(t.reason || "Sans raison")} · ${escapeHtml(modoDateTime(t.updatedAt))}</small>${t.lastMessage ? `<small>${escapeHtml(t.lastMessage)}</small>` : ""}</span>
-        <span class="md-tag${t.status === "open" ? (t.unread ? " bad" : " ok") : ""}">${t.status === "open" ? (t.unread ? "Nouveau message" : "Ouvert") : "Ferme"}</span>
-      </a>`
-    )
-    .join("");
-  const inner = `
-    ${modoNav("tickets", live, rights)}
-    ${renderMessages(flash)}
-    ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
-    ${
-      tickets === null
-        ? `<p class="md-empty">Tu n'as pas acces aux tickets (droit « Tickets » des groupes d'acces du planning).</p>`
-        : tickets.length
-          ? `<div class="mt-list">${rows}</div>`
-          : `<p class="md-empty">Aucun ticket. Les tickets ouverts sur le Discord (en MP) arrivent ici.</p>`
-    }
-    <script>setTimeout(() => location.reload(), 30000);</script>`;
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage("Tickets", modoShell(doc, viewer, inner), { wide: true }));
+function renderModoTickets(res, doc, viewer, live, flash, tab = "") {
+  return renderTicketDesk(res, doc, viewer, live, null, flash, tab);
 }
 
 // Creneaux proposes a l'invite (rooky-tv src/siteTickets.js) : etat, choix a valider, et formulaire
@@ -3397,7 +3446,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
     return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
   };
   const form = `
-    <details class="md-form"${offer ? "" : " open"}>
+    <details class="md-form">
       <summary>\ud83d\udcc5 ${offer ? "Proposer d'autres creneaux" : "Proposer des creneaux"}</summary>
       <form method="post" class="mt-reply" style="margin-top:8px;">
         ${
@@ -3424,77 +3473,363 @@ function renderSlotOffer(doc, ticket, canDecide) {
   return offerBox + form;
 }
 
-function renderModoTicket(res, doc, viewer, live, data, flash) {
+function renderModoTicket(res, doc, viewer, live, data, flash, tab = "") {
+  return renderTicketDesk(res, doc, viewer, live, data || {}, flash, tab);
+}
+
+const TICKET_DESK_CSS = `
+  .td { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 70vh; height: calc(100vh - 230px); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; background: rgba(14, 16, 23, 0.92); }
+  .td-list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .td-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 12px; padding: 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); }
+  .td-tabs a { text-align: center; padding: 8px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 14px; }
+  .td-tabs a.on { background: rgba(124, 92, 255, 0.22); color: var(--ink); }
+  .td-scroll { overflow-y: auto; min-height: 0; flex: 1; padding-bottom: 10px; }
+  .td-chan { margin: 12px 12px 0; }
+  .td-chan select { width: 100%; }
+  .td-group { margin: 10px 14px 4px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .td-group b { color: var(--ink); }
+  .td-item { display: flex; gap: 10px; align-items: center; padding: 9px 14px; margin: 2px 8px; border-radius: 10px; border-left: 3px solid transparent; color: var(--ink); text-decoration: none; }
+  .td-item:hover { background: rgba(255, 255, 255, 0.04); }
+  .td-item.on { background: rgba(124, 92, 255, 0.14); border-left-color: #f5c542; }
+  .td-avatar { width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(124, 92, 255, 0.3); color: #fff; }
+  .td-item-main { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .td-item-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .td-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .td-item.unread .td-name { font-weight: 700; }
+  .td-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; flex: 0 0 auto; }
+  .td-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
+  .td-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: #57f287; }
+  .td-dot.new { background: #f5c542; }
+  .td-dot.off { background: #6b7280; }
+  .td-none { margin: 14px; color: var(--muted); font-size: 13px; }
+  .td-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .td-empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 6px; text-align: center; color: var(--muted); padding: 20px; }
+  .td-empty-icon { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: rgba(255, 255, 255, 0.06); font-size: 20px; }
+  .td-empty strong { color: var(--ink); }
+  .td-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .td-head-main { display: flex; gap: 12px; align-items: center; min-width: 0; }
+  .td-head h2 { margin: 0; font-size: 1.05rem; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .td-head p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+  .td-head form { display: flex; gap: 6px; }
+  .td-body { flex: 1; overflow-y: auto; min-height: 0; padding: 14px 18px; display: grid; gap: 12px; align-content: start; }
+  .td-compose { border-top: 1px solid var(--line); padding: 12px 18px; display: grid; gap: 8px; }
+  .td-compose textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; background: rgba(255, 255, 255, 0.04); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font: inherit; }
+  .td-compose textarea:focus { outline: none; border-color: rgba(124, 92, 255, 0.7); }
+  .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
+  .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+  .td-back { display: none; }
+  @media (max-width: 860px) {
+    .td { grid-template-columns: 1fr; height: auto; min-height: 0; }
+    .td-list { border-right: 0; }
+    .td.has-ticket .td-list { display: none; }
+    .td:not(.has-ticket) .td-pane { display: none; }
+    .td-back { display: inline-block; }
+    .td-body { max-height: none; }
+  }
+`;
+
+// Tickets en deux colonnes : la liste (Ouverts / Fermes, nouveaux messages en premier) et la
+// conversation du ticket choisi, ou « Aucun ticket ouvert ».
+function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
   const rights = modoRights(viewer, live);
   const canReply = rights.tickets === "edit";
-  const ticket = data?.ticket;
-  const messages = Array.isArray(data?.messages) ? data.messages : [];
-  const bubbles = messages
-    .map((m) => {
-      const images = (m.attachments || [])
-        .filter((a) => /^https:\/\//.test(a.url || ""))
-        .map((a) =>
-          /^image\//.test(a.type || "")
-            ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(a.url)}" alt="" referrerpolicy="no-referrer" /></a>`
-            : `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer">\ud83d\udcce ${escapeHtml(a.name || "piece jointe")}</a>`
-        )
-        .join("");
-      const who = m.direction === "in" ? ticket?.owner || "Membre" : m.direction === "out" ? `${m.author || "Equipe"} (equipe)` : "";
-      return `<div class="mt-msg ${m.direction}">${escapeHtml(m.content)}${images}<small>${escapeHtml([who, modoDateTime(m.at)].filter(Boolean).join(" · "))}</small></div>`;
-    })
-    .join("");
+  const tickets = Array.isArray(live.tickets) ? live.tickets : null;
+  const ticket = data?.ticket || null;
+  const closedTab = tab === "fermes" || (!tab && ticket && ticket.status !== "open");
+  const q = closedTab ? "?vue=fermes" : "";
+  const initial = (name) => escapeHtml((String(name || "?").trim()[0] || "?").toUpperCase());
+  const item = (t) => {
+    const unread = t.status === "open" && t.unread;
+    const dot = t.status !== "open" ? "off" : unread ? "new" : "";
+    const sub = unread ? t.lastMessage || "Nouveau message" : t.reason || t.lastMessage || "Sans raison";
+    return `<a class="td-item${ticket && ticket.id === t.id ? " on" : ""}${unread ? " unread" : ""}" href="/modo/tickets/${t.id}${q}">
+      <span class="td-avatar" aria-hidden="true">${initial(t.owner)}</span>
+      <span class="td-item-main">
+        <span class="td-item-top"><span class="td-name">${escapeHtml(t.owner)}</span><span class="td-id">#${t.id}</span></span>
+        <span class="td-sub"><span class="td-dot ${dot}"></span>${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>
+      </span>
+    </a>`;
+  };
+  const open = (tickets || []).filter((t) => t.status === "open");
+  const fresh = open.filter((t) => t.unread);
+  const ongoing = open.filter((t) => !t.unread);
+  const closed = (tickets || []).filter((t) => t.status !== "open");
+  const group = (label, list) => (list.length ? `<div class="td-group">${label} <b>${list.length}</b></div>${list.map(item).join("")}` : "");
+  const listHtml = tickets === null
+    ? `<p class="td-none">Tu n'as pas acces aux tickets (droit « Tickets » des groupes d'acces du planning).</p>`
+    : closedTab
+      ? group("Fermes", closed) || `<p class="td-none">Aucun ticket ferme.</p>`
+      : group("Nouveaux messages", fresh) + group("En cours", ongoing) || `<p class="td-none">Aucun ticket ouvert. Les tickets ouverts sur le Discord (en MP) arrivent ici.</p>`;
+
+  let pane = `<div class="td-empty"><span class="td-empty-icon">💬</span><strong>Aucun ticket ouvert</strong><span>Choisis un ticket dans la liste pour lire sa conversation.</span></div>`;
+  if (data?.error && !ticket) {
+    pane = `<div class="td-empty"><span class="td-empty-icon">⚠️</span><strong>Ticket indisponible</strong><span>${escapeHtml(data.error)}</span></div>`;
+  }
+  if (ticket) {
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    const bubbles = messages
+      .map((m) => {
+        const images = (m.attachments || [])
+          .filter((a) => /^https:\/\//.test(a.url || ""))
+          .map((a) =>
+            /^image\//.test(a.type || "")
+              ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(a.url)}" alt="" referrerpolicy="no-referrer" /></a>`
+              : `<a href="${escapeHtml(a.url)}" target="_blank" rel="noreferrer">📎 ${escapeHtml(a.name || "piece jointe")}</a>`
+          )
+          .join("");
+        const who = m.direction === "in" ? ticket.owner || "Membre" : m.direction === "out" ? `${m.author || "Equipe"} (equipe)` : "";
+        return `<div class="mt-msg ${m.direction}">${escapeHtml(m.content)}${images}<small>${escapeHtml([who, modoDateTime(m.at)].filter(Boolean).join(" · "))}</small></div>`;
+      })
+      .join("");
+    const ban = ticket.ban
+      ? `<div class="message error">🚫 Banni des tickets (casier, fiche #${escapeHtml(String(ticket.ban.ficheId))}${
+          ticket.ban.expiresInSeconds ? `, encore ${escapeHtml(String(Math.ceil(ticket.ban.expiresInSeconds / 3600)))} h` : ", definitif"
+        })${ticket.ban.reason ? ` : ${escapeHtml(ticket.ban.reason)}` : ""}</div>`
+      : "";
+    const banForm = canReply && !ticket.ban
+      ? `<details class="md-form">
+          <summary>🚫 Bannir des tickets</summary>
+          <form method="post" class="mt-reply" style="margin-top:8px;">
+            <input type="text" name="reason" maxlength="500" placeholder="Motif (obligatoire)" required />
+            <input type="text" name="duration" maxlength="12" placeholder="Duree : 30m, 12h, 7j, 2sem — vide = definitif" />
+            <p class="md-hint">Inscrit au casier du membre, comme le ban tickets des salons Discord : il ne pourra plus ouvrir de ticket, ni en salon ni en MP. Le ticket est ferme.</p>
+            <div class="mt-actions"><button type="submit" name="action" value="ban" class="danger">Bannir des tickets</button></div>
+          </form>
+        </details>`
+      : "";
+    pane = `
+      <header class="td-head">
+        <div class="td-head-main">
+          <a class="td-back" href="/modo/tickets${q}">←</a>
+          <span class="td-avatar" aria-hidden="true">${initial(ticket.owner)}</span>
+          <div>
+            <h2>${escapeHtml(ticket.owner)} <span class="td-id">#${ticket.id}</span> ${ticket.status === "open" ? `<span class="md-tag ok">Ouvert</span>` : `<span class="md-tag">Ferme${ticket.closedBy ? ` par ${escapeHtml(ticket.closedBy)}` : ""}</span>`}</h2>
+            <p>${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))} · echange en MP avec le bot</p>
+          </div>
+        </div>
+        ${
+          canReply
+            ? `<form method="post">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>`
+            : ""
+        }
+      </header>
+      <div class="td-body" id="td-body">
+        ${renderMessages(flash)}
+        ${data.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
+        ${ban}
+        ${renderSlotOffer(doc, ticket, data.canDecide === true)}
+        <div class="mt-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
+        ${banForm}
+      </div>
+      ${
+        canReply
+          ? ticket.status === "open"
+            ? `<form method="post" class="td-compose mt-reply">
+                <textarea name="content" rows="3" maxlength="3500" placeholder="Ta reponse (envoyee en MP au membre, signee « l'equipe »)"></textarea>
+                <div class="td-compose-row"><span class="md-hint">Le membre recoit ta reponse en MP.</span><button type="submit" name="action" value="reply">Envoyer</button></div>
+              </form>`
+            : ""
+          : `<div class="td-compose"><p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p></div>`
+      }`;
+  }
+
   const inner = `
+    <style>${TICKET_DESK_CSS}</style>
     ${modoNav("tickets", live, rights)}
-    ${renderMessages(flash)}
-    ${data?.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
-    ${
-      ticket
-        ? `<section class="md-form">
-            <h2>Ticket #${ticket.id} · ${escapeHtml(ticket.owner)} ${ticket.status === "open" ? `<span class="md-tag ok">Ouvert</span>` : `<span class="md-tag">Ferme${ticket.closedBy ? ` par ${escapeHtml(ticket.closedBy)}` : ""}</span>`}</h2>
-            <p class="md-hint">${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))}. Le membre ecrit au bot en MP ; tes reponses lui arrivent en MP, signees « l'equipe ».</p>
-            ${
-              ticket.ban
-                ? `<div class="message error">\ud83d\udeab Banni des tickets (casier, fiche #${escapeHtml(String(ticket.ban.ficheId))}${
-                    ticket.ban.expiresInSeconds ? `, encore ${escapeHtml(String(Math.ceil(ticket.ban.expiresInSeconds / 3600)))} h` : ", definitif"
-                  })${ticket.ban.reason ? ` : ${escapeHtml(ticket.ban.reason)}` : ""}</div>`
-                : ""
-            }
-          </section>
-          ${renderSlotOffer(doc, ticket, data.canDecide === true)}
-          <div class="mt-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
-          ${
-            canReply
-              ? `<form method="post" class="mt-reply md-form">
-                  ${ticket.status === "open" ? `<textarea name="content" rows="4" maxlength="3500" placeholder="Ta reponse (envoyee en MP au membre)"></textarea>` : ""}
-                  <div class="mt-actions">
-                    ${ticket.status === "open" ? `<button type="submit" name="action" value="reply">Envoyer</button><button type="submit" name="action" value="close" class="secondary" formnovalidate>Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}
-                  </div>
-                </form>`
-              : `<p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p>`
-          }
-          ${
-            canReply && !ticket.ban
-              ? `<details class="md-form">
-                  <summary>\ud83d\udeab Bannir des tickets</summary>
-                  <form method="post" class="mt-reply" style="margin-top:8px;">
-                    <input type="text" name="reason" maxlength="500" placeholder="Motif (obligatoire)" required />
-                    <input type="text" name="duration" maxlength="12" placeholder="Duree : 30m, 12h, 7j, 2sem — vide = definitif" />
-                    <p class="md-hint">Inscrit au casier du membre, comme le ban tickets des salons Discord : il ne pourra plus ouvrir de ticket, ni en salon ni en MP. Le ticket est ferme.</p>
-                    <div class="mt-actions"><button type="submit" name="action" value="ban" class="danger">Bannir des tickets</button></div>
-                  </form>
-                </details>`
-              : ""
-          }`
-        : ""
-    }
-    <p><a href="/modo/tickets">\u2190 Tous les tickets</a></p>
+    ${!ticket ? renderMessages(flash) : ""}
+    ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
+    <section class="td${ticket || data?.error ? " has-ticket" : ""}">
+      <aside class="td-list">
+        ${
+          live.rookyAdmin && Array.isArray(live.channels)
+            ? `<form method="get" action="/modo/tickets" class="td-chan"><select name="chaine" aria-label="Chaine des tickets" onchange="this.form.submit()">
+                <option value="">#${escapeHtml(doc.channel || "")} (ce site)</option>
+                ${live.channels
+                  .filter((c) => c.channel !== doc.channel)
+                  .map((c) => `<option value="${escapeHtml(c.channel)}"${live.ticketChannel === c.channel ? " selected" : ""}>#${escapeHtml(c.channel)}${c.open ? ` (${Number(c.open)})` : ""}</option>`)
+                  .join("")}
+              </select><noscript><button type="submit">OK</button></noscript></form>`
+            : ""
+        }
+        <nav class="td-tabs"><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}" class="${closedTab ? "" : "on"}">Ouverts${open.length ? ` (${open.length})` : ""}</a><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=fermes" class="${closedTab ? "on" : ""}">Fermes</a></nav>
+        <div class="td-scroll">${listHtml}</div>
+      </aside>
+      <div class="td-pane">${pane}</div>
+    </section>
     <script>
-      // Nouveaux messages : la page se recharge seule tant que rien n'est en cours de saisie.
-      setInterval(() => { const t = document.querySelector(".mt-reply textarea"); if (!t || !t.value.trim()) location.reload(); }, 20000);
-      window.scrollTo(0, document.body.scrollHeight);
+      (() => {
+        // Conversation en bas ; nouveaux messages : rechargement tant que rien n'est en cours de saisie.
+        const body = document.getElementById("td-body");
+        if (body) body.scrollTop = body.scrollHeight;
+        let touched = false;
+        document.addEventListener("input", () => { touched = true; });
+        document.addEventListener("change", () => { touched = true; });
+        document.querySelectorAll(".td details").forEach((d) => d.addEventListener("toggle", () => { touched = true; }));
+        setInterval(() => { if (!touched) location.reload(); }, ${ticket ? 20000 : 30000});
+      })();
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-  res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Ticket", modoShell(doc, viewer, inner), { wide: true }));
+  res.end(renderPage(ticket ? `Ticket #${ticket.id}` : "Tickets", modoShell(doc, viewer, inner), { wide: true }));
+}
+
+/* ------------------------- Groupes locaux (visibilite des tickets) ------------------------- */
+// Une categorie (raison du ticket) cochee dans un groupe local devient reservee aux membres de ce(s)
+// groupe(s). Une categorie qu'aucun groupe ne reserve reste visible par tous les modos (droit
+// « Tickets » de rooky-tv), sans groupe. Le streamer, les admins (mot de passe ou rooky-tv) voient tout.
+
+function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function readModoGroups() {
+  const raw = readJsonFile(MODO_GROUPS_FILE, []);
+  return (Array.isArray(raw) ? raw : []).map((g) => ({
+    id: String(g?.id || ""),
+    name: String(g?.name || "Groupe"),
+    reasons: Array.isArray(g?.reasons) ? g.reasons.map(String) : [],
+    members: Array.isArray(g?.members) ? g.members.map(String) : [],
+    // Role Discord lie (facultatif) : l'avoir sur le serveur = membre du groupe. N'en donne aucun.
+    roles: Array.isArray(g?.roles) ? g.roles.map(String).filter((id) => /^\d{5,25}$/.test(id)) : []
+  })).filter((g) => g.id);
+}
+
+function writeModoGroups(groups) {
+  fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  fs.writeFileSync(MODO_GROUPS_FILE, `${JSON.stringify(groups, null, 2)}\n`, "utf8");
+}
+
+function readModoUsers() {
+  const raw = readJsonFile(MODO_USERS_FILE, []);
+  return Array.isArray(raw) ? raw.filter((u) => /^\d{5,25}$/.test(String(u?.id || ""))) : [];
+}
+
+function rememberModoUser(claims) {
+  if (!/^\d{5,25}$/.test(String(claims?.u || ""))) return;
+  const users = readModoUsers().filter((u) => u.id !== claims.u);
+  users.unshift({ id: claims.u, name: String(claims.n || "").slice(0, 60), role: claims.a ? "admin" : claims.r || "modo", lastAt: Date.now() });
+  try {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    fs.writeFileSync(MODO_USERS_FILE, `${JSON.stringify(users.slice(0, 300), null, 2)}\n`, "utf8");
+  } catch {}
+}
+
+const ticketCategory = (ticket) => String(ticket?.reason || "").trim();
+
+function canSeeTicket(viewer, live, ticket, doc) {
+  if (viewer.admin || live?.seeAll) return true;
+  // Tickets d'une autre chaine (admin seulement) : hors des groupes locaux de ce site.
+  if (live?.ticketChannel && doc && live.ticketChannel !== doc.channel) return true;
+  const category = ticketCategory(ticket);
+  const groups = readModoGroups();
+  const owners = groups.filter((g) => g.reasons.includes(category));
+  if (!owners.length) return true;
+  const roles = Array.isArray(live?.userRoles) ? live.userRoles.map(String) : [];
+  return owners.some((g) => g.members.includes(String(viewer.u || "")) || g.roles.some((r) => roles.includes(r)));
+}
+
+function filterModoLive(live, viewer, doc) {
+  if (Array.isArray(live?.tickets)) live.tickets = live.tickets.filter((t) => canSeeTicket(viewer, live, t, doc));
+  return live;
+}
+
+// Personne connectee a l'administration : admin par Discord (avec son id) ou par mot de passe.
+function adminViewer(req, doc) {
+  const session = readModoSession(req, doc.channel);
+  return session?.a === true ? { ...session, admin: true } : { n: "Admin", r: "admin", admin: true, password: true };
+}
+
+function renderAdminTickets(res, doc, viewer, meta, flash) {
+  const groups = readModoGroups();
+  const users = readModoUsers();
+  const reasons = [...new Set([...(Array.isArray(meta.reasons) ? meta.reasons : []), ...groups.flatMap((g) => g.reasons)])];
+  const reasonLabel = (r) => (r ? escapeHtml(r) : "<em>Sans raison</em>");
+  const reservedBy = (r) => groups.filter((g) => g.reasons.includes(r)).map((g) => g.name);
+  const groupCards = groups
+    .map(
+      (g) => `<form method="post" class="card ag-card">
+        <input type="hidden" name="id" value="${escapeHtml(g.id)}" />
+        <div class="ag-head"><input type="text" name="name" value="${escapeHtml(g.name)}" maxlength="40" aria-label="Nom du groupe" /></div>
+        <div class="ag-cols">
+          <fieldset><legend>Categories reservees a ce groupe</legend>
+            ${
+              reasons.length
+                ? reasons.map((r) => `<label class="ag-check"><input type="checkbox" name="reason" value="${escapeHtml(r)}"${g.reasons.includes(r) ? " checked" : ""} /> ${reasonLabel(r)}</label>`).join("")
+                : `<p class="ag-hint">Aucune categorie connue : ajoute des raisons dans « Questions ticket » sur bot.rooky.fr.</p>`
+            }
+          </fieldset>
+          <fieldset><legend>Membres</legend>
+            <label class="ag-role"><span>Role Discord lie (facultatif)</span>
+              <select name="role">
+                <option value="">Aucun role : membres coches a la main</option>
+                ${(Array.isArray(meta.roles) ? meta.roles : [])
+                  .filter((r) => r.name !== "@everyone")
+                  .map((r) => `<option value="${escapeHtml(r.id)}"${g.roles.includes(String(r.id)) ? " selected" : ""}>@${escapeHtml(r.name)}</option>`)
+                  .join("")}
+                ${g.roles.length && !(meta.roles || []).some((r) => g.roles.includes(String(r.id))) ? `<option value="${escapeHtml(g.roles[0])}" selected>Role ${escapeHtml(g.roles[0])}</option>` : ""}
+              </select>
+            </label>
+            <p class="ag-hint">Avec un role : toute personne qui l'a sur le serveur fait partie du groupe (verifie a chaque visite). Etre dans le groupe ne donne aucun role Discord.</p>
+            ${
+              users.length
+                ? users.map((u) => `<label class="ag-check"><input type="checkbox" name="member" value="${escapeHtml(u.id)}"${g.members.includes(u.id) ? " checked" : ""} /> ${escapeHtml(u.name || u.id)} <small>${escapeHtml(u.role || "")}</small></label>`).join("")
+                : `<p class="ag-hint">Aucun modo connecte pour l'instant : ils apparaissent ici apres leur premier « Acces modo ».</p>`
+            }
+          </fieldset>
+        </div>
+        <div class="ag-actions"><button type="submit" name="action" value="save">Enregistrer</button><button type="submit" name="action" value="delete" class="secondary danger">Supprimer</button></div>
+      </form>`
+    )
+    .join("");
+  const summary = reasons.length
+    ? `<ul class="ag-summary">${reasons
+        .map((r) => {
+          const by = reservedBy(r);
+          return `<li>${reasonLabel(r)} — ${by.length ? `reservee a <strong>${by.map(escapeHtml).join(", ")}</strong>` : "visible par tous les modos"}</li>`;
+        })
+        .join("")}</ul>`
+    : "";
+  const content = `
+    <style>
+      .ag { display: grid; gap: 16px; }
+      .ag-card { display: grid; gap: 12px; }
+      .ag-head input { font-weight: 700; font-size: 1.05rem; }
+      .ag-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+      .ag-cols fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; gap: 6px; align-content: start; max-height: 320px; overflow-y: auto; }
+      .ag-cols legend { padding: 0 6px; font-weight: 600; font-size: 13px; color: var(--muted); }
+      .ag-check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+      .ag-check input { width: 18px; height: 18px; flex: 0 0 auto; margin: 0; }
+      .ag-check small { color: var(--muted); }
+      .ag-role { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+      .ag-hint { margin: 0; color: var(--muted); font-size: 13px; }
+      .ag-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .ag-add { display: flex; gap: 8px; flex-wrap: wrap; }
+      .ag-add input { flex: 1 1 220px; }
+      .ag-summary { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; }
+    </style>
+    <main class="ag">
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
+          <h1 style="margin:0;">Tickets · groupes locaux</h1>
+          <span style="display:flex;gap:8px;flex-wrap:wrap;"><a href="/admin" class="link-button secondary">Administration</a><a href="/modo/tickets" class="link-button secondary">Voir les tickets</a></span>
+        </div>
+        <p class="ag-hint" style="margin-top:8px;">Une categorie cochee dans un groupe est reservee a ses membres. Les categories qu'aucun groupe ne reserve restent visibles par tous les modos, sans groupe. Le streamer et les admins voient tout. Les droits « Tickets » de rooky-tv (voir / repondre) s'appliquent en plus.</p>
+        ${renderMessages(flash)}
+        ${meta.error ? `<div class="message error">rooky-tv : ${escapeHtml(meta.error)}</div>` : ""}
+        ${summary}
+        <p class="ag-hint" style="margin-top:8px;">Modos connectes (${users.length}) : ${users.length ? users.map((u) => escapeHtml(u.name || u.id)).join(", ") : "aucun pour l'instant — ils apparaissent apres leur premier « Acces modo »."}</p>
+      </section>
+      ${groupCards}
+      <form method="post" class="card ag-add">
+        <input type="text" name="name" maxlength="40" placeholder="Nom du nouveau groupe (ex. Collabs)" required />
+        <button type="submit" name="action" value="add">Creer le groupe</button>
+      </form>
+    </main>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Tickets", content, { wide: true }));
 }
 
 /* ------------------------- Image du programme (Discord) ------------------------- */
