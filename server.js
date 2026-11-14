@@ -71,6 +71,18 @@ const requestListener = async (req, res) => {
       return renderPublicPlanning(res, readPlanning(planningSiteChannel()));
     }
 
+    // Documentation : ce que la personne connectee peut faire (admin, streamer ou modo).
+    if (pathname === "/documentation" && method === "GET") {
+      const doc = readPlanning(planningSiteChannel());
+      const session = readModoSession(req, doc.channel);
+      const who = isAuthenticated(req) ? "admin" : session?.r === "streamer" || session?.st ? "streamer" : session ? "modo" : "";
+      if (!who) {
+        redirect(res, "/login");
+        return;
+      }
+      return renderDocumentation(res, who, who === "admin" ? (isPasswordSession(req) ? "/logout" : "/logout") : "/modo/logout");
+    }
+
     // Espace modo : connexion par rooky-tv (bot relie), le mot de passe admin reste possible.
     if (pathname === "/modo/login" && method === "GET") {
       const doc = readPlanning(planningSiteChannel());
@@ -97,7 +109,7 @@ const requestListener = async (req, res) => {
         return;
       }
       rememberModoUser(claims);
-      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, o: claims.o === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
+      setCookie(res, "modo", signModoSession({ u: claims.u, n: claims.n, r: claims.r, a: claims.a === true, o: claims.o === true, st: claims.st === true, k: claims.k, c: doc.channel, e: Date.now() + MODO_SESSION_MS }), {
         httpOnly: true,
         secure: useSecureCookies,
         maxAge: Math.round(MODO_SESSION_MS / 1000)
@@ -864,11 +876,13 @@ const requestListener = async (req, res) => {
       }
       const doc = readPlanning(planningSiteChannel());
       const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch((error) => ({ error: error.message }));
-      return renderAdminTeam(res, doc, team, getFlashMessage(url), teamAccess(req, doc).canEdit, isAuthenticated(req) ? "admin" : "streamer");
+      const session = readModoSession(req, doc.channel);
+      const canEdit = teamAccess(req, doc).canEdit || Boolean(session?.u && team.streamer?.id && String(team.streamer.id) === String(session.u));
+      return renderAdminTeam(res, doc, team, getFlashMessage(url), canEdit, isAuthenticated(req) ? "admin" : "streamer");
     }
 
     if (pathname === "/admin/equipe" && method === "POST") {
-      const access = teamAccess(req, readPlanning(planningSiteChannel()));
+      const access = await teamAccessLive(req, readPlanning(planningSiteChannel()));
       if (!access.canEdit) {
         redirect(res, access.canView ? "/admin/equipe?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
         return;
@@ -905,11 +919,11 @@ const requestListener = async (req, res) => {
       const doc = readPlanning(planningSiteChannel());
       const viewer = adminViewer(req, doc);
       const meta = await modoApi(doc, viewer, "tickets.meta").catch((error) => ({ error: error.message }));
-      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url), teamAccess(req, doc).canEdit, isAuthenticated(req) ? "admin" : "streamer");
+      return renderAdminTickets(res, doc, viewer, meta, getFlashMessage(url), (await teamAccessLive(req, doc)).canEdit, isAuthenticated(req) ? "admin" : "streamer");
     }
 
     if (pathname === "/admin/tickets" && method === "POST") {
-      const access = teamAccess(req, readPlanning(planningSiteChannel()));
+      const access = await teamAccessLive(req, readPlanning(planningSiteChannel()));
       if (!access.canEdit) {
         redirect(res, access.canView ? "/admin/tickets?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
         return;
@@ -3771,9 +3785,20 @@ function isPasswordSession(req) {
 // proprietaire de rooky-tv et la connexion par mot de passe (proprietaire du site) les modifient.
 function teamAccess(req, doc) {
   const session = readModoSession(req, doc.channel);
-  const canEdit = isPasswordSession(req) || session?.r === "streamer" || (session?.a === true && session?.o === true);
+  const canEdit = isPasswordSession(req) || session?.r === "streamer" || session?.st === true || (session?.a === true && session?.o === true);
   const canView = canEdit || isAuthenticated(req);
   return { canView, canEdit };
+}
+
+// Meme regle, completee en direct : rooky-tv dit qui est le streamer de la chaine (utile a un streamer
+// qui est aussi admin, ou a une session ouverte avant l'ajout des drapeaux).
+async function teamAccessLive(req, doc) {
+  const access = teamAccess(req, doc);
+  if (access.canEdit || !access.canView) return access;
+  const session = readModoSession(req, doc.channel);
+  if (!session?.u) return access;
+  const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch(() => null);
+  return team?.streamer?.id && String(team.streamer.id) === String(session.u) ? { ...access, canEdit: true } : access;
 }
 
 function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true, who = "admin") {
@@ -4017,6 +4042,67 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Equipe", content, { wide: true, side: { who, active: "team", logout: who === "admin" ? "/logout" : "/modo/logout" } }));
+}
+
+function renderDocumentation(res, who, logout) {
+  const lead = who === "admin" || who === "streamer";
+  const section = (icon, title, items) => `
+    <section class="card dc-card">
+      <h2>${icon} ${title}</h2>
+      <ul>${items.map((i) => `<li>${i}</li>`).join("")}</ul>
+    </section>`;
+  const parts = [
+    section("\ud83d\udd11", "Se connecter", [
+      "<strong>Acces modo</strong> (page de connexion) : connexion avec ton compte Discord par rooky-tv. Il faut faire partie de l'equipe de la chaine.",
+      "La session dure 12 h. Tes droits viennent des groupes d'acces du planning sur rooky-tv (voir / modifier par activite, et « Tickets »).",
+      ...(who === "admin" ? ["Le mot de passe du site reste possible. Le proprietaire et les admins de rooky-tv connectes par Discord ont aussi l'administration."] : [])
+    ]),
+    section("\ud83d\udcc5", "Planning", [
+      "4 semaines de streams (numero de semaine) avec leur programme, et les taches Montage / Poster / Autre que tu as le droit de voir.",
+      "<strong>Ajouter au planning</strong> : pour les activites ou tu as « Modifie » ; la tache part aussi dans l'agenda Google de la chaine, sans compte Google a connecter.",
+      "<strong>Suggerer au streamer</strong> : il recoit un MP du bot et accepte ou refuse ; l'etat s'affiche sous Suggestions.",
+      ...(lead ? ["Streamer / admins : boutons Ajouter / Refuser directement sur chaque suggestion (aussi sur rooky-tv, page Planning)."] : [])
+    ]),
+    section("\ud83c\udfab", "Tickets", [
+      "Les membres ouvrent leur ticket sur Discord et ecrivent au bot en MP ; tu lis et reponds ici. Tes reponses leur arrivent en MP, signees « l'equipe ».",
+      "Liste a gauche (Ouverts / Fermes, nouveaux messages en premier), conversation a droite. La page se met a jour toute seule.",
+      "<strong>Fermer / Rouvrir</strong> en haut du ticket. <strong>Bannir des tickets</strong> : inscrit au casier du membre (meme ban que sur Discord) et ferme le ticket.",
+      "Certaines categories peuvent etre reservees a des groupes locaux : un ticket que tu ne vois pas ne t'est pas destine.",
+      ...(lead ? ["<strong>Proposer des creneaux</strong> : tes streams de la semaine (et une autre date) ; l'invite choisit en MP le titre et son heure (jusqu'a 2 h avant le debut). <strong>Valider</strong> change le programme de ce stream sans le nom de l'invite et le previent en MP."] : [])
+    ]),
+    ...(lead
+      ? [
+          section("\ud83d\udc65", "Equipe et groupes locaux", [
+            "<strong>Equipe</strong> : membres de la chaine (lus sur rooky-tv), leurs roles d'acces, leur derniere visite et leurs groupes locaux (+ pour en ajouter plusieurs, × pour retirer).",
+            "<strong>Groupes locaux</strong> : une categorie de ticket cochee dans un groupe est reservee a ses membres ; les autres categories restent visibles par tous les modos.",
+            "Un groupe peut etre lie a un role Discord : l'avoir sur le serveur suffit (verifie par rooky-tv). Le groupe ne donne aucun role.",
+            "Seuls le streamer et le proprietaire modifient les groupes ; les autres admins les voient en lecture seule."
+          ])
+        ]
+      : []),
+    ...(who === "admin"
+      ? [
+          section("\u2699\ufe0f", "Administration du site", [
+            "<strong>Redirections</strong>, <strong>Statistiques</strong>, <strong>Personnalisation</strong>, <strong>Monitoring</strong> : les liens et la page d'accueil du site.",
+            "<strong>Planning</strong> : chaine du site, code de liaison a coller dans rooky-tv (Programme > Sites redirection) et image du programme sur Discord.",
+            "Le menu de chaine des tickets n'apparait que pour le proprietaire de rooky-tv."
+          ])
+        ]
+      : [])
+  ];
+  const content = `
+    <style>
+      .dc { display: grid; gap: 14px; max-width: 900px; }
+      .dc-card h2 { margin: 0 0 10px; font-size: 1.1rem; }
+      .dc-card ul { margin: 0; padding-left: 20px; display: grid; gap: 8px; color: var(--muted); line-height: 1.5; }
+      .dc-card strong { color: var(--ink); }
+    </style>
+    <main class="dc">
+      <h1 style="margin:0;">Documentation</h1>
+      ${parts.join("")}
+    </main>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Documentation", content, { wide: true, side: { who, active: "docs", logout } }));
 }
 
 /* ------------------------- Image du programme (Discord) ------------------------- */
@@ -5096,7 +5182,7 @@ function renderSideNav(side) {
   return `<aside class="side" aria-label="Menu">
     <a class="side-brand" href="${side.who === "admin" ? "/admin" : "/modo"}">${config.logoUrl ? `<img src="${escapeHtml(config.logoUrl)}" alt="" />` : ""}<span>${escapeHtml(config.title)}</span></a>
     ${parts.join("")}
-    <div class="side-foot"><div class="side-sep"></div>${link("logout", side.logout || "/logout", "\ud83d\udeaa", "Deconnexion")}</div>
+    <div class="side-foot"><div class="side-sep"></div>${link("docs", "/documentation", "\ud83d\udcd6", "Documentation")}${link("logout", side.logout || "/logout", "\ud83d\udeaa", "Deconnexion")}</div>
   </aside>`;
 }
 
