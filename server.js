@@ -237,6 +237,13 @@ const requestListener = async (req, res) => {
           // Meme regle de visibilite que l'affichage, avant toute action.
           const current = await modoApi(doc, viewer, "ticket.get", { id });
           if (!current.ticket || !canSeeTicket(viewer, current, current.ticket, doc)) throw new Error("Ticket introuvable.");
+          if (form.action === "category") {
+            const reason = String(form.reason || "").trim().slice(0, 120);
+            await modoApi(doc, viewer, "ticket.category", { id, reason });
+            const stillVisible = canSeeTicket(viewer, current, { ...current.ticket, reason }, doc);
+            redirect(res, `${stillVisible ? back : "/modo/tickets"}?success=${encodeURIComponent("Catégorie du ticket modifiée")}`);
+            return;
+          }
           if (form.action === "propose") {
             // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
             const streams = params.getAll("stream").map((key) => ({ key, end: params.get(`end_${key}`) || "" }));
@@ -964,7 +971,7 @@ const requestListener = async (req, res) => {
         const name = String(params.get("name") || "").trim().slice(0, 40);
         if (!name) return back("error", "Donne un nom au groupe.");
         if (groups.length >= 30) return back("error", "30 groupes maximum.");
-        groups.push({ id: crypto.randomBytes(5).toString("hex"), name, reasons: [], members: [], roles: [] });
+        groups.push({ id: crypto.randomBytes(5).toString("hex"), name, reasons: [], members: [], roles: [], everyone: false });
         writeModoGroups(groups);
         return back("success", `Groupe « ${name} » cree : coche ses categories et ses membres.`);
       }
@@ -978,6 +985,7 @@ const requestListener = async (req, res) => {
       group.reasons = [...new Set(params.getAll("reason").map((r) => String(r).slice(0, 120)))].slice(0, 50);
       group.members = [...new Set(params.getAll("member").filter((id) => /^\d{5,25}$/.test(id)))].slice(0, 200);
       group.roles = /^\d{5,25}$/.test(params.get("role") || "") ? [params.get("role")] : [];
+      group.everyone = params.get("everyone") === "1";
       writeModoGroups(groups);
       return back("success", `Groupe « ${group.name} » enregistre.`);
     }
@@ -3612,6 +3620,8 @@ const TICKET_DESK_CSS = `
   .td-head h2 { margin: 0; font-size: 1.05rem; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .td-head p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
   .td-head form { display: flex; gap: 6px; }
+  .td-head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .td-head-actions select { max-width: 220px; }
   .td-body { flex: 1; overflow-y: auto; min-height: 0; padding: 14px 18px; display: grid; gap: 12px; align-content: start; }
   .td-compose { border-top: 1px solid var(--line); padding: 12px 18px; display: grid; gap: 8px; }
   .td-compose textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; background: rgba(255, 255, 255, 0.04); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font: inherit; }
@@ -3753,11 +3763,15 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             <p>${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))}${ticket.openedBy ? ` par ${escapeHtml(ticket.openedBy)} (equipe)` : ""} · echange en MP avec le bot</p>
           </div>
         </div>
-        ${
-          canReply
-            ? `<form method="post">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>`
-            : ""
-        }
+        ${canReply ? `<div class="td-head-actions">
+          <form method="post" class="td-category-form">
+            <select name="reason" aria-label="Catégorie du ticket">
+              ${[...new Set([ticket.reason || "", ...(Array.isArray(data.reasons) ? data.reasons : [])])].map((reason) => `<option value="${escapeHtml(reason)}"${reason === (ticket.reason || "") ? " selected" : ""}>${escapeHtml(reason || "Sans catégorie")}</option>`).join("")}
+            </select>
+            <button type="submit" name="action" value="category" class="secondary">Changer</button>
+          </form>
+          <form method="post" class="td-status-form">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>
+        </div>` : ""}
       </header>
       <div class="td-body" id="td-body">
         ${renderMessages(flash)}
@@ -3853,11 +3867,10 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           replace(".td-head", doc2);
           desk.dataset.last = desk2.dataset.last;
           if (atBottom) scrollDown();
-          // Ticket ferme / rouvert : la zone de reponse change, rechargement seulement si rien n'est tape.
+          // Ticket ferme / rouvert : la zone de reponse change directement, sans recharger la page.
           if (desk2.dataset.status !== desk.dataset.status) {
-            const box = document.querySelector(".td-compose textarea");
-            if (!(box && box.value.trim())) location.reload();
-            else document.getElementById("td-new").hidden = false;
+            replace(".td-compose", doc2);
+            desk.dataset.status = desk2.dataset.status;
           }
         };
         const refresh = async () => {
@@ -3886,9 +3899,9 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         };
 
         // Envoyer / Note staff sans recharger la page.
-        const compose = document.querySelector(".td-compose");
-        if (compose) {
-          compose.addEventListener("submit", async (event) => {
+        document.addEventListener("submit", async (event) => {
+            const compose = event.target.closest(".td-compose");
+            if (!compose) return;
             const action = event.submitter && event.submitter.value;
             if (action !== "reply" && action !== "note") return;
             event.preventDefault();
@@ -3914,12 +3927,32 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             } finally {
               buttons.forEach((b) => { b.disabled = false; });
             }
-          });
-        }
+        });
+
+        // Fermer / Rouvrir sans rechargement complet : l'en-tete, la conversation, la liste et la
+        // zone de saisie sont remplaces par leur version a jour.
+        document.addEventListener("submit", async (event) => {
+          const form = event.target.closest(".td-status-form");
+          if (!form) return;
+          event.preventDefault();
+          const button = event.submitter;
+          const data = new URLSearchParams(new FormData(form));
+          if (button?.value) data.set("action", button.value);
+          if (button) button.disabled = true;
+          try {
+            const res = await fetch(location.pathname, { method: "POST", body: data, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+            const doc2 = await parse(res);
+            toast(doc2);
+            swap(doc2);
+          } catch {
+            form.submit();
+          } finally {
+            if (button?.isConnected) button.disabled = false;
+          }
+        });
 
         // Toutes les 3 s : « en train d'ecrire » dans les deux sens ; nouveau message -> conversation
         // mise a jour sur place.
-        const box = document.querySelector(".td-compose textarea");
         let busy = false;
         const tick = async () => {
           if (busy || document.hidden) return;
@@ -3928,10 +3961,11 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             const res = await fetch(location.pathname + "/live", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ typing: Date.now() - lastKey < 4000 && !!(box && box.value.trim()) })
+              body: JSON.stringify({ typing: Date.now() - lastKey < 4000 && !!document.querySelector(".td-compose textarea")?.value.trim() })
             });
             const warn = document.getElementById("td-livewarn");
             if (!res.ok) {
+              if (res.status === 404) { location.replace("/modo/tickets"); return; }
               // rooky-tv pas a jour ou injoignable : on le dit au lieu d'echouer en silence.
               const err = await res.json().catch(() => ({}));
               warn.textContent = "Suivi en direct indisponible (en train d'ecrire, nouveaux messages)" + (err.error ? " : " + err.error : "") + ".";
@@ -4007,6 +4041,7 @@ function readModoGroups() {
     name: String(g?.name || "Groupe"),
     reasons: Array.isArray(g?.reasons) ? g.reasons.map(String) : [],
     members: Array.isArray(g?.members) ? g.members.map(String) : [],
+    everyone: g?.everyone === true,
     // Role Discord lie (facultatif) : l'avoir sur le serveur = membre du groupe. N'en donne aucun.
     roles: Array.isArray(g?.roles) ? g.roles.map(String).filter((id) => /^\d{5,25}$/.test(id)) : []
   })).filter((g) => g.id);
@@ -4043,7 +4078,7 @@ function canSeeTicket(viewer, live, ticket, doc) {
   const owners = groups.filter((g) => g.reasons.includes(category));
   if (!owners.length) return true;
   const roles = Array.isArray(live?.userRoles) ? live.userRoles.map(String) : [];
-  return owners.some((g) => g.members.includes(String(viewer.u || "")) || g.roles.some((r) => roles.includes(r)));
+  return owners.some((g) => g.everyone || g.members.includes(String(viewer.u || "")) || g.roles.some((r) => roles.includes(r)));
 }
 
 function filterModoLive(live, viewer, doc) {
@@ -4105,6 +4140,8 @@ function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true, who =
             }
           </fieldset>
           <fieldset><legend>Membres</legend>
+            <label class="ag-check"><input type="checkbox" name="everyone" value="1"${g.everyone ? " checked" : ""} /> <strong>Tout le monde</strong></label>
+            <p class="ag-hint">Donne l'accès aux catégories de ce groupe à tous les membres ayant accès aux tickets.</p>
             <label class="ag-role"><span>Role Discord lie (facultatif)</span>
               <select name="role">
                 <option value="">Aucun role : membres coches a la main</option>
