@@ -3561,7 +3561,6 @@ const TICKET_DESK_CSS = `
   .td-item.on { background: rgba(124, 92, 255, 0.14); border-left-color: #f5c542; }
   .td-avatar { width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(124, 92, 255, 0.3); color: #fff; object-fit: cover; }
   .td-avatar-wrap { width: 34px; height: 34px; flex: 0 0 auto; position: relative; display: inline-grid; }
-  .td-online { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: #57f287; border: 3px solid rgb(22, 25, 34); box-sizing: content-box; }
   .cm-chat { display: grid; gap: 2px; }
   .cm-day { display: flex; align-items: center; gap: 12px; margin: 14px 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
   .cm-day::before, .cm-day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -3607,6 +3606,15 @@ const TICKET_DESK_CSS = `
   .td-item.unread .td-name { font-weight: 700; }
   .td-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; flex: 0 0 auto; }
   .td-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
+  .td-sub-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .td-presence { margin-left: auto; flex: 0 0 auto; width: 13px; height: 13px; display: grid; place-items: center; }
+  .td-presence i { width: 9px; height: 9px; border-radius: 50%; display: block; position: relative; box-sizing: border-box; }
+  .td-presence.online i { background: #23a55a; }
+  .td-presence.idle i { background: #f0b232; overflow: hidden; }
+  .td-presence.idle i::after { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; background: rgb(22, 25, 34); left: -2px; top: -3px; }
+  .td-presence.dnd i { background: #f23f43; }
+  .td-presence.dnd i::after { content: ""; position: absolute; width: 5px; height: 2px; border-radius: 2px; background: #fff; left: 2px; top: 3.5px; }
+  .td-presence.offline i { border: 2px solid #80848e; background: transparent; }
   .td-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: #57f287; }
   .td-dot.new { background: #f5c542; }
   .td-dot.off { background: #6b7280; }
@@ -3661,17 +3669,19 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     const picture = /^https:\/\//.test(String(t?.avatar || ""))
       ? `<img class="td-avatar" src="${escapeHtml(t.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
       : `<span class="td-avatar" aria-hidden="true">${initial(t?.owner)}</span>`;
-    return `<span class="td-avatar-wrap">${picture}${t?.online ? `<span class="td-online" title="En ligne" aria-label="En ligne"></span>` : ""}</span>`;
+    return `<span class="td-avatar-wrap">${picture}</span>`;
   };
   const item = (t) => {
     const unread = t.status === "open" && t.unread;
     const dot = t.status !== "open" ? "off" : unread ? "new" : "";
     const sub = unread ? t.lastMessage || "Nouveau message" : t.reason || t.lastMessage || "Sans raison";
+    const presence = ["online", "idle", "dnd"].includes(t.presence) ? t.presence : "offline";
+    const presenceLabel = { online: "En ligne", idle: "Absent", dnd: "Ne pas déranger", offline: "Hors ligne" }[presence];
     return `<a class="td-item${ticket && ticket.id === t.id ? " on" : ""}${unread ? " unread" : ""}" href="/modo/tickets/${t.id}${q}">
       ${avatar(t)}
       <span class="td-item-main">
         <span class="td-item-top"><span class="td-name">${escapeHtml(t.owner)}</span><span class="td-id">#${t.id}</span></span>
-        <span class="td-sub"><span class="td-dot ${dot}"></span>${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>
+        <span class="td-sub"><span class="td-dot ${dot}"></span><span class="td-sub-text">${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>${t.status === "open" ? `<span class="td-presence ${presence}" title="Discord : ${presenceLabel}" aria-label="Discord : ${presenceLabel}"><i></i></span>` : ""}</span>
       </span>
     </a>`;
   };
