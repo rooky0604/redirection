@@ -3607,8 +3607,12 @@ const TICKET_DESK_CSS = `
   .td-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; flex: 0 0 auto; }
   .td-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
   .td-sub-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .td-presence { margin-left: auto; flex: 0 0 auto; width: 13px; height: 13px; display: grid; place-items: center; }
-  .td-presence i { width: 9px; height: 9px; border-radius: 50%; display: block; position: relative; box-sizing: border-box; }
+  .td-presence { margin-left: auto; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; }
+  .td-presence.online { color: #23a55a; }
+  .td-presence.idle { color: #f0b232; }
+  .td-presence.dnd { color: #f23f43; }
+  .td-presence.offline { color: #80848e; }
+  .td-presence i { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; display: block; position: relative; box-sizing: border-box; }
   .td-presence.online i { background: #23a55a; }
   .td-presence.idle i { background: #f0b232; overflow: hidden; }
   .td-presence.idle i::after { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; background: rgb(22, 25, 34); left: -2px; top: -3px; }
@@ -3681,7 +3685,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
       ${avatar(t)}
       <span class="td-item-main">
         <span class="td-item-top"><span class="td-name">${escapeHtml(t.owner)}</span><span class="td-id">#${t.id}</span></span>
-        <span class="td-sub"><span class="td-dot ${dot}"></span><span class="td-sub-text">${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>${t.status === "open" ? `<span class="td-presence ${presence}" title="Discord : ${presenceLabel}" aria-label="Discord : ${presenceLabel}"><i></i></span>` : ""}</span>
+        <span class="td-sub"><span class="td-dot ${dot}"></span><span class="td-sub-text">${unread ? "<strong>Nouveau message</strong> · " : ""}${escapeHtml(sub)}</span>${t.status === "open" ? `<span class="td-presence ${presence}" title="Discord : ${presenceLabel}" ><i aria-hidden="true"></i>${presenceLabel}</span>` : ""}</span>
       </span>
     </a>`;
   };
