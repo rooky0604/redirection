@@ -3586,6 +3586,9 @@ const TICKET_DESK_CSS = `
   .td-new { margin: 0 18px 8px; padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(245, 197, 66, 0.5); background: rgba(245, 197, 66, 0.1); color: #f5c542; font-size: 13px; cursor: pointer; text-align: left; }
   .td-new[hidden] { display: none; }
   .td-livewarn { margin: 0 18px 8px; font-size: 12px; color: #ff8a92; }
+  .td-toast { margin: 0 18px 8px; }
+  .td-toast[hidden] { display: none; }
+  .td-toast .message { margin: 0; padding: 8px 12px; font-size: 13px; }
   .td-livewarn[hidden] { display: none; }
   .td-item-main { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .td-item-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
@@ -3735,7 +3738,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           ${avatar(ticket)}
           <div>
             <h2>${escapeHtml(ticket.owner)} <span class="td-id">#${ticket.id}</span> ${ticket.status === "open" ? `<span class="md-tag ok">Ouvert</span>` : `<span class="md-tag">Ferme${ticket.closedBy ? ` par ${escapeHtml(ticket.closedBy)}` : ""}</span>`}</h2>
-            <p>${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))} · echange en MP avec le bot</p>
+            <p>${escapeHtml(ticket.reason || "Sans raison")} · ouvert le ${escapeHtml(modoDateTime(ticket.createdAt))}${ticket.openedBy ? ` par ${escapeHtml(ticket.openedBy)} (equipe)` : ""} · echange en MP avec le bot</p>
           </div>
         </div>
         ${
@@ -3753,6 +3756,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         ${banForm}
       </div>
       <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
+      <div class="td-toast" id="td-toast" hidden></div>
       <p class="td-livewarn" id="td-livewarn" hidden></p>
       <button type="button" class="td-new" id="td-new" hidden>Nouveau message — afficher</button>
       ${
@@ -3802,24 +3806,99 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     </section>
     <script>
       (() => {
-        // Conversation en bas ; nouveaux messages : rechargement tant que rien n'est en cours de saisie.
-        const body = document.getElementById("td-body");
-        if (body) body.scrollTop = body.scrollHeight;
-        let touched = false;
+        // Rafraichissement partiel (jamais toute la page) : la liste des tickets, le menu, la
+        // conversation et l'en-tete du ticket sont remplaces sur place ; la zone de reponse et les
+        // formulaires ouverts ne bougent pas. Reponse et note staff envoyees sans recharger.
+        const scrollDown = () => { const b = document.getElementById("td-body"); if (b) b.scrollTop = b.scrollHeight; };
+        scrollDown();
         let lastKey = 0;
-        document.addEventListener("input", (event) => { touched = true; if (event.target.matches(".td-compose textarea")) lastKey = Date.now(); });
-        document.addEventListener("change", () => { touched = true; });
-        document.querySelectorAll(".td details").forEach((d) => d.addEventListener("toggle", () => { touched = true; }));
+        document.addEventListener("input", (event) => { if (event.target.matches(".td-compose textarea")) lastKey = Date.now(); });
+        const parse = async (res) => new DOMParser().parseFromString(await res.text(), "text/html");
+        const replace = (sel, doc2) => {
+          const a = document.querySelector(sel);
+          const b = doc2.querySelector(sel);
+          if (a && b) a.replaceWith(b);
+        };
+        const swap = (doc2) => {
+          replace(".td-scroll", doc2);
+          replace(".td-tabs", doc2);
+          replace("aside.side", doc2);
+          const desk = document.querySelector(".td[data-ticket]");
+          const desk2 = doc2.querySelector(".td[data-ticket]");
+          if (!desk || !desk2) return;
+          const body = document.getElementById("td-body");
+          const atBottom = !body || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
+          replace(".cm-chat", doc2);
+          replace(".td-head", doc2);
+          desk.dataset.last = desk2.dataset.last;
+          if (atBottom) scrollDown();
+          // Ticket ferme / rouvert : la zone de reponse change, rechargement seulement si rien n'est tape.
+          if (desk2.dataset.status !== desk.dataset.status) {
+            const box = document.querySelector(".td-compose textarea");
+            if (!(box && box.value.trim())) location.reload();
+            else document.getElementById("td-new").hidden = false;
+          }
+        };
+        const refresh = async () => {
+          try {
+            const res = await fetch(location.href, { headers: { "X-Partial": "1" } });
+            if (res.ok && !res.redirected) swap(await parse(res));
+          } catch {}
+        };
+        // Liste des tickets et menu : toutes les 15 s.
+        setInterval(() => { if (!document.hidden) refresh(); }, 15000);
         const desk = document.querySelector(".td[data-ticket]");
-        if (!desk) {
-          setInterval(() => { if (!touched) location.reload(); }, 30000);
-          return;
-        }
-        // Page d'un ticket : toutes les 3 s, « en train d'ecrire » dans les deux sens et nouveaux messages.
+        if (!desk) return;
+
         const typingBox = document.getElementById("td-typing");
         const newBox = document.getElementById("td-new");
-        const box = document.querySelector(".td-compose textarea");
+        const toastBox = document.getElementById("td-toast");
         newBox.addEventListener("click", () => location.reload());
+        const toast = (doc2) => {
+          const msgs = [...doc2.querySelectorAll("#td-body > .message")];
+          if (!msgs.length) return null;
+          toastBox.replaceChildren(...msgs);
+          toastBox.hidden = false;
+          clearTimeout(toastBox._t);
+          toastBox._t = setTimeout(() => { toastBox.hidden = true; }, 4000);
+          return msgs.some((m) => m.classList.contains("error"));
+        };
+
+        // Envoyer / Note staff sans recharger la page.
+        const compose = document.querySelector(".td-compose");
+        if (compose) {
+          compose.addEventListener("submit", async (event) => {
+            const action = event.submitter && event.submitter.value;
+            if (action !== "reply" && action !== "note") return;
+            event.preventDefault();
+            const data = new URLSearchParams(new FormData(compose));
+            data.set("action", action);
+            const buttons = [...compose.querySelectorAll("button")];
+            buttons.forEach((b) => { b.disabled = true; });
+            try {
+              const res = await fetch(location.pathname, { method: "POST", body: data, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+              const doc2 = await parse(res);
+              const failed = toast(doc2);
+              if (!failed) {
+                const box = compose.querySelector("textarea");
+                if (box) box.value = "";
+                const anon = compose.querySelector("input[name=anonymous]");
+                if (anon) anon.checked = false;
+                lastKey = 0;
+              }
+              swap(doc2);
+              scrollDown();
+            } catch {
+              compose.submit();
+            } finally {
+              buttons.forEach((b) => { b.disabled = false; });
+            }
+          });
+        }
+
+        // Toutes les 3 s : « en train d'ecrire » dans les deux sens ; nouveau message -> conversation
+        // mise a jour sur place.
+        const box = document.querySelector(".td-compose textarea");
         let busy = false;
         const tick = async () => {
           if (busy || document.hidden) return;
@@ -3840,11 +3919,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               warn.hidden = true;
               const state = await res.json();
               typingBox.hidden = !state.memberTyping;
-              const changed = state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status;
-              if (changed) {
-                if (!touched && !(box && box.value.trim())) location.reload();
-                else newBox.hidden = false;
-              }
+              if (state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status) await refresh();
             }
           } catch {}
           busy = false;
