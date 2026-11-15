@@ -2960,9 +2960,9 @@ function planningWeek(program) {
   return { today, monday, lastDay, vacation, days };
 }
 
-// Page publique /planning : sans les titres d'organisation ni ceux masques sur Discord, qui ne
-// figurent que dans l'image du programme.
-const publicItems = (stream) => (stream.items || []).filter((item) => item.status !== "planning" && !item.imageOnly);
+// Page publique /planning : titres d'organisation compris (📌, photo de la chaine) ; seuls ceux
+// masques sur Discord n'y sont pas (ils ne figurent que dans l'image du programme).
+const publicItems = (stream) => (stream.items || []).filter((item) => !item.imageOnly);
 
 function renderPublicPlanning(res, doc) {
   const siteConfig = getSiteConfig();
