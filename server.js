@@ -252,9 +252,16 @@ const requestListener = async (req, res) => {
             redirect(res, `${back}?success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
             return;
           }
-          if (form.action === "offer_accept" || form.action === "offer_refuse") {
-            await modoApi(doc, viewer, "ticket.offer.decide", { id, decision: form.action === "offer_accept" ? "accept" : "refuse", choiceId: form.choice_id || "" });
-            redirect(res, `${back}?success=${encodeURIComponent(form.action === "offer_accept" ? "Creneau valide : programme modifie, l'invite est prevenu en MP" : "Creneau refuse, l'invite est prevenu")}`);
+          if (form.action === "offer_accept" || form.action === "offer_refuse" || form.action === "offer_counter") {
+            // Prepare la reponse (rien n'est envoye) ; re-cliquer le meme choix l'annule.
+            const decision = form.action === "offer_accept" ? "accept" : form.action === "offer_counter" ? "counter" : "refuse";
+            await modoApi(doc, viewer, "ticket.offer.decide", { id, decision, choiceId: form.choice_id || "", time: form.counter_time || "" });
+            redirect(res, `${back}?success=${encodeURIComponent("Choix note : envoie la reponse a l'invite quand tout est pret")}`);
+            return;
+          }
+          if (form.action === "offer_send") {
+            await modoApi(doc, viewer, "ticket.offer.send", { id });
+            redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en un seul MP a l'invite (programme modifie pour les creneaux acceptes)")}`);
             return;
           }
           if (form.action === "reply" || form.action === "note") {
@@ -3407,6 +3414,10 @@ const MODO_CSS = `
   .md-slot small { color: var(--muted); }
   .md-slot-end { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
   .md-decide button { padding: 6px 10px; font-size: 13px; }
+  .md-decide button.on { outline: 2px solid #f5c542; outline-offset: 1px; }
+  .md-decide select { padding: 5px 8px; font-size: 13px; }
+  .md-offer-row { flex-wrap: wrap; }
+  .md-offer-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .md-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); white-space: nowrap; }
   .md-tag.bad { background: rgba(240, 85, 95, 0.18); color: var(--danger); }
   .md-tag.ok { background: rgba(69, 224, 210, 0.15); color: #45e0d2; }
@@ -3485,6 +3496,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
   const statusText = {
     proposed: "En attente du choix de l'invite (en MP)",
     chosen: "L'invite a choisi : a valider",
+    countered: "Autre heure proposee : en attente de l'invite",
     accepted: "Valide",
     refused: "Refuse"
   };
@@ -3492,7 +3504,16 @@ function renderSlotOffer(doc, ticket, canDecide) {
   const pending = offer
     ? (Array.isArray(offer.pending) ? offer.pending : offer.status === "chosen" && offer.choice ? [{ id: "", ...offer.choice }] : [])
     : [];
-  const status = pending.length ? "chosen" : offer?.status;
+  const counters = Array.isArray(offer?.counters) ? offer.counters : [];
+  const status = pending.length ? "chosen" : counters.length ? "countered" : offer?.status;
+  const stagedCount = pending.filter((item) => item.staged).length;
+  const stagedTag = (item) => item.staged === "accept"
+    ? `<span class="md-tag ok">\u2705 a valider</span>`
+    : item.staged === "refuse"
+      ? `<span class="md-tag bad">\u274c a refuser</span>`
+      : item.staged === "counter"
+        ? `<span class="md-tag">\ud83d\udd52 autre heure : ${escapeHtml(planningHour(item.counterTime))}</span>`
+        : "";
   const offerBox = offer
     ? `<section class="md-form">
         <h2>\ud83d\udcc5 Creneaux <span class="md-tag${status === "chosen" ? " bad" : status === "accepted" ? " ok" : ""}">${pending.length > 1 ? `${pending.length} demandes a valider` : statusText[status] || escapeHtml(status)}</span></h2>
@@ -3500,14 +3521,19 @@ function renderSlotOffer(doc, ticket, canDecide) {
         <ul class="md-sugg">${(offer.streams || [])
           .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.start))} \u2192 ${escapeHtml(planningHour(st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
           .join("")}</ul>
-        ${pending.length ? `<ul class="md-sugg">${pending.map((item) => `<li><span><strong>Demande de l'invite :</strong> ${escapeHtml(item.text)}${item.early ? " <span class=\"md-tag\">avant le debut</span>" : ""}</span>${
+        ${pending.length ? `<ul class="md-sugg">${pending.map((item) => `<li class="md-offer-row"><span><strong>Demande de l'invite :</strong> ${escapeHtml(item.text)}${item.early ? " <span class=\"md-tag\">avant le debut</span>" : ""} ${stagedTag(item)}</span>${
           canDecide
-            ? `<form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><button type="submit" name="action" value="offer_accept">Valider</button><button type="submit" name="action" value="offer_refuse" class="secondary">Refuser</button></form>`
+            ? `<span class="md-offer-actions">
+                <form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><button type="submit" name="action" value="offer_accept"${item.staged === "accept" ? ` class="on"` : ""}>Valider</button><button type="submit" name="action" value="offer_refuse" class="secondary${item.staged === "refuse" ? " on" : ""}">Refuser</button></form>
+                ${(item.times || []).filter((time) => time !== item.time).length ? `<form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><select name="counter_time" aria-label="Autre heure">${(item.times || []).filter((time) => time !== item.time).map((time) => `<option value="${escapeHtml(time)}"${item.counterTime === time ? " selected" : ""}>${escapeHtml(planningHour(time))}</option>`).join("")}</select><button type="submit" name="action" value="offer_counter" class="secondary${item.staged === "counter" ? " on" : ""}">Proposer une autre heure</button></form>` : ""}
+              </span>`
             : ""
         }</li>`).join("")}</ul>` : ""}
+        ${counters.length ? `<ul class="md-sugg">${counters.map((item) => `<li><span><strong>\ud83d\udd52 Autre heure proposee :</strong> ${escapeHtml(item.text)}${item.originalText ? `<small>Demande initiale : ${escapeHtml(item.originalText)}</small>` : ""}</span><span class="md-tag">en attente de l'invite</span></li>`).join("")}</ul>` : ""}
         ${
           canDecide && pending.length
-            ? `<p class="md-hint">Valider : l'heure du titre change pour ce stream${pending.some((item) => item.early) ? " (le debut du stream est avance si la demande est avant le debut)" : ""} — sans le nom de l'invite. Il recoit la reponse en MP pour chaque demande.</p>`
+            ? `<form method="post" class="mt-actions"><button type="submit" name="action" value="offer_send"${stagedCount ? "" : " disabled"}>Envoyer la reponse a l'invite${stagedCount ? ` (${stagedCount})` : ""}</button></form>
+               <p class="md-hint">Valide, refuse ou propose une autre heure pour chaque demande (re-cliquer annule), puis envoie : l'invite recoit un seul MP (acceptes / refuses / autre heure). Il accepte ou refuse chaque autre heure une par une ; acceptee = validee, refusee = il refait une demande. Valider change l'heure du titre pour ce stream, sans le nom de l'invite.</p>`
             : ""
         }
       </section>`
