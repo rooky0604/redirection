@@ -1055,10 +1055,8 @@ const requestListener = async (req, res) => {
       const doc = readPlanning(channel);
       const next = { ...doc, siteUrl: requestOrigin(req) };
       if (form.action === "remove") {
-        if (doc.imageWebhookUrl && doc.imageMessageId) {
-          await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${doc.imageMessageId}`, doc.imageThreadId), "DELETE");
-        }
-        writePlanning({ ...next, imageWebhookUrl: "", imageMessageId: "", imageThreadId: "", imageKey: "", imageError: "" });
+        await planningDeleteMessages(doc);
+        writePlanning({ ...next, imageWebhookUrl: "", imageMessageId: "", imageDayIds: [], imageThreadId: "", imageKey: "", imageError: "" });
         redirect(res, back("success", "Webhook retire, image effacee"));
         return;
       }
@@ -1073,15 +1071,15 @@ const requestListener = async (req, res) => {
         return;
       }
       const changedUrl = url && url !== doc.imageWebhookUrl;
-      if (changedUrl && doc.imageWebhookUrl && doc.imageMessageId) {
-        // Nouveau salon : l'image de l'ancien salon est effacee.
-        await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${doc.imageMessageId}`, doc.imageThreadId), "DELETE");
+      if (changedUrl) {
+        // Nouveau salon : la photo et les messages des streams de l'ancien salon sont effaces.
+        await planningDeleteMessages(doc);
       }
       writePlanning({
         ...next,
         imageWebhookUrl: changedUrl ? url : doc.imageWebhookUrl,
         imageWebhookName: name,
-        ...(changedUrl ? { imageMessageId: "", imageThreadId: "", imageKey: "" } : {})
+        ...(changedUrl ? { imageMessageId: "", imageDayIds: [], imageThreadId: "", imageKey: "" } : {})
       });
       try {
         // Premier webhook ou "Republier" : nouveau message (avec la mention choisie) ; sinon mise a jour.
@@ -2705,6 +2703,8 @@ function readPlanning(channel) {
     imageWebhookName: parsed.imageWebhookName || "",
     imagePostedName: parsed.imagePostedName || "",
     imageMessageId: parsed.imageMessageId || "",
+    // Messages des streams (un par stream de la semaine), postes avant celui de la photo.
+    imageDayIds: Array.isArray(parsed.imageDayIds) ? parsed.imageDayIds.map(String).slice(0, 14) : [],
     imageThreadId: parsed.imageThreadId || "",
     imageKey: parsed.imageKey || "",
     imagePublishedAt: parsed.imagePublishedAt || 0,
@@ -4906,6 +4906,16 @@ async function renderPlanningImage(doc) {
 
 const planningImageThread = (url, threadId) => (threadId ? `${url}${url.includes("?") ? "&" : "?"}thread_id=${threadId}` : url);
 
+// Efface la photo et les messages des streams postes par ce webhook (retrait ou changement de salon).
+async function planningDeleteMessages(doc) {
+  if (!doc.imageWebhookUrl) {
+    return;
+  }
+  for (const id of [...(doc.imageDayIds || []), doc.imageMessageId].filter(Boolean)) {
+    await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${id}`, doc.imageThreadId), "DELETE").catch(() => {});
+  }
+}
+
 async function planningImageCall(url, method, payload, png) {
   let body;
   let headers = {};
@@ -4946,92 +4956,84 @@ function planningImagePing(ping) {
 
 // mode "new" : efface l'ancien message et en poste un nouveau (mention possible) ; "update" : modifie
 // le message sur place sans notification (nouveau message s'il n'existe plus).
-// Texte du message (hors embed, l'embed ne garde que la photo), en markdown Discord : titre, phrase
-// d'horaires, vacances, puis chaque jour avec un stream (date, heure, jeux, etat, description,
-// titres avec heure et 📌 organisation) ; les jours sans stream sont regroupes sur une ligne. Sans
-// les titres masques sur Discord. Limite Discord : 2000 caracteres pour le texte d'un message ; trop
-// long -> les titres puis les descriptions des derniers jours sont retires, jamais les jours.
-function planningWeekText(program, limit = 2000) {
+// Messages du programme de la semaine dans le salon (markdown Discord, 2000 caracteres par message) :
+// un message par stream de la semaine (titre du jour, heure, jeux, etat, description, titres avec
+// heure et 📌 organisation), dans l'ordre, puis le message de la photo (titre, phrase d'horaires,
+// vacances, jours sans stream). Sans les titres masques sur Discord.
+const PLANNING_TEXT_MAX = 2000;
+const planningFit = (text, max = PLANNING_TEXT_MAX) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+function planningWeekMessages(program) {
   if (!program) {
-    return "";
+    return { header: "## 📅 Programme de la semaine", days: [] };
   }
   const week = planningWeek(program);
-  const head = ["## 📅 Programme de la semaine"];
+  const header = ["## 📅 Programme de la semaine"];
   const schedule = String(program.scheduleText || "").replace(/\s+/g, " ").trim();
   if (schedule) {
-    head.push("-# " + schedule.slice(0, 300));
+    header.push(`-# ${schedule.slice(0, 300)}`);
   }
   if (week.vacation) {
     const [y, m, d] = week.vacation.until.split("-");
-    head.push("🌴 **En vacances** jusqu'au " + Number(d) + "/" + m + "/" + y + (week.vacation.message ? " — " + week.vacation.message.slice(0, 200) : ""));
+    header.push(`🌴 **En vacances** jusqu'au ${Number(d)}/${m}/${y}${week.vacation.message ? ` — ${week.vacation.message.slice(0, 200)}` : ""}`);
   }
-  const blocks = [];
-  const empty = [];
+  const empty = week.days.filter((day) => !day.streams.length).map((day) => day.name.toLowerCase());
+  if (empty.length) {
+    header.push(`-# Pas de stream : ${empty.join(", ")}`);
+  }
+  const days = [];
   for (const day of week.days) {
-    if (!day.streams.length) {
-      empty.push(day.name.toLowerCase());
-      continue;
-    }
     for (const stream of day.streams) {
       const items = (stream.items || []).filter((item) => !item.imageOnly);
       const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
       const state = stream.cancelled ? "❌ *annulé*" : stream.postponed ? "⏩ *reporté*" : day.isPast ? "✅ *terminé*" : day.isToday ? "🔴 *aujourd'hui*" : "";
-      const title = "### " + day.name + " " + day.short + " — " + (stream.time ? planningHour(stream.time) : "heure à venir");
-      const info = [types.length ? "🎮 " + types.join(", ") : "", state].filter(Boolean).join(" · ");
-      const description = String(stream.description || "").replace(/\s+/g, " ").trim().slice(0, 300);
-      const lines = items.map((item) => {
+      const lines = [`### ${day.name} ${day.short} — ${stream.time ? planningHour(stream.time) : "heure à venir"}`];
+      const info = [types.length ? `🎮 ${types.join(", ")}` : "", state].filter(Boolean).join(" · ");
+      if (info) {
+        lines.push(info);
+      }
+      const description = String(stream.description || "").replace(/\s+/g, " ").trim();
+      if (description) {
+        lines.push(`> ${description.slice(0, 600)}`);
+      }
+      for (const item of items) {
         const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        return "- " + (item.time ? "`" + planningHour(item.time) + "` " : "") + icon + item.subject;
-      });
-      blocks.push({ title, info, description, lines });
+        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${item.subject}${item.category && item.status !== "planning" ? ` *(${item.category})*` : ""}`);
+      }
+      days.push(planningFit(lines.join("\n")));
     }
   }
-  const tail = empty.length ? ["", "-# Pas de stream : " + empty.join(", ")] : [];
-  const render = () => head.concat(blocks.flatMap((b) => ["", b.title, b.info, b.description ? "> " + b.description : "", ...b.lines].filter((line, i) => i === 0 || line !== "")), tail).join("\n");
-  let text = render();
-  // Trop long : on retire d'abord les titres (du dernier jour au premier), puis les descriptions.
-  for (let i = blocks.length - 1; i >= 0 && text.length > limit; i--) {
-    if (blocks[i].lines.length) {
-      blocks[i].lines = ["-# " + blocks[i].lines.length + " titre" + (blocks[i].lines.length > 1 ? "s" : "") + " : voir l'image"];
-      text = render();
-    }
-  }
-  for (let i = blocks.length - 1; i >= 0 && text.length > limit; i--) {
-    blocks[i].description = "";
-    text = render();
-  }
-  return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
+  return { header: header.join("\n"), days: days.slice(0, 14) };
 }
 
+// mode "new" : nouveaux messages (mention possible sur le message de la photo), postes avant
+// d'effacer les anciens (un envoi refuse ne laisse jamais le salon vide) ; "update" : modifie les
+// messages sur place sans notification. Nombre de streams change ou message supprime a la main :
+// la serie est reposte (sans mention) pour garder l'ordre (jours, puis photo en bas).
 async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   if (!doc.imageWebhookUrl) {
     throw new Error("Renseigne d'abord le webhook du salon.");
   }
   const png = await renderPlanningImage(doc);
-  // Mention eventuelle (nouveau message) devant le texte : les deux tiennent dans les 2000 caracteres.
+  const { header, days } = planningWeekMessages(doc.program);
   const pingPart = mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } };
-  const weekText = planningWeekText(doc.program, 2000 - (pingPart.content ? pingPart.content.length + 1 : 0));
-  // Texte dans le message, l'embed ne porte que la photo.
-  const message = {
-    content: [pingPart.content || "", weekText].filter(Boolean).join("\n"),
-    embeds: [
-      {
-        color: 0x6d5ef7,
-        image: { url: "attachment://programme.png" }
-      }
-    ],
+  const photo = {
+    content: planningFit([pingPart.content || "", header].filter(Boolean).join("\n")),
+    embeds: [{ color: 0x6d5ef7, image: { url: "attachment://programme.png" } }],
     attachments: [{ id: 0, filename: "programme.png" }]
   };
-  let messageId = doc.imageMessageId;
+  const oldPhoto = doc.imageMessageId || "";
+  const oldDays = Array.isArray(doc.imageDayIds) ? doc.imageDayIds.filter(Boolean) : [];
   let threadId = doc.imageThreadId || "";
+  const messageUrl = (id, thread = threadId) => planningImageThread(`${doc.imageWebhookUrl}/messages/${id}`, thread);
 
-  // Bouton lien « Aller voir le planning » sous l'image (webhook : ?with_components=true). Refuse par
-  // Discord (formulaire invalide) : l'image part sans le bouton.
+  // Bouton lien « Aller voir le planning » sous la photo (webhook : ?with_components=true). Refuse par
+  // Discord (formulaire invalide) : la photo part sans le bouton.
   const button = /^https?:\/\/\S+$/.test(doc.siteUrl || "")
     ? [{ type: 1, components: [{ type: 2, style: 5, label: "Aller voir le planning", url: `${doc.siteUrl}/planning` }] }]
     : null;
   const withComponents = (url) => `${url}${url.includes("?") ? "&" : "?"}with_components=true`;
-  const call = async (url, method, payload) => {
+  const photoCall = async (url, method, payload) => {
     if (button) {
       const first = await planningImageCall(withComponents(url), method, { ...payload, components: button }, png);
       const rejected = first.res && first.res.status === 400 && ![220001, 10003].includes(first.data?.code);
@@ -5042,40 +5044,58 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
     }
     return planningImageCall(url, method, { ...payload, components: [] }, png);
   };
+  const textPayload = (content) => ({ content, embeds: [], allowed_mentions: { parse: [] } });
 
-  if (mode === "update" && messageId) {
-    const { res, data } = await call(
-      planningImageThread(`${doc.imageWebhookUrl}/messages/${messageId}`, threadId),
-      "PATCH",
-      { ...message, allowed_mentions: { parse: [] } }
-    );
-    if (res?.ok) {
-      return { messageId, threadId, edited: true };
+  // Mise a jour sur place : meme nombre de streams, tous les messages encore la.
+  if (mode === "update" && oldPhoto && oldDays.length === days.length) {
+    let intact = true;
+    for (let i = 0; i < days.length && intact; i++) {
+      const { res, data } = await planningImageCall(messageUrl(oldDays[i]), "PATCH", textPayload(days[i]));
+      if (!res?.ok) {
+        if (res && res.status === 404) {
+          intact = false;
+        } else {
+          throw planningImageError(res, data);
+        }
+      }
     }
-    if (!(res && res.status === 404)) {
+    if (intact) {
+      const { res, data } = await photoCall(messageUrl(oldPhoto), "PATCH", { ...photo, allowed_mentions: { parse: [] } });
+      if (res?.ok) {
+        return { messageId: oldPhoto, dayIds: oldDays, threadId, edited: true };
+      }
+      if (!(res && res.status === 404)) {
+        throw planningImageError(res, data);
+      }
+    }
+  }
+
+  // Nouvelle serie : jours dans l'ordre, puis la photo ; salon forum : le 1er message ouvre le post.
+  const base = `${doc.imageWebhookUrl}?wait=true`;
+  const post = async (payload, withPng) => {
+    const send = (url, body) => (withPng ? photoCall(url, "POST", body) : planningImageCall(url, "POST", body));
+    let { res, data } = await send(planningImageThread(base, threadId), payload);
+    // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
+    if (res && !res.ok && (data?.code === 220001 || (threadId && data?.code === 10003))) {
+      ({ res, data } = await send(base, { ...payload, thread_name: "Programme de la semaine" }));
+      threadId = res?.ok && data?.channel_id ? String(data.channel_id) : "";
+    }
+    if (!res || !res.ok) {
       throw planningImageError(res, data);
     }
-    messageId = ""; // supprime a la main : on en reposte un
+    return data?.id ? String(data.id) : "";
+  };
+  const previousThread = doc.imageThreadId || "";
+  const dayIds = [];
+  for (const content of days) {
+    dayIds.push(await post(textPayload(content), false));
   }
-  // Nouveau message : l'ancien n'est efface qu'une fois le nouveau poste (un envoi refuse ne laisse
-  // jamais le salon vide).
-  const previousId = mode === "new" ? messageId : "";
-  const previousThread = threadId;
-  const payload = { ...message, allowed_mentions: pingPart.allowed_mentions || { parse: [] } };
-  const base = `${doc.imageWebhookUrl}?wait=true`;
-  let { res, data } = await call(planningImageThread(base, threadId), "POST", payload);
-  // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
-  if (res && !res.ok && (data?.code === 220001 || (threadId && data?.code === 10003))) {
-    ({ res, data } = await call(base, "POST", { ...payload, thread_name: "Programme de la semaine" }));
-    threadId = res?.ok && data?.channel_id ? String(data.channel_id) : "";
+  const messageId = await post({ ...photo, allowed_mentions: pingPart.allowed_mentions || { parse: [] } }, true);
+  // Anciens messages retires une fois la nouvelle serie en place.
+  for (const id of [...oldDays, oldPhoto].filter((id) => id && id !== messageId && !dayIds.includes(id))) {
+    await planningImageCall(messageUrl(id, previousThread), "DELETE").catch(() => {});
   }
-  if (!res || !res.ok) {
-    throw planningImageError(res, data);
-  }
-  if (previousId && String(data?.id || "") !== String(previousId)) {
-    await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${previousId}`, previousThread), "DELETE").catch(() => {});
-  }
-  return { messageId: data?.id ? String(data.id) : "", threadId, edited: false };
+  return { messageId, dayIds, threadId, edited: false };
 }
 
 // Nom du webhook sur Discord : le renomme s'il porte un autre nom que celui choisi (vide = garder le
@@ -5137,6 +5157,7 @@ function queuePlanningImage(mode = "auto", options = {}) {
         imageWebhookName: webhookName,
         imagePostedName: webhookName,
         imageMessageId: result.messageId,
+        imageDayIds: result.dayIds || [],
         imageThreadId: result.threadId,
         // Jaquette manquante : cle differente -> l'image est refaite au prochain passage automatique.
         imageKey: planningThumbsMissing ? `${key}|jaquettes` : key,
