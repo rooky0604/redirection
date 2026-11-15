@@ -4946,54 +4946,61 @@ function planningImagePing(ping) {
 
 // mode "new" : efface l'ancien message et en poste un nouveau (mention possible) ; "update" : modifie
 // le message sur place sans notification (nouveau message s'il n'existe plus).
-// Texte sous l'image (tout ce qui est utile, lisible sans ouvrir l'image) : phrase d'horaires de la
-// chaine, vacances, puis chaque jour de la semaine avec sa date, l'heure de ses streams, leur type
-// (jeux), leur description et leurs titres (heure, 📌 organisation). Sans les titres masques sur
-// Discord. Limite Discord : 4096 caracteres (coupe proprement a la ligne).
-function planningWeekText(program) {
+// Texte du message (hors embed, l'embed ne garde que la photo), en markdown Discord : titre, phrase
+// d'horaires, vacances, puis chaque jour avec un stream (date, heure, jeux, etat, description,
+// titres avec heure et 📌 organisation) ; les jours sans stream sont regroupes sur une ligne. Sans
+// les titres masques sur Discord. Limite Discord : 2000 caracteres pour le texte d'un message ; trop
+// long -> les titres puis les descriptions des derniers jours sont retires, jamais les jours.
+function planningWeekText(program, limit = 2000) {
   if (!program) {
     return "";
   }
   const week = planningWeek(program);
-  const out = [];
-  const schedule = String(program.scheduleText || "").trim();
+  const head = ["## 📅 Programme de la semaine"];
+  const schedule = String(program.scheduleText || "").replace(/\s+/g, " ").trim();
   if (schedule) {
-    out.push(schedule, "");
+    head.push("-# " + schedule.slice(0, 300));
   }
   if (week.vacation) {
     const [y, m, d] = week.vacation.until.split("-");
-    out.push(`🌴 **En vacances** jusqu'au ${Number(d)}/${m}/${y}${week.vacation.message ? ` : ${week.vacation.message}` : ""}`, "");
+    head.push("🌴 **En vacances** jusqu'au " + Number(d) + "/" + m + "/" + y + (week.vacation.message ? " — " + week.vacation.message.slice(0, 200) : ""));
   }
+  const blocks = [];
+  const empty = [];
   for (const day of week.days) {
-    const label = `**${day.name} ${day.short}**`;
     if (!day.streams.length) {
-      out.push(`${label} · ${day.emptyText}`);
+      empty.push(day.name.toLowerCase());
       continue;
     }
     for (const stream of day.streams) {
       const items = (stream.items || []).filter((item) => !item.imageOnly);
       const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
-      const state = stream.cancelled ? " · ❌ annulé" : stream.postponed ? " · ⏩ reporté" : day.isPast ? " · ✅ terminé" : day.isToday ? " · aujourd'hui" : "";
-      out.push(`${label} · 🕘 ${stream.time ? planningHour(stream.time) : "heure à venir"}${types.length ? ` · 🎮 ${types.join(", ")}` : ""}${state}`);
-      const description = String(stream.description || "").replace(/\s+/g, " ").trim();
-      if (description) {
-        out.push(`> ${description.slice(0, 300)}`);
-      }
-      for (const item of items) {
+      const state = stream.cancelled ? "❌ *annulé*" : stream.postponed ? "⏩ *reporté*" : day.isPast ? "✅ *terminé*" : day.isToday ? "🔴 *aujourd'hui*" : "";
+      const title = "### " + day.name + " " + day.short + " — " + (stream.time ? planningHour(stream.time) : "heure à venir");
+      const info = [types.length ? "🎮 " + types.join(", ") : "", state].filter(Boolean).join(" · ");
+      const description = String(stream.description || "").replace(/\s+/g, " ").trim().slice(0, 300);
+      const lines = items.map((item) => {
         const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        out.push(`• ${item.time ? `${planningHour(item.time)} · ` : ""}${icon}${item.subject}${item.category && item.status !== "planning" ? ` (${item.category})` : ""}`);
-      }
+        return "- " + (item.time ? "`" + planningHour(item.time) + "` " : "") + icon + item.subject;
+      });
+      blocks.push({ title, info, description, lines });
     }
   }
-  let text = "";
-  for (const line of out) {
-    if (text.length + line.length + 1 > 4000) {
-      text += "\n…";
-      break;
+  const tail = empty.length ? ["", "-# Pas de stream : " + empty.join(", ")] : [];
+  const render = () => head.concat(blocks.flatMap((b) => ["", b.title, b.info, b.description ? "> " + b.description : "", ...b.lines].filter((line, i) => i === 0 || line !== "")), tail).join("\n");
+  let text = render();
+  // Trop long : on retire d'abord les titres (du dernier jour au premier), puis les descriptions.
+  for (let i = blocks.length - 1; i >= 0 && text.length > limit; i--) {
+    if (blocks[i].lines.length) {
+      blocks[i].lines = ["-# " + blocks[i].lines.length + " titre" + (blocks[i].lines.length > 1 ? "s" : "") + " : voir l'image"];
+      text = render();
     }
-    text += (text ? "\n" : "") + line;
   }
-  return text;
+  for (let i = blocks.length - 1; i >= 0 && text.length > limit; i--) {
+    blocks[i].description = "";
+    text = render();
+  }
+  return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
 }
 
 async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
@@ -5001,13 +5008,14 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
     throw new Error("Renseigne d'abord le webhook du salon.");
   }
   const png = await renderPlanningImage(doc);
-  const weekText = planningWeekText(doc.program);
+  // Mention eventuelle (nouveau message) devant le texte : les deux tiennent dans les 2000 caracteres.
+  const pingPart = mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } };
+  const weekText = planningWeekText(doc.program, 2000 - (pingPart.content ? pingPart.content.length + 1 : 0));
+  // Texte dans le message, l'embed ne porte que la photo.
   const message = {
+    content: [pingPart.content || "", weekText].filter(Boolean).join("\n"),
     embeds: [
       {
-        title: "Programme de la semaine",
-        ...(doc.siteUrl ? { url: `${doc.siteUrl}/planning` } : {}),
-        ...(weekText ? { description: weekText } : {}),
         color: 0x6d5ef7,
         image: { url: "attachment://programme.png" }
       }
@@ -5053,7 +5061,7 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   // jamais le salon vide).
   const previousId = mode === "new" ? messageId : "";
   const previousThread = threadId;
-  const payload = { ...message, ...(mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } }) };
+  const payload = { ...message, allowed_mentions: pingPart.allowed_mentions || { parse: [] } };
   const base = `${doc.imageWebhookUrl}?wait=true`;
   let { res, data } = await call(planningImageThread(base, threadId), "POST", payload);
   // Salon forum : Discord exige un post (220001), ou le post connu a ete supprime (10003).
