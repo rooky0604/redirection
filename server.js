@@ -3881,6 +3881,28 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         };
         // Liste des tickets et menu : toutes les 15 s.
         setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+
+        // Onglets Ouverts / Fermes : seule la liste (et ses compteurs) change. Le ticket affiche a
+        // droite reste en place et l'URL suit avec pushState, sans navigation complete du navigateur.
+        const loadTicketTab = async (href, push = true) => {
+          try {
+            const res = await fetch(href, { headers: { "X-Partial": "1" } });
+            if (!res.ok) return;
+            const doc2 = await parse(res);
+            replace(".td-scroll", doc2);
+            replace(".td-tabs", doc2);
+            replace("aside.side", doc2);
+            if (push) history.pushState({ ticketTab: true }, "", href);
+          } catch {}
+        };
+        document.addEventListener("click", (event) => {
+          const link = event.target.closest(".td-tabs a");
+          if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          loadTicketTab(link.href);
+        });
+        window.addEventListener("popstate", () => loadTicketTab(location.href, false));
+
         const desk = document.querySelector(".td[data-ticket]");
         if (!desk) return;
 
