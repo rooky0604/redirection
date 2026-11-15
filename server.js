@@ -1248,6 +1248,42 @@ async function startServer() {
   setInterval(() => {
     queuePlanningImage("auto").catch(() => {});
   }, 10 * 60 * 1000);
+
+  // 08:00 (Paris) : l'image est republiee en nouveau message (en bas du salon), une fois par jour.
+  setInterval(planningDailyRepost, 60 * 1000);
+}
+
+// Republication quotidienne de l'image du programme a 08:00 (heure de Paris), sans mention. Une fois
+// par jour (imageRepostDay) ; deja publiee ce matin apres 08:00 (redemarrage) : rien de plus.
+function planningDailyRepost() {
+  try {
+    const channel = planningSiteChannel();
+    if (!channel) {
+      return;
+    }
+    const doc = readPlanning(channel);
+    if (!doc.imageWebhookUrl) {
+      return;
+    }
+    const parisDayHour = (at) => {
+      const p = Object.fromEntries(new Intl.DateTimeFormat("fr-CA", {
+        timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23"
+      }).formatToParts(at).map((x) => [x.type, x.value]));
+      return { day: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour) };
+    };
+    const now = parisDayHour(new Date());
+    if (now.hour < 8 || doc.imageRepostDay === now.day) {
+      return;
+    }
+    writePlanning({ ...doc, imageRepostDay: now.day });
+    const last = doc.imageNewAt ? parisDayHour(new Date(doc.imageNewAt)) : null;
+    if (doc.imageMessageId && last && last.day === now.day && last.hour >= 8) {
+      return;
+    }
+    queuePlanningImage("new").catch((error) => console.error(`[planning] republication de 08:00 : ${error.message}`));
+  } catch (error) {
+    console.error(`[planning] republication de 08:00 : ${error.message}`);
+  }
 }
 
 function isDnsHostname(host) {
@@ -2672,6 +2708,9 @@ function readPlanning(channel) {
     imageThreadId: parsed.imageThreadId || "",
     imageKey: parsed.imageKey || "",
     imagePublishedAt: parsed.imagePublishedAt || 0,
+    // Republication quotidienne de 08:00 : jour deja traite, dernier nouveau message.
+    imageRepostDay: parsed.imageRepostDay || "",
+    imageNewAt: parsed.imageNewAt || 0,
     imageError: parsed.imageError || ""
   };
 }
@@ -2819,9 +2858,10 @@ async function handlePlanningSync(req, res) {
     return sendJson(res, 400, { error: "Evenement inconnu." });
   }
   writePlanning({ ...doc, program: cleanPlanningProgram(body), receivedAt: Date.now() });
-  // L'image Discord suit le planning (modifiee sur place, seulement si elle change) ; programme publie
-  // sur Discord par rooky-tv : toujours mise a jour.
-  queuePlanningImage(body.reason === "publish" ? "update" : "auto").catch(() => {});
+  // L'image Discord suit le planning (modifiee sur place, seulement si elle change). Programme
+  // (re)publie sur Discord par rooky-tv (« Effacer et reposter », nouveau jour) : la photo est
+  // reposte elle aussi, en nouveau message (l'ancien est efface).
+  queuePlanningImage(body.reason === "publish" ? "new" : "auto").catch(() => {});
   return sendJson(res, 200, { ok: true });
 }
 
@@ -5026,7 +5066,8 @@ function queuePlanningImage(mode = "auto", options = {}) {
         }
         return null;
       }
-      const result = await publishPlanningImage(doc, { mode: mode === "new" || renamed ? "new" : "update", ping: mode === "new" ? options.ping : "" });
+      const fresh = mode === "new" || renamed;
+      const result = await publishPlanningImage(doc, { mode: fresh ? "new" : "update", ping: mode === "new" ? options.ping : "" });
       writePlanning({
         ...readPlanning(channel),
         imageWebhookName: webhookName,
@@ -5036,6 +5077,8 @@ function queuePlanningImage(mode = "auto", options = {}) {
         // Jaquette manquante : cle differente -> l'image est refaite au prochain passage automatique.
         imageKey: planningThumbsMissing ? `${key}|jaquettes` : key,
         imagePublishedAt: Date.now(),
+        // Dernier nouveau message (pas une simple mise a jour) : republication de 08:00.
+        ...(fresh ? { imageNewAt: Date.now() } : {}),
         imageError: ""
       });
       return result;
