@@ -4946,16 +4946,68 @@ function planningImagePing(ping) {
 
 // mode "new" : efface l'ancien message et en poste un nouveau (mention possible) ; "update" : modifie
 // le message sur place sans notification (nouveau message s'il n'existe plus).
+// Texte sous l'image (tout ce qui est utile, lisible sans ouvrir l'image) : phrase d'horaires de la
+// chaine, vacances, puis chaque jour de la semaine avec sa date, l'heure de ses streams, leur type
+// (jeux), leur description et leurs titres (heure, 📌 organisation). Sans les titres masques sur
+// Discord. Limite Discord : 4096 caracteres (coupe proprement a la ligne).
+function planningWeekText(program) {
+  if (!program) {
+    return "";
+  }
+  const week = planningWeek(program);
+  const out = [];
+  const schedule = String(program.scheduleText || "").trim();
+  if (schedule) {
+    out.push(schedule, "");
+  }
+  if (week.vacation) {
+    const [y, m, d] = week.vacation.until.split("-");
+    out.push(`🌴 **En vacances** jusqu'au ${Number(d)}/${m}/${y}${week.vacation.message ? ` : ${week.vacation.message}` : ""}`, "");
+  }
+  for (const day of week.days) {
+    const label = `**${day.name} ${day.short}**`;
+    if (!day.streams.length) {
+      out.push(`${label} · ${day.emptyText}`);
+      continue;
+    }
+    for (const stream of day.streams) {
+      const items = (stream.items || []).filter((item) => !item.imageOnly);
+      const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
+      const state = stream.cancelled ? " · ❌ annulé" : stream.postponed ? " · ⏩ reporté" : day.isPast ? " · ✅ terminé" : day.isToday ? " · aujourd'hui" : "";
+      out.push(`${label} · 🕘 ${stream.time ? planningHour(stream.time) : "heure à venir"}${types.length ? ` · 🎮 ${types.join(", ")}` : ""}${state}`);
+      const description = String(stream.description || "").replace(/\s+/g, " ").trim();
+      if (description) {
+        out.push(`> ${description.slice(0, 300)}`);
+      }
+      for (const item of items) {
+        const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
+        out.push(`• ${item.time ? `${planningHour(item.time)} · ` : ""}${icon}${item.subject}${item.category && item.status !== "planning" ? ` (${item.category})` : ""}`);
+      }
+    }
+  }
+  let text = "";
+  for (const line of out) {
+    if (text.length + line.length + 1 > 4000) {
+      text += "\n…";
+      break;
+    }
+    text += (text ? "\n" : "") + line;
+  }
+  return text;
+}
+
 async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   if (!doc.imageWebhookUrl) {
     throw new Error("Renseigne d'abord le webhook du salon.");
   }
   const png = await renderPlanningImage(doc);
+  const weekText = planningWeekText(doc.program);
   const message = {
     embeds: [
       {
         title: "Programme de la semaine",
         ...(doc.siteUrl ? { url: `${doc.siteUrl}/planning` } : {}),
+        ...(weekText ? { description: weekText } : {}),
         color: 0x6d5ef7,
         image: { url: "attachment://programme.png" }
       }
