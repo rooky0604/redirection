@@ -259,6 +259,12 @@ const requestListener = async (req, res) => {
             redirect(res, `${back}?success=${encodeURIComponent("Choix note : envoie la reponse a l'invite quand tout est pret")}`);
             return;
           }
+          if (form.action === "offer_open" || form.action === "offer_close") {
+            const open = form.action === "offer_open";
+            await modoApi(doc, viewer, "ticket.offer.open", { id, open });
+            redirect(res, `${back}?success=${encodeURIComponent(open ? "Creneaux ouverts : l'invite a recu les creneaux libres en MP" : "Creneaux fermes : l'invite ne peut plus en demander")}`);
+            return;
+          }
           if (form.action === "offer_send") {
             await modoApi(doc, viewer, "ticket.offer.send", { id });
             redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en un seul MP a l'invite (programme modifie pour les creneaux acceptes)")}`);
@@ -3493,6 +3499,12 @@ function renderModoTickets(res, doc, viewer, live, flash, tab = "") {
 // de proposition (streams des 7 prochains jours + autre date) pour le streamer et les admins.
 function renderSlotOffer(doc, ticket, canDecide) {
   const offer = ticket.offer;
+  const slotsClosed = !offer || offer.closed !== false;
+  const openCloseForm = canDecide && ticket.status === "open"
+    ? `<form method="post" class="md-slots-toggle">${slotsClosed
+        ? `<span class="md-tag bad">\ud83d\udd12 Creneaux fermes</span><button type="submit" name="action" value="offer_open">\ud83d\udd13 Ouvrir les creneaux</button>`
+        : `<span class="md-tag ok">\ud83d\udd13 Creneaux ouverts</span><button type="submit" name="action" value="offer_close" class="secondary">\ud83d\udd12 Fermer les creneaux</button>`}</form>`
+    : "";
   const statusText = {
     proposed: "En attente du choix de l'invite (en MP)",
     chosen: "L'invite a choisi : a valider",
@@ -3538,7 +3550,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
         }
       </section>`
     : "";
-  if (!canDecide || ticket.status !== "open" || pending.length) return offerBox;
+  if (!canDecide || ticket.status !== "open" || pending.length) return openCloseForm + offerBox;
   const today = planningToday();
   const last = planningAddDays(today, 6);
   const streams = (doc.program?.modo?.streams || []).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
@@ -3572,7 +3584,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
         <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
       </form>
     </details>`;
-  return offerBox + form;
+  return openCloseForm + offerBox + form;
 }
 
 function renderModoTicket(res, doc, viewer, live, data, flash, tab = "") {
