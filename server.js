@@ -206,6 +206,7 @@ const requestListener = async (req, res) => {
           const state = await modoApi(doc, viewer, "ticket.live", { id: ticketId, typing: body.typing === true });
           if (!canSeeTicket(viewer, state, { reason: state.reason }, doc)) return sendJson(res, 404, { error: "Ticket introuvable." });
           logTicketLive(ticketId, `membre ${state.memberTyping ? "en train d'ecrire" : "n'ecrit pas"}`, state.memberTyping ? "typing" : "idle");
+          logTicketDiag(ticketId, state.diag);
           if (body.typing === true) logTicketLive(ticketId, `${viewer.n || "modo"} tape une reponse (signal envoye au MP)`, `mod:${Math.floor(Date.now() / 30000)}`);
           return sendJson(res, 200, { memberTyping: !!state.memberTyping, lastId: Number(state.lastId) || 0, status: state.status });
         } catch (error) {
@@ -3867,6 +3868,27 @@ function logTicketLive(ticketId, message, stateKey) {
   ticketLiveLog.set(key, stateKey);
   if (first && stateKey === "idle") return;
   console.log(`[tickets-live] ticket #${ticketId} : ${message}`);
+}
+
+// Diagnostic de la frappe en MP (envoye par rooky-tv) : une ligne a l'ouverture du ticket puis quand
+// une valeur change. « jamais » / tres ancien pour la derniere frappe = Discord n'envoie pas la frappe
+// en MP a ce bot ; intent ABSENT = permission du bot ; « pret » ancien = bot pas redemarre.
+const ticketDiagLog = new Map();
+function logTicketDiag(ticketId, diag) {
+  if (!diag) return;
+  const ago = (iso) => {
+    if (!iso) return "jamais";
+    const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+    return s < 120 ? `il y a ${s} s` : s < 7200 ? `il y a ${Math.round(s / 60)} min` : `il y a ${Math.round(s / 3600)} h`;
+  };
+  const bots = (diag.bots || []).length
+    ? diag.bots.map((b) => `${b.scope}${b.tag ? ` (${b.tag})` : ""} : intent frappe MP ${b.intentOn ? "actif" : "ABSENT"}, pret ${ago(b.readyAt)}, derniere frappe recue (tous MP) ${ago(b.lastTypingAt)}, dernier MP recu ${ago(b.lastDmMessageAt)}`).join(" | ")
+    : "aucun etat de bot enregistre (bot pas demarre avec ce code ?)";
+  const line = `diagnostic frappe MP — bot du ticket : ${diag.botScope || "?"} ; frappe de ce membre : ${ago(diag.memberLastTypingAt)} ; ${bots}`;
+  const sig = line.replace(/il y a \d+ (s|min|h)/g, "").replace(/jamais/g, "j");
+  if (ticketDiagLog.get(ticketId) === sig) return;
+  ticketDiagLog.set(ticketId, sig);
+  console.log(`[tickets-live] ticket #${ticketId} : ${line}`);
 }
 
 /* ------------------------- Groupes locaux (visibilite des tickets) ------------------------- */
