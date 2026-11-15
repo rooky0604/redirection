@@ -3710,6 +3710,7 @@ const TICKET_DESK_CSS = `
   .td-export-dialog h2 { margin: 0 0 8px; font-size: 1.1rem; }
   .td-export-dialog p { margin: 0 0 10px; }
   .td-export-dialog form { display: inline; }
+  .td-export-x { position: absolute; top: 10px; right: 10px; min-width: 32px; padding: 4px 8px; background: transparent; border: 1px solid var(--line); color: var(--muted); }
   @media (max-width: 860px) {
     .td { grid-template-columns: 1fr; height: auto; min-height: 0; }
     .td-list { border-right: 0; }
@@ -3851,12 +3852,13 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         </div>` : ""}
       </header>
       ${canReply && flash?.exported ? `<dialog class="td-export-dialog" id="td-export-dialog" open>
+        <button type="button" class="td-export-x" aria-label="Annuler" title="Annuler" onclick="this.closest('dialog').close()">\u2715</button>
         <h2>\ud83d\udcc4 Ticket exporte</h2>
         <p>Le transcript est dans le salon des logs tickets. L'envoyer aussi a <strong>${escapeHtml(ticket.owner)}</strong> en MP ?</p>
         <p class="md-hint">Sa copie ne contient pas les notes staff, et les reponses anonymes restent signees « Equipe ».</p>
         <div class="mt-actions">
           <form method="post"><button type="submit" name="action" value="transcript_send">Envoyer au membre</button></form>
-          <form method="dialog"><button type="submit" class="secondary">Non merci</button></form>
+          <button type="button" class="secondary" onclick="this.closest('dialog').close()">Annuler</button>
         </div>
         <script>try { const u = new URL(location.href); u.searchParams.delete("exported"); history.replaceState(history.state, "", u); } catch (e) {}</script>
       </dialog>` : ""}
