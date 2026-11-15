@@ -3483,6 +3483,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
   const offerBox = offer
     ? `<section class="md-form">
         <h2>\ud83d\udcc5 Creneaux <span class="md-tag${offer.status === "chosen" ? " bad" : offer.status === "accepted" ? " ok" : ""}">${statusText[offer.status] || escapeHtml(offer.status)}</span></h2>
+        ${(offer.decisions || []).length ? `<ul class="md-sugg">${offer.decisions.map((item) => `<li><span><strong>${escapeHtml(item.text)}</strong></span><span class="md-tag${item.status === "accepted" ? " ok" : " bad"}">${item.status === "accepted" ? "Accepte" : "Refuse"}</span></li>`).join("")}</ul>` : ""}
         <ul class="md-sugg">${(offer.streams || [])
           .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.start))} \u2192 ${escapeHtml(planningHour(st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
           .join("")}</ul>
@@ -3551,6 +3552,8 @@ const TICKET_DESK_CSS = `
   .td-item:hover { background: rgba(255, 255, 255, 0.04); }
   .td-item.on { background: rgba(124, 92, 255, 0.14); border-left-color: #f5c542; }
   .td-avatar { width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(124, 92, 255, 0.3); color: #fff; object-fit: cover; }
+  .td-avatar-wrap { width: 34px; height: 34px; flex: 0 0 auto; position: relative; display: inline-grid; }
+  .td-online { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: #57f287; border: 3px solid rgb(22, 25, 34); box-sizing: content-box; }
   .cm-chat { display: grid; gap: 2px; }
   .cm-day { display: flex; align-items: center; gap: 12px; margin: 14px 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
   .cm-day::before, .cm-day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -3615,6 +3618,13 @@ const TICKET_DESK_CSS = `
   .td-compose textarea:focus { outline: none; border-color: rgba(124, 92, 255, 0.7); }
   .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
   .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+  .td-calendar { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
+  .td-calendar::backdrop { background: rgba(4, 6, 12, 0.72); backdrop-filter: blur(3px); }
+  .td-calendar-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .td-calendar-head h2 { margin: 0; font-size: 1.1rem; }
+  .td-calendar-head button { min-width: 38px; }
+  .td-calendar > .md-form { margin: 0 0 12px; }
+  .td-calendar > .md-form:last-child { margin-bottom: 0; }
   .td-back { display: none; }
   @media (max-width: 860px) {
     .td { grid-template-columns: 1fr; height: auto; min-height: 0; }
@@ -3637,10 +3647,12 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
   const q = closedTab ? "?vue=fermes" : "";
   const initial = (name) => escapeHtml((String(name || "?").trim()[0] || "?").toUpperCase());
   // Avatar Discord de la personne qui a ouvert le ticket (sinon son initiale).
-  const avatar = (t) =>
-    /^https:\/\//.test(String(t?.avatar || ""))
+  const avatar = (t) => {
+    const picture = /^https:\/\//.test(String(t?.avatar || ""))
       ? `<img class="td-avatar" src="${escapeHtml(t.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
       : `<span class="td-avatar" aria-hidden="true">${initial(t?.owner)}</span>`;
+    return `<span class="td-avatar-wrap">${picture}${t?.online ? `<span class="td-online" title="En ligne" aria-label="En ligne"></span>` : ""}</span>`;
+  };
   const item = (t) => {
     const unread = t.status === "open" && t.unread;
     const dot = t.status !== "open" ? "off" : unread ? "new" : "";
@@ -3751,7 +3763,6 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         ${renderMessages(flash)}
         ${data.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
         ${ban}
-        ${renderSlotOffer(doc, ticket, data.canDecide === true)}
         <div class="cm-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
         ${banForm}
       </div>
@@ -3766,15 +3777,19 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                 <textarea name="content" rows="3" maxlength="3500" placeholder="Repondre a ${escapeHtml(ticket.owner)}"></textarea>
                 <div class="td-compose-row">
                   <label class="cm-anon"><input type="checkbox" name="anonymous" value="1" /> Anonyme <small>(signe « l'equipe » au lieu de ton nom)</small></label>
-                  <span class="cm-actions"><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
+                  <span class="cm-actions"><button type="button" class="secondary td-calendar-open">\ud83d\udcc5 Calendrier</button><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
                 </div>
               </form>`
             : `<form method="post" class="td-compose mt-reply">
                 <textarea name="content" rows="2" maxlength="3500" placeholder="Note staff (ticket ferme : le membre ne la voit pas)"></textarea>
-                <div class="td-compose-row"><span class="md-hint">Ticket ferme : seules les notes staff sont possibles.</span><button type="submit" name="action" value="note" class="secondary">\ud83d\udd12 Note staff</button></div>
+                <div class="td-compose-row"><span class="md-hint">Ticket ferme : seules les notes staff sont possibles.</span><span class="cm-actions"><button type="button" class="secondary td-calendar-open">\ud83d\udcc5 Calendrier</button><button type="submit" name="action" value="note" class="secondary">\ud83d\udd12 Note staff</button></span></div>
               </form>`
           : `<div class="td-compose"><p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p></div>`
-      }`;
+      }
+      <dialog class="td-calendar" id="td-calendar">
+        <div class="td-calendar-head"><h2>\ud83d\udcc5 Calendrier de ${escapeHtml(ticket.owner)}</h2><button type="button" class="secondary" id="td-calendar-close" aria-label="Fermer">\u2715</button></div>
+        ${renderSlotOffer(doc, ticket, data.canDecide === true) || `<p class="md-empty">Aucun creneau propose pour ce ticket.</p>`}
+      </dialog>`;
   }
 
   const inner = `
@@ -3806,6 +3821,12 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     </section>
     <script>
       (() => {
+        const calendar = document.getElementById("td-calendar");
+        document.querySelectorAll(".td-calendar-open").forEach((button) => button.addEventListener("click", () => calendar?.showModal()));
+        document.getElementById("td-calendar-close")?.addEventListener("click", () => calendar?.close());
+        calendar?.addEventListener("click", (event) => {
+          if (event.target === calendar) calendar.close();
+        });
         // Rafraichissement partiel (jamais toute la page) : la liste des tickets, le menu, la
         // conversation et l'en-tete du ticket sont remplaces sur place ; la zone de reponse et les
         // formulaires ouverts ne bougent pas. Reponse et note staff envoyees sans recharger.
