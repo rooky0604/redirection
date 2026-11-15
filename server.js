@@ -4963,6 +4963,15 @@ function planningImagePing(ping) {
 const PLANNING_TEXT_MAX = 2000;
 const planningFit = (text, max = PLANNING_TEXT_MAX) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
+// Titre affiche tel quel dans Discord : le « * » (separateur jeu / accroche des titres rooky-tv)
+// devient une espace, les autres caracteres de mise en forme sont echappes (sinon titre coupe en
+// italique, barre, spoiler...).
+const planningPlain = (text) => String(text || "")
+  .replace(/\s*\*\s*/g, " ")
+  .replace(/\s+/g, " ")
+  .trim()
+  .replace(/([\\_~`|>#[\]])/g, "\\$1");
+
 function planningWeekMessages(program) {
   if (!program) {
     return { header: "## 📅 Programme de la semaine", days: [] };
@@ -4994,11 +5003,11 @@ function planningWeekMessages(program) {
       }
       const description = String(stream.description || "").replace(/\s+/g, " ").trim();
       if (description) {
-        lines.push(`> ${description.slice(0, 600)}`);
+        lines.push(`> ${planningPlain(description).slice(0, 600)}`);
       }
       for (const item of items) {
         const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${item.subject}${item.category && item.status !== "planning" ? ` *(${item.category})*` : ""}`);
+        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${planningPlain(item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
       }
       days.push(planningFit(lines.join("\n")));
     }
