@@ -3888,7 +3888,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               </select><noscript><button type="submit">OK</button></noscript></form>`
             : ""
         }
-        <nav class="td-tabs"><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}" class="${closedTab ? "" : "on"}">Ouverts${open.length ? ` (${open.length})` : ""}</a><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=fermes" class="${closedTab ? "on" : ""}">Fermes</a></nav>
+        <nav class="td-tabs"><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=ouverts" class="${closedTab ? "" : "on"}">Ouverts${open.length ? ` (${open.length})` : ""}</a><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=fermes" class="${closedTab ? "on" : ""}">Fermes</a></nav>
         <div class="td-scroll">${listHtml}</div>
       </aside>
       <div class="td-pane">${pane}</div>
