@@ -5049,9 +5049,10 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
     }
     messageId = ""; // supprime a la main : on en reposte un
   }
-  if (mode === "new" && messageId) {
-    await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${messageId}`, threadId), "DELETE");
-  }
+  // Nouveau message : l'ancien n'est efface qu'une fois le nouveau poste (un envoi refuse ne laisse
+  // jamais le salon vide).
+  const previousId = mode === "new" ? messageId : "";
+  const previousThread = threadId;
   const payload = { ...message, ...(mode === "new" ? planningImagePing(ping) : { allowed_mentions: { parse: [] } }) };
   const base = `${doc.imageWebhookUrl}?wait=true`;
   let { res, data } = await call(planningImageThread(base, threadId), "POST", payload);
@@ -5062,6 +5063,9 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
   }
   if (!res || !res.ok) {
     throw planningImageError(res, data);
+  }
+  if (previousId && String(data?.id || "") !== String(previousId)) {
+    await planningImageCall(planningImageThread(`${doc.imageWebhookUrl}/messages/${previousId}`, previousThread), "DELETE").catch(() => {});
   }
   return { messageId: data?.id ? String(data.id) : "", threadId, edited: false };
 }
