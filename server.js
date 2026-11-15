@@ -4801,6 +4801,26 @@ async function buildPlanningSvg(doc) {
       }
       cy += 8;
     }
+    // Lives prevus pour d'autres chaines (declaration de service, taches de l'espace modo) : pas sur
+    // le planning public, seulement ici.
+    const services = (program?.modo?.tasks || []).filter((t) => t.service && t.date === day.date && !t.late);
+    if (services.length && !day.streams.length && parts.length > 2) {
+      parts.pop();
+      cy -= 30;
+    }
+    for (const service of services) {
+      const hours = `${planningHour(service.time)}${service.end ? ` - ${planningHour(service.end)}` : ""}`;
+      const label = imageWrap(String(service.title || `Live #${service.service}`).replace(/^\S*\s*(?=Live)/u, ""), inner, 14, 2);
+      parts.push({
+        y: cy + 6,
+        svg: (ox, oy) => imagePill(ox, oy, "LIVE PRÉVU", "rgba(109,94,247,0.18)", "#b9b0ff").svg
+      });
+      cy += 36;
+      parts.push({ y: cy + 20, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="20" font-weight="700" fill="#b9b0ff">${svgText(hours)}</text>` });
+      cy += 28;
+      label.forEach((line, i) => parts.push({ y: cy + 14 + i * 18, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" fill="${IMG.ink}">${svgText(line)}</text>` }));
+      cy += label.length * 18 + 12;
+    }
     columns.push({ day, parts, height: cy });
   }
   const colH = Math.max(220, ...columns.map((c) => c.height + 20));
