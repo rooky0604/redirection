@@ -2741,6 +2741,8 @@ function cleanPlanningProgram(body) {
   const cleanItem = (item) => ({
     time: time(item?.time),
     subject: str(item?.subject, 200),
+    // Titre complet tel qu'envoye sur Twitch (messages du salon) ; vide pour l'organisation.
+    title: str(item?.title, 300),
     category: str(item?.category, 100),
     thumbnail: httpsUrl(item?.thumbnail),
     status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
@@ -5007,7 +5009,7 @@ function planningWeekMessages(program) {
       }
       for (const item of items) {
         const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${planningPlain(item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
+        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${planningPlain(item.title || item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
       }
       days.push(planningFit(lines.join("\n")));
     }
