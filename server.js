@@ -253,7 +253,7 @@ const requestListener = async (req, res) => {
             return;
           }
           if (form.action === "offer_accept" || form.action === "offer_refuse") {
-            await modoApi(doc, viewer, "ticket.offer.decide", { id, decision: form.action === "offer_accept" ? "accept" : "refuse" });
+            await modoApi(doc, viewer, "ticket.offer.decide", { id, decision: form.action === "offer_accept" ? "accept" : "refuse", choiceId: form.choice_id || "" });
             redirect(res, `${back}?success=${encodeURIComponent(form.action === "offer_accept" ? "Creneau valide : programme modifie, l'invite est prevenu en MP" : "Creneau refuse, l'invite est prevenu")}`);
             return;
           }
@@ -3488,23 +3488,31 @@ function renderSlotOffer(doc, ticket, canDecide) {
     accepted: "Valide",
     refused: "Refuse"
   };
+  // Demandes de l'invite pas encore decidees (plusieurs possibles) ; anciens rooky-tv : offer.choice.
+  const pending = offer
+    ? (Array.isArray(offer.pending) ? offer.pending : offer.status === "chosen" && offer.choice ? [{ id: "", ...offer.choice }] : [])
+    : [];
+  const status = pending.length ? "chosen" : offer?.status;
   const offerBox = offer
     ? `<section class="md-form">
-        <h2>\ud83d\udcc5 Creneaux <span class="md-tag${offer.status === "chosen" ? " bad" : offer.status === "accepted" ? " ok" : ""}">${statusText[offer.status] || escapeHtml(offer.status)}</span></h2>
+        <h2>\ud83d\udcc5 Creneaux <span class="md-tag${status === "chosen" ? " bad" : status === "accepted" ? " ok" : ""}">${pending.length > 1 ? `${pending.length} demandes a valider` : statusText[status] || escapeHtml(status)}</span></h2>
         ${(offer.decisions || []).length ? `<ul class="md-sugg">${offer.decisions.map((item) => `<li><span><strong>${escapeHtml(item.text)}</strong></span><span class="md-tag${item.status === "accepted" ? " ok" : " bad"}">${item.status === "accepted" ? "Accepte" : "Refuse"}</span></li>`).join("")}</ul>` : ""}
         <ul class="md-sugg">${(offer.streams || [])
           .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.start))} \u2192 ${escapeHtml(planningHour(st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
           .join("")}</ul>
-        ${offer.choice ? `<p><strong>Choix de l'invite :</strong> ${escapeHtml(offer.choice.text)}${offer.choice.early ? " <span class=\"md-tag\">avant le debut</span>" : ""}</p>` : ""}
+        ${pending.length ? `<ul class="md-sugg">${pending.map((item) => `<li><span><strong>Demande de l'invite :</strong> ${escapeHtml(item.text)}${item.early ? " <span class=\"md-tag\">avant le debut</span>" : ""}</span>${
+          canDecide
+            ? `<form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><button type="submit" name="action" value="offer_accept">Valider</button><button type="submit" name="action" value="offer_refuse" class="secondary">Refuser</button></form>`
+            : ""
+        }</li>`).join("")}</ul>` : ""}
         ${
-          canDecide && offer.status === "chosen"
-            ? `<form method="post" class="mt-actions"><button type="submit" name="action" value="offer_accept">Valider (modifie le programme)</button><button type="submit" name="action" value="offer_refuse" class="secondary">Refuser</button></form>
-               <p class="md-hint">Valider : l'heure du titre change pour ce stream${offer.choice?.early ? ", le debut du stream est avance" : ""} — sans le nom de l'invite. Il recoit la validation en MP.</p>`
+          canDecide && pending.length
+            ? `<p class="md-hint">Valider : l'heure du titre change pour ce stream${pending.some((item) => item.early) ? " (le debut du stream est avance si la demande est avant le debut)" : ""} — sans le nom de l'invite. Il recoit la reponse en MP pour chaque demande.</p>`
             : ""
         }
       </section>`
     : "";
-  if (!canDecide || ticket.status !== "open" || offer?.status === "chosen") return offerBox;
+  if (!canDecide || ticket.status !== "open" || pending.length) return offerBox;
   const today = planningToday();
   const last = planningAddDays(today, 6);
   const streams = (doc.program?.modo?.streams || []).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
