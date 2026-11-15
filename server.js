@@ -259,6 +259,16 @@ const requestListener = async (req, res) => {
             redirect(res, `${back}?success=${encodeURIComponent("Choix note : envoie la reponse a l'invite quand tout est pret")}`);
             return;
           }
+          if (form.action === "export") {
+            await modoApi(doc, viewer, "ticket.export", { id });
+            redirect(res, `${back}?exported=1&success=${encodeURIComponent("Ticket exporte dans les logs tickets")}`);
+            return;
+          }
+          if (form.action === "transcript_send") {
+            await modoApi(doc, viewer, "ticket.transcript.send", { id });
+            redirect(res, `${back}?success=${encodeURIComponent("Transcript envoye au membre en MP")}`);
+            return;
+          }
           if (form.action === "offer_open" || form.action === "offer_close") {
             const open = form.action === "offer_open";
             await modoApi(doc, viewer, "ticket.offer.open", { id, open });
@@ -1906,7 +1916,9 @@ function parseFormParams(req) {
 function getFlashMessage(url) {
   return {
     error: url.searchParams.get("error") || "",
-    success: url.searchParams.get("success") || ""
+    success: url.searchParams.get("success") || "",
+    // Ticket tout juste exporte : propose d'envoyer le transcript au membre.
+    exported: url.searchParams.get("exported") === "1"
   };
 }
 
@@ -3694,6 +3706,10 @@ const TICKET_DESK_CSS = `
   .td-calendar > .md-form { margin: 0 0 12px; }
   .td-calendar > .md-form:last-child { margin-bottom: 0; }
   .td-back { display: none; }
+  .td-export-dialog { position: fixed; inset: 0; margin: auto; z-index: 50; width: min(440px, calc(100vw - 32px)); box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); }
+  .td-export-dialog h2 { margin: 0 0 8px; font-size: 1.1rem; }
+  .td-export-dialog p { margin: 0 0 10px; }
+  .td-export-dialog form { display: inline; }
   @media (max-width: 860px) {
     .td { grid-template-columns: 1fr; height: auto; min-height: 0; }
     .td-list { border-right: 0; }
@@ -3830,9 +3846,20 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             </select>
             <button type="submit" name="action" value="category" class="secondary">Changer</button>
           </form>
+          <form method="post" class="td-export-form"><button type="submit" name="action" value="export" class="secondary" title="Transcript PDF dans le salon des logs tickets">\ud83d\udcc4 Exporter</button></form>
           <form method="post" class="td-status-form">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>
         </div>` : ""}
       </header>
+      ${canReply && flash?.exported ? `<dialog class="td-export-dialog" id="td-export-dialog" open>
+        <h2>\ud83d\udcc4 Ticket exporte</h2>
+        <p>Le transcript est dans le salon des logs tickets. L'envoyer aussi a <strong>${escapeHtml(ticket.owner)}</strong> en MP ?</p>
+        <p class="md-hint">Sa copie ne contient pas les notes staff, et les reponses anonymes restent signees « Equipe ».</p>
+        <div class="mt-actions">
+          <form method="post"><button type="submit" name="action" value="transcript_send">Envoyer au membre</button></form>
+          <form method="dialog"><button type="submit" class="secondary">Non merci</button></form>
+        </div>
+        <script>try { const u = new URL(location.href); u.searchParams.delete("exported"); history.replaceState(history.state, "", u); } catch (e) {}</script>
+      </dialog>` : ""}
       <div class="td-body" id="td-body">
         ${renderMessages(flash)}
         ${data.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
