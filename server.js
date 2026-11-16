@@ -3795,6 +3795,15 @@ const TICKET_DESK_CSS = `
   .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
   .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
   .td-calendar { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
+  .td-switch { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
+  .td-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .td-switch-track { flex: none; position: relative; width: 40px; height: 22px; margin-top: 1px; border-radius: 999px; background: rgba(255, 255, 255, 0.16); border: 1px solid var(--line); transition: background 0.18s ease; }
+  .td-switch-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 0.18s ease; }
+  .td-switch input:checked + .td-switch-track { background: #45e0d2; border-color: #45e0d2; }
+  .td-switch input:checked + .td-switch-track::after { transform: translateX(18px); }
+  .td-switch input:focus-visible + .td-switch-track { outline: 2px solid #45e0d2; outline-offset: 2px; }
+  .td-switch strong { display: block; }
+  .td-switch small { display: block; opacity: 0.7; margin-top: 2px; }
   .td-calendar::backdrop { background: rgba(4, 6, 12, 0.72); backdrop-filter: blur(3px); }
   .td-calendar-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
   .td-calendar-head h2 { margin: 0; font-size: 1.1rem; }
@@ -4019,11 +4028,11 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               <dialog class="td-calendar" id="td-new-dialog" style="width:min(480px, calc(100vw - 32px));" aria-label="Ouvrir un ticket">
                 <div class="td-calendar-head"><h2>➕ Ouvrir un ticket</h2><button type="button" id="td-new-close" aria-label="Fermer">✕</button></div>
                 <form method="post" action="/modo/tickets/ouvrir" id="td-new-form" style="display:grid;gap:10px;">
-                  <fieldset style="border:0;padding:0;margin:0;display:grid;gap:4px;">
-                    <legend style="font-weight:600;margin-bottom:4px;">Quel type de ticket ?</legend>
-                    <label><input type="radio" name="mode" value="mp" checked /> En MP avec le bot (1 membre, tu réponds ici)</label>
-                    <label><input type="radio" name="mode" value="salon" /> Ticket classique : salon sur Discord (plusieurs membres possibles)</label>
-                  </fieldset>
+                  <label class="td-switch">
+                    <input type="checkbox" name="mode" value="salon" />
+                    <span class="td-switch-track" aria-hidden="true"></span>
+                    <span><strong>Ticket classique (salon Discord)</strong><small>Éteint : ticket en MP avec le bot (1 membre, tu réponds ici). Allumé : salon sur le serveur, plusieurs membres possibles.</small></span>
+                  </label>
                   <input type="text" name="membre" id="td-new-member" list="td-new-members" autocomplete="off" placeholder="Pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
                   <datalist id="td-new-members"></datalist>
                   <div id="td-new-chips" style="display:none;flex-wrap:wrap;gap:6px;"></div>
