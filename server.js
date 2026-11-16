@@ -2746,7 +2746,7 @@ function cleanPlanningProgram(body) {
     category: str(item?.category, 100),
     thumbnail: httpsUrl(item?.thumbnail),
     status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
-    // Titre masque sur Discord (rooky-tv) : dans l'image seulement, pas sur la page /planning.
+    // Titre masque sur Discord (rooky-tv) : seulement dans l'espace modo (ni photo, ni messages, ni page /planning).
     imageOnly: item?.imageOnly === true
   });
   const modoUrl = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)[:/])\S+$/i.test(String(body.modoUrl || "")) ? String(body.modoUrl).slice(0, 500) : "";
@@ -4718,7 +4718,16 @@ let planningThumbsMissing = false;
 
 async function buildPlanningSvg(doc) {
   const program = doc.program;
-  const week = planningWeek(program);
+  const base = planningWeek(program);
+  // Titres « Masqués sur Discord » : pas sur la photo (ni dans les messages des streams) ; ils
+  // restent dans l'espace modo du site.
+  const week = {
+    ...base,
+    days: base.days.map((day) => ({
+      ...day,
+      streams: day.streams.map((stream) => ({ ...stream, items: (stream.items || []).filter((item) => !item.imageOnly) }))
+    }))
+  };
   // Jaquettes telechargees en parallele (le dessin les relit ensuite dans le cache).
   const thumbUrls = [...new Set(week.days.flatMap((day) => (day.streams || []).flatMap((s) => (s.items || []).map((i) => i.thumbnail))).filter(Boolean))];
   const thumbResults = await Promise.all(thumbUrls.map((url) => imageThumb(url)));
