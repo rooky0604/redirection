@@ -5240,27 +5240,68 @@ function planningWeekMessages(program) {
   if (empty.length) {
     header.push(`-# Pas de stream : ${empty.join(", ")}`);
   }
-  const days = [];
+  // Streams avec exactement les memes jeux (et la meme description) : un seul message, la liste
+  // une fois, et en tete seulement les jours et les heures. Un stream annule ou reporte reste a part.
+  const groups = [];
+  const byKey = new Map();
   for (const day of week.days) {
     for (const stream of day.streams) {
       const items = (stream.items || []).filter(planningWebhookItem);
-      const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
+      const description = String(stream.description || "").replace(/\s+/g, " ").trim();
+      const key = items.length && !stream.cancelled && !stream.postponed
+        ? JSON.stringify([description, items.map((item) => [item.status === "planning", item.title || item.subject, item.category || ""])])
+        : null;
+      if (key && byKey.has(key)) {
+        byKey.get(key).members.push({ day, stream });
+        continue;
+      }
+      const group = { items, description, members: [{ day, stream }] };
+      groups.push(group);
+      if (key) {
+        byKey.set(key, group);
+      }
+    }
+  }
+  const days = [];
+  for (const { items, description, members } of groups) {
+    const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
+    const hour = (stream) => (stream.time ? planningHour(stream.time) : "heure à venir");
+    const lines = [];
+    if (members.length === 1) {
+      const { day, stream } = members[0];
       const state = stream.cancelled ? "❌ *annulé*" : stream.postponed ? "⏩ *reporté*" : day.isPast ? "✅ *terminé*" : day.isToday ? "🔴 *aujourd'hui*" : "";
-      const lines = [`### ${day.name} ${day.short} — ${stream.time ? planningHour(stream.time) : "heure à venir"}`];
+      lines.push(`### ${day.name} ${day.short} — ${hour(stream)}`);
       const info = [types.length ? `🎮 ${types.join(", ")}` : "", state].filter(Boolean).join(" · ");
       if (info) {
         lines.push(info);
       }
-      const description = String(stream.description || "").replace(/\s+/g, " ").trim();
-      if (description) {
-        lines.push(`> ${planningPlain(description).slice(0, 600)}`);
+    } else {
+      const names = [...new Set(members.map(({ day }) => day.name))];
+      const joined = names.length > 1 ? `${names.slice(0, -1).join(", ")} et ${names[names.length - 1].toLowerCase()}` : names[0];
+      lines.push(`### ${joined.charAt(0).toUpperCase()}${joined.slice(1).toLowerCase()} — même programme`);
+      lines.push(
+        `🗓️ ${members
+          .map(({ day, stream }) => `**${day.name} ${day.short}** ${hour(stream)}${day.isPast ? " ✅" : day.isToday ? " 🔴" : ""}`)
+          .join(" · ")}`
+      );
+      if (types.length) {
+        lines.push(`🎮 ${types.join(", ")}`);
       }
-      for (const item of items) {
-        const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${planningPlain(item.title || item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
-      }
-      days.push(planningFit(lines.join("\n")));
     }
+    if (description) {
+      lines.push(`> ${planningPlain(description).slice(0, 600)}`);
+    }
+    // Heure de chaque titre : affichee seulement si elle est la meme pour tous les jours du groupe.
+    const sameTimes = members.every(({ stream }) => {
+      const other = (stream.items || []).filter(planningWebhookItem);
+      return other.every((item, i) => (item.time || "") === (items[i]?.time || ""));
+    });
+    for (const item of items) {
+      const icon = item.status === "planning" ? "📌 " : members.length > 1 ? "" : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
+      const time = item.time && sameTimes ? `\`${planningHour(item.time)}\` ` : "";
+      lines.push(`- ${time}${icon}${planningPlain(item.title || item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
+    }
+    days.push(planningFit(lines.join("\n")));
   }
   return { header: header.join("\n"), days: days.slice(0, 14) };
 }
