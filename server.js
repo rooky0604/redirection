@@ -2986,6 +2986,14 @@ function renderPlanningItem(item) {
 // Grille de la semaine, du lundi au dimanche, toujours complete pour ne jamais etre vide : jours passes =
 // streams termines (agenda de la chaine, via rooky-tv), aujourd'hui et apres = planning. Partagee par
 // la page publique et l'image Discord.
+// Numero de semaine ISO (celui des calendriers francais) du jour donne : celui de son jeudi.
+function planningWeekNumber(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  const weekday = new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay();
+  const thursday = new Date(Date.UTC(y, m - 1, d + 3 - ((weekday + 6) % 7)));
+  return Math.floor((thursday - Date.UTC(thursday.getUTCFullYear(), 0, 1)) / 86400000 / 7) + 1;
+}
+
 function planningWeek(program) {
   const today = planningToday();
   // Lundi -> dimanche ; le week-end, la semaine qui arrive : samedi -> vendredi.
@@ -3379,8 +3387,7 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
     }
     const end = planningAddDays(monday, 6);
     // Numero de semaine ISO (celui des calendriers francais) : la semaine du jeudi.
-    const [ty, tm, td] = planningAddDays(monday, 3).split("-").map(Number);
-    const weekNumber = Math.floor((Date.UTC(ty, tm - 1, td) - Date.UTC(ty, 0, 1)) / 86400000 / 7) + 1;
+    const weekNumber = planningWeekNumber(monday);
     weeks.push(`
       <section class="md-week">
         <h2>Semaine ${weekNumber} <span class="md-week-dates">· du ${escapeHtml(planningDayParts(monday).short)} au ${escapeHtml(planningDayParts(end).short)}</span></h2>
@@ -4966,7 +4973,8 @@ async function buildPlanningSvg(doc) {
   // En-tete
   const first = planningDayParts(week.monday);
   const last = planningDayParts(week.lastDay);
-  const range = `Semaine du ${first.short.split(" ")[0]}${first.short.split(" ")[1] === last.short.split(" ")[1] ? "" : ` ${first.short.split(" ")[1]}`} au ${last.short}`;
+  // Numero de semaine : celui du dernier jour (le week-end, samedi -> vendredi = la semaine qui arrive).
+  const range = `Semaine ${planningWeekNumber(week.lastDay)} · du ${first.short.split(" ")[0]}${first.short.split(" ")[1] === last.short.split(" ")[1] ? "" : ` ${first.short.split(" ")[1]}`} au ${last.short}`;
   const scheduleLines = program?.scheduleText ? imageWrap(program.scheduleText, width - pad * 2 - 260, 20, 2, 0.55) : [];
   let y = pad;
   out.push(`<text x="${pad}" y="${y + 42}" font-size="42" font-weight="700" fill="${IMG.ink}">Programme de la semaine</text>`);
