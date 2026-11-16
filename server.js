@@ -5009,14 +5009,7 @@ function planningWeekMessages(program) {
       }
       for (const item of items) {
         const icon = item.status === "planning" ? "📌 " : item.status === "current" ? "▶️ " : item.status === "done" ? "✅ " : "";
-        const hour = item.time ? `\`${planningHour(item.time)}\` ` : "";
-        const category = item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : "";
-        if (item.title) {
-          // Titre Twitch complet dans un bloc de code : copiable d'un clic, tel quel, sans rien perdre.
-          lines.push(`- ${hour}${icon}${category.trim()}`, "```", item.title.replace(/```/g, "ˋˋˋ"), "```");
-        } else {
-          lines.push(`- ${hour}${icon}${planningPlain(item.subject)}${category}`);
-        }
+        lines.push(`- ${item.time ? `\`${planningHour(item.time)}\` ` : ""}${icon}${planningPlain(item.title || item.subject)}${item.category && item.status !== "planning" ? ` *(${planningPlain(item.category)})*` : ""}`);
       }
       days.push(planningFit(lines.join("\n")));
     }
