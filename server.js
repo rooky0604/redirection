@@ -2766,7 +2766,9 @@ function readPlanning(channel) {
     // Republication quotidienne de 08:00 : jour deja traite, dernier nouveau message.
     imageRepostDay: parsed.imageRepostDay || "",
     imageNewAt: parsed.imageNewAt || 0,
-    imageError: parsed.imageError || ""
+    imageError: parsed.imageError || "",
+    // Droits des tickets recus de rooky-tv (null : pas encore recus, rooky-tv tranche seul).
+    ticketPerms: parsed.ticketPerms && Array.isArray(parsed.ticketPerms.ids) ? { ids: parsed.ticketPerms.ids.map(String), at: Number(parsed.ticketPerms.at) || 0 } : null
   };
 }
 
@@ -2910,6 +2912,13 @@ async function handlePlanningSync(req, res) {
   }
   if (body.event === "hello") {
     return sendJson(res, 200, { ok: true, channel });
+  }
+  // Droits des tickets (qui peut ouvrir et traiter les tickets, regle Discord de rooky-tv) : envoyes
+  // par rooky-tv seulement quand ils changent ; le site garde la derniere liste recue.
+  if (body.event === "ticketPerms") {
+    const ids = Array.isArray(body.ids) ? body.ids.map(String).filter((id) => /^d{5,25}$/.test(id)).slice(0, 2000) : [];
+    writePlanning({ ...doc, ticketPerms: { ids, at: Date.now() } });
+    return sendJson(res, 200, { ok: true, count: ids.length });
   }
   if (body.event !== "program") {
     return sendJson(res, 400, { error: "Evenement inconnu." });
@@ -3842,9 +3851,17 @@ const TICKET_DESK_CSS = `
 
 // Tickets en deux colonnes : la liste (Ouverts / Fermes, nouveaux messages en premier) et la
 // conversation du ticket choisi, ou « Aucun ticket ouvert ».
+// Ouvrir / traiter les tickets selon la liste gardee (envoyee par rooky-tv quand elle change) ;
+// streamer et admins toujours ; pas encore de liste : rooky-tv tranche a l'action.
+function canHandleTickets(viewer, live, doc) {
+  if (viewer.admin || viewer.password || viewer.r === "streamer" || live?.seeAll) return true;
+  const perms = readPlanning(doc.channel).ticketPerms;
+  return !perms || perms.ids.includes(String(viewer.u || ""));
+}
+
 function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
   const rights = modoRights(viewer, live);
-  const canReply = rights.tickets === "edit";
+  const canReply = rights.tickets === "edit" && canHandleTickets(viewer, live, doc);
   const tickets = Array.isArray(live.tickets) ? live.tickets : null;
   const ticket = data?.ticket || null;
   const closedTab = tab === "fermes" || (!tab && ticket && ticket.status !== "open");
@@ -4037,7 +4054,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             : ""
         }
         ${
-          canReply && (!live.ticketChannel || live.ticketChannel === doc.channel)
+          canReply && (!live.ticketChannel || live.ticketChannel === doc.channel) && canHandleTickets(viewer, live, doc)
             ? `<button type="button" class="td-new-open" id="td-new-open" style="width:100%;margin:0 0 10px;">➕ Ouvrir un ticket</button>
               <dialog class="td-calendar" id="td-new-dialog" style="width:min(480px, calc(100vw - 32px));" aria-label="Ouvrir un ticket">
                 <div class="td-calendar-head"><h2>➕ Ouvrir un ticket</h2><button type="button" id="td-new-close" aria-label="Fermer">✕</button></div>
