@@ -5148,7 +5148,8 @@ async function renderPlanningImage(doc) {
     throw new Error("La generation d'image n'est pas installee (module sharp) : redeploie le site.");
   }
   const svg = await buildPlanningSvg(doc);
-  return sharp(Buffer.from(svg)).png({ compressionLevel: 9 }).toBuffer();
+  // Double resolution (density 144 = 2x) : Discord reduit puis agrandit l'image, a 1x le texte etait pixelise.
+  return sharp(Buffer.from(svg), { density: 144 }).png({ compressionLevel: 9 }).toBuffer();
 }
 
 const planningImageThread = (url, threadId) => (threadId ? `${url}${url.includes("?") ? "&" : "?"}thread_id=${threadId}` : url);
