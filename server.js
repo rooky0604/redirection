@@ -3796,6 +3796,19 @@ const TICKET_DESK_CSS = `
   .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
   .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
   .td-calendar { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
+  .td-members { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
+  .td-members:empty { display: none; }
+  .td-member { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--ink); cursor: pointer; }
+  .td-member:hover { border-color: rgba(69, 224, 210, 0.6); }
+  .td-member.picked { border-color: #45e0d2; background: rgba(69, 224, 210, 0.08); }
+  .td-member img, .td-member-noimg { flex: none; width: 36px; height: 36px; border-radius: 50%; background: rgba(255, 255, 255, 0.1); object-fit: cover; }
+  .td-member-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+  .td-member-line { display: block; font-size: 0.92rem; overflow-wrap: anywhere; }
+  .td-member-line b { color: #8ea2ff; }
+  .td-member-line b.tw { color: #b58cff; }
+  .td-member-line i { opacity: 0.6; }
+  .td-member-x { flex: none; opacity: 0.7; }
+  .td-members-empty { margin: 0; opacity: 0.7; font-size: 0.9rem; }
   .td-switch { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
   .td-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .td-switch-track { flex: none; position: relative; width: 40px; height: 22px; margin-top: 1px; border-radius: 999px; background: rgba(255, 255, 255, 0.16); border: 1px solid var(--line); transition: background 0.18s ease; }
@@ -4034,10 +4047,9 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                     <span class="td-switch-track" aria-hidden="true"></span>
                     <span><strong>Ticket classique (salon Discord)</strong><small>Éteint : ticket en MP avec le bot (1 membre, tu réponds ici). Allumé : salon sur le serveur, plusieurs membres possibles.</small></span>
                   </label>
-                  <input type="text" name="membre" id="td-new-member" list="td-new-members" autocomplete="off" placeholder="Pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
-                  <datalist id="td-new-members"></datalist>
-                  <div id="td-new-chips" style="display:none;flex-wrap:wrap;gap:6px;"></div>
-                  <button type="button" id="td-new-add" style="display:none;">+ Ajouter ce membre</button>
+                  <input type="text" name="membre" id="td-new-member" autocomplete="off" placeholder="Rechercher un membre : pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
+                  <div id="td-new-results" class="td-members" role="listbox" aria-label="Membres trouvés"></div>
+                  <div id="td-new-chips" class="td-members"></div>
                   <input type="hidden" name="userId" id="td-new-id" />
                   <input type="hidden" name="userIds" id="td-new-ids" />
                   <input type="text" name="motif" maxlength="120" placeholder="Motif (facultatif)" aria-label="Motif du ticket" />
@@ -4053,60 +4065,70 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                   dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
                   const form = document.getElementById("td-new-form");
                   const input = document.getElementById("td-new-member");
-                  const list = document.getElementById("td-new-members");
+                  const results = document.getElementById("td-new-results");
                   const hidden = document.getElementById("td-new-id");
                   const idsField = document.getElementById("td-new-ids");
                   const chips = document.getElementById("td-new-chips");
-                  const add = document.getElementById("td-new-add");
                   const submit = document.getElementById("td-new-submit");
                   const hint = document.getElementById("td-new-hint");
-                  if (!form || !input || !list || !hidden) return;
+                  if (!form || !input || !results || !hidden) return;
                   let timer = null;
-                  let found = [];
+                  let selected = null;
                   const picked = new Map();
-                  const label = (m) => "Discord : " + m.name + " (@" + m.username + ") — " + m.id + " · Twitch : " + (m.twitch ? m.twitch.login + (m.twitch.id ? " — " + m.twitch.id : "") : "non lié");
                   const isId = (v) => v.length >= 15 && v.length <= 25 && [...v].every((c) => c >= "0" && c <= "9");
                   const salon = () => (form.querySelector("input[name=mode]:checked") || {}).value === "salon";
+                  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+                  // Carte d'un membre : une ligne Discord, une ligne Twitch (noms et ID).
+                  const card = (m, onClick, removable) => {
+                    const b = el("button", "td-member" + (removable ? " picked" : ""));
+                    b.type = "button";
+                    if (m.avatar) { const img = el("img"); img.src = m.avatar; img.alt = ""; img.referrerPolicy = "no-referrer"; b.append(img); } else b.append(el("span", "td-member-noimg"));
+                    const text = el("span", "td-member-text");
+                    const d = el("span", "td-member-line");
+                    d.append(el("b", "", "Discord :"), document.createTextNode(" " + (m.name || m.id) + (m.username && m.username !== m.name ? " (@" + m.username + ")" : "") + " - " + m.id));
+                    const t = el("span", "td-member-line");
+                    t.append(el("b", "tw", "Twitch :"), m.twitch
+                      ? document.createTextNode(" " + (m.twitch.name || m.twitch.login) + (m.twitch.id ? " - " + m.twitch.id : ""))
+                      : el("i", "", " non lié"));
+                    text.append(d, t);
+                    b.append(text);
+                    if (removable) b.append(el("span", "td-member-x", "✕"));
+                    b.addEventListener("click", onClick);
+                    return b;
+                  };
                   const sync = () => {
                     const isSalon = salon();
-                    add.style.display = isSalon ? "" : "none";
-                    chips.style.display = isSalon && picked.size ? "flex" : "none";
                     submit.textContent = isSalon ? "Créer le salon de ticket sur Discord" : "Ouvrir le ticket en MP";
-                    hint.textContent = isSalon ? "Ajoute un ou plusieurs membres : ils sont mentionnés dans un nouveau salon de ticket sur le serveur." : "Le membre reçoit un MP du bot ; tu lui réponds ici.";
+                    hint.textContent = isSalon ? "Clique sur un ou plusieurs membres : ils sont mentionnés dans un nouveau salon de ticket sur le serveur." : "Le membre reçoit un MP du bot ; tu lui réponds ici.";
+                    if (!isSalon && picked.size && !selected) selected = [...picked.values()][0];
+                    const shown = isSalon ? [...picked.values()] : selected ? [selected] : [];
                     idsField.value = isSalon ? [...picked.keys()].join(",") : "";
-                    chips.replaceChildren(...[...picked.values()].map((m) => {
-                      const chip = document.createElement("button");
-                      chip.type = "button";
-                      chip.textContent = m.name + " ✕";
-                      chip.title = "Retirer";
-                      chip.addEventListener("click", () => { picked.delete(m.id); sync(); });
-                      return chip;
-                    }));
+                    hidden.value = !isSalon && selected ? selected.id : "";
+                    chips.replaceChildren(...shown.map((m) => card(m, () => { picked.delete(m.id); if (selected && selected.id === m.id) selected = null; sync(); }, true)));
                   };
-                  const current = () => found.find((m) => label(m) === input.value) || (isId(input.value.trim()) ? { id: input.value.trim(), name: input.value.trim(), username: "" } : null);
-                  add.addEventListener("click", () => {
-                    const m = current();
-                    if (!m) { input.focus(); return; }
-                    picked.set(m.id, m);
-                    input.value = ""; hidden.value = "";
+                  const choose = (m) => {
+                    if (salon()) picked.set(m.id, m);
+                    else { selected = m; picked.clear(); picked.set(m.id, m); }
+                    input.value = "";
+                    results.replaceChildren();
+                    sync();
+                  };
+                  form.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => { if (!salon() && picked.size > 1) { selected = [...picked.values()][0]; } sync(); }));
+                  form.addEventListener("submit", () => {
+                    const v = input.value.trim();
+                    if (isId(v)) choose({ id: v, name: v, username: "" });
                     sync();
                   });
-                  form.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", sync));
-                  form.addEventListener("submit", () => {
-                    if (salon()) { const m = current(); if (m) { picked.set(m.id, m); input.value = ""; } sync(); }
-                  });
                   input.addEventListener("input", () => {
-                    const hit = found.find((m) => label(m) === input.value);
-                    hidden.value = hit ? hit.id : "";
                     clearTimeout(timer);
                     const q = input.value.trim();
-                    if (hit || q.length < 2) return;
+                    if (q.length < 2) { results.replaceChildren(); return; }
                     timer = setTimeout(async () => {
                       try {
                         const res = await fetch("/modo/tickets/membres?q=" + encodeURIComponent(q), { headers: { Accept: "application/json" } });
                         const data = await res.json();
-                        found = Array.isArray(data.members) ? data.members : [];
-                        list.replaceChildren(...found.map((m) => Object.assign(document.createElement("option"), { value: label(m) })));
+                        const found = Array.isArray(data.members) ? data.members : [];
+                        results.replaceChildren(...(found.length ? found.map((m) => card(m, () => choose(m), false)) : [el("p", "td-members-empty", data.error || "Aucun membre trouvé.")]));
                       } catch {}
                     }, 250);
                   });
