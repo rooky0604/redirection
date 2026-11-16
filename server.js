@@ -5318,7 +5318,7 @@ function planningWeekMessages(program) {
 // d'effacer les anciens (un envoi refuse ne laisse jamais le salon vide) ; "update" : modifie les
 // messages sur place sans notification. Nombre de streams change ou message supprime a la main :
 // la serie est reposte (sans mention) pour garder l'ordre (jours, puis photo en bas).
-async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
+async function publishPlanningImage(doc, { mode = "update", ping = "", allowNew = true } = {}) {
   if (!doc.imageWebhookUrl) {
     throw new Error("Renseigne d'abord le webhook du salon.");
   }
@@ -5376,6 +5376,12 @@ async function publishPlanningImage(doc, { mode = "update", ping = "" } = {}) {
         throw planningImageError(res, data);
       }
     }
+  }
+
+  // Pas modifiable sur place (nombre de streams change, ex. au passage de minuit) et nouvelle serie
+  // pas permise maintenant : on attend (la republication de 08:00 la poste).
+  if (!allowNew && oldPhoto) {
+    return { deferred: true };
   }
 
   // Nouvelle serie : jours dans l'ordre, puis la photo ; salon forum : le 1er message ouvre le post.
@@ -5459,7 +5465,14 @@ function queuePlanningImage(mode = "auto", options = {}) {
         return null;
       }
       const fresh = mode === "new" || renamed;
-      const result = await publishPlanningImage(doc, { mode: fresh ? "new" : "update", ping: mode === "new" ? options.ping : "" });
+      // Mise a jour automatique avant 08:00 (Paris) : jamais de nouveau message dans le salon (pas de
+      // republication a minuit) ; si elle ne peut pas se faire sur place, elle attend 08:00.
+      const parisHour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", hour: "2-digit", hourCycle: "h23" }).formatToParts(new Date()).find((x) => x.type === "hour").value);
+      const allowNew = mode !== "auto" || parisHour >= 8;
+      const result = await publishPlanningImage(doc, { mode: fresh ? "new" : "update", ping: mode === "new" ? options.ping : "", allowNew });
+      if (result.deferred) {
+        return null;
+      }
       writePlanning({
         ...readPlanning(channel),
         imageWebhookName: webhookName,
