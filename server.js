@@ -188,6 +188,42 @@ const requestListener = async (req, res) => {
         return renderModoTickets(res, doc, viewer, live, flash, url.searchParams.get("vue") || "");
       }
 
+      // Ouvrir un ticket avec un membre : recherche dans les membres du serveur Discord (pseudo ou ID).
+      if (pathname === "/modo/tickets/membres" && method === "GET") {
+        try {
+          const { members } = await modoApi(doc, viewer, "ticket.members", { query: String(url.searchParams.get("q") || "").slice(0, 60) });
+          return sendJson(res, 200, { members: Array.isArray(members) ? members : [] });
+        } catch (error) {
+          return sendJson(res, 502, { error: error.message });
+        }
+      }
+      if (pathname === "/modo/tickets/ouvrir" && method === "POST") {
+        const form = Object.fromEntries((await parseFormParams(req)).entries());
+        const typed = String(form.membre || "").trim();
+        const reason = String(form.motif || "").trim().slice(0, 120);
+        try {
+          // Membre choisi dans la liste (« Pseudo — 1234… ») ou ID colle ; sinon recherche du pseudo.
+          let userId = /^\d{15,25}$/.test(String(form.userId || "")) ? String(form.userId) : (/(\d{15,25})\s*\)?\s*$/.exec(typed) || [])[1] || "";
+          if (!userId) {
+            if (!typed) throw new Error("Indique le membre (pseudo Discord ou ID).");
+            const { members = [] } = await modoApi(doc, viewer, "ticket.members", { query: typed });
+            const exact = members.filter((m) => [m.name, m.username].some((n) => String(n || "").toLowerCase() === typed.toLowerCase()));
+            const pick = exact.length === 1 ? exact[0] : members.length === 1 ? members[0] : null;
+            if (!pick) {
+              throw new Error(members.length
+                ? `Plusieurs membres correspondent a « ${typed} » : ${members.slice(0, 5).map((m) => `${m.name} (@${m.username})`).join(", ")}. Choisis-le dans la liste.`
+                : `Aucun membre du serveur ne correspond a « ${typed} ».`);
+            }
+            userId = pick.id;
+          }
+          const opened = await modoApi(doc, viewer, "ticket.open", { userId, reason });
+          redirect(res, `/modo/tickets/${Number(opened.id)}?success=${encodeURIComponent("Ticket ouvert : le membre a recu le MP du bot")}`);
+        } catch (error) {
+          redirect(res, `/modo/tickets?error=${encodeURIComponent(error.message)}`);
+        }
+        return;
+      }
+
       // Etat en direct du ticket (toutes les 3 s depuis sa page) : le membre ecrit-il, nouveaux messages ;
       // typing = le modo tape sa reponse (le membre le voit dans son MP).
       const liveMatch = /^\/modo\/tickets\/(\d{1,12})\/live$/.exec(pathname);
@@ -3957,6 +3993,47 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                   .map((c) => `<option value="${escapeHtml(c.channel)}"${live.ticketChannel === c.channel ? " selected" : ""}>#${escapeHtml(c.channel)}${c.open ? ` (${Number(c.open)})` : ""}</option>`)
                   .join("")}
               </select><noscript><button type="submit">OK</button></noscript></form>`
+            : ""
+        }
+        ${
+          canReply && (!live.ticketChannel || live.ticketChannel === doc.channel)
+            ? `<details class="td-new" style="margin:0 0 10px;">
+                <summary style="cursor:pointer;font-weight:600;padding:6px 2px;">➕ Ouvrir un ticket</summary>
+                <form method="post" action="/modo/tickets/ouvrir" style="display:grid;gap:8px;margin-top:8px;">
+                  <input type="text" name="membre" id="td-new-member" list="td-new-members" autocomplete="off" required placeholder="Pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
+                  <datalist id="td-new-members"></datalist>
+                  <input type="hidden" name="userId" id="td-new-id" />
+                  <input type="text" name="motif" maxlength="120" placeholder="Motif (facultatif)" aria-label="Motif du ticket" />
+                  <button type="submit">Ouvrir le ticket en MP</button>
+                  <small style="opacity:.7;">Le membre recoit un MP du bot ; tu lui reponds ici.</small>
+                </form>
+              </details>
+              <script>
+                (() => {
+                  const input = document.getElementById("td-new-member");
+                  const list = document.getElementById("td-new-members");
+                  const hidden = document.getElementById("td-new-id");
+                  if (!input || !list || !hidden) return;
+                  let timer = null;
+                  let found = [];
+                  const label = (m) => m.name + " (@" + m.username + ") — " + m.id;
+                  input.addEventListener("input", () => {
+                    const hit = found.find((m) => label(m) === input.value);
+                    hidden.value = hit ? hit.id : "";
+                    clearTimeout(timer);
+                    const q = input.value.trim();
+                    if (hit || q.length < 2) return;
+                    timer = setTimeout(async () => {
+                      try {
+                        const res = await fetch("/modo/tickets/membres?q=" + encodeURIComponent(q), { headers: { Accept: "application/json" } });
+                        const data = await res.json();
+                        found = Array.isArray(data.members) ? data.members : [];
+                        list.replaceChildren(...found.map((m) => Object.assign(document.createElement("option"), { value: label(m) })));
+                      } catch {}
+                    }, 250);
+                  });
+                })();
+              </script>`
             : ""
         }
         <nav class="td-tabs"><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=ouverts" class="${closedTab ? "" : "on"}">Ouverts${open.length ? ` (${open.length})` : ""}</a><a href="/modo/tickets${ticket ? `/${ticket.id}` : ""}?vue=fermes" class="${closedTab ? "on" : ""}">Fermes</a></nav>
