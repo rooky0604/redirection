@@ -4949,9 +4949,16 @@ async function buildPlanningSvg(doc) {
   const thumbUrls = [...new Set(week.days.flatMap((day) => (day.streams || []).flatMap((s) => (s.items || []).map((i) => i.thumbnail))).filter(Boolean))];
   const thumbResults = await Promise.all(thumbUrls.map((url) => imageThumb(url)));
   planningThumbsMissing = thumbResults.some((data) => !data);
-  const { width, pad, gap } = IMG;
-  const colW = (width - pad * 2 - gap * 6) / 7;
-  const inner = colW - 28;
+  // Meme affichage que la page /planning : un jour par ligne, le jour a gauche, les streams a droite
+  // et les titres sur plusieurs colonnes.
+  const { width, pad } = IMG;
+  const rowGap = 10;
+  const labelW = 200;
+  const contentX = pad + 20 + labelW;
+  const inner = width - pad - 24 - contentX;
+  const itemCols = 3;
+  const itemGap = 22;
+  const itemW = (inner - itemGap * (itemCols - 1)) / itemCols;
   const out = [];
   let defs = "";
   let clipId = 0;
@@ -4982,129 +4989,141 @@ async function buildPlanningSvg(doc) {
   }
   const gridTop = y;
 
-  // Colonnes : contenu a des positions relatives, hauteur commune = la plus haute.
-  const columns = [];
+  // Lignes : contenu a des positions relatives (x = debut de la zone de droite).
+  const rows = [];
   for (const day of week.days) {
     const parts = [];
     let cy = 0;
-    parts.push({ y: cy + 24, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="19" font-weight="700" fill="${day.isToday ? IMG.accent : day.streams.length ? IMG.ink : IMG.muted}">${svgText(day.isToday ? "Aujourd'hui" : day.name)}</text>` });
-    parts.push({ y: cy + 44, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="13" fill="${IMG.muted}">${svgText(day.short)}</text>` });
-    cy += 60;
-    if (!day.streams.length) {
-      parts.push({ y: cy + 18, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="15" fill="${IMG.muted}" opacity="0.8">${svgText(day.emptyText)}</text>` });
-      cy += 30;
-    }
-    for (const stream of day.streams) {
+    // Lives prevus pour d'autres chaines (declaration de service, taches de l'espace modo) : pas sur
+    // le planning public, seulement ici.
+    const services = (program?.modo?.tasks || []).filter((t) => t.service && t.date === day.date && !t.late);
+    for (const [si, stream] of day.streams.entries()) {
+      if (si > 0) {
+        parts.push({ y: cy, svg: (ox, oy) => `<line x1="${ox}" y1="${oy}" x2="${ox + inner}" y2="${oy}" stroke="${IMG.line}"/>` });
+        cy += 16;
+      }
       const timeText = stream.time ? planningHour(stream.time) : "Heure a venir";
       const timeColor = day.isPast || stream.cancelled ? IMG.muted : IMG.cyan;
-      parts.push({
-        y: cy + 30,
-        svg: (ox, oy) =>
-          `<text x="${ox}" y="${oy}" font-size="30" font-weight="700" fill="${timeColor}">${svgText(timeText)}</text>` +
-          (stream.cancelled ? `<line x1="${ox}" y1="${oy - 10}" x2="${ox + timeText.length * 18}" y2="${oy - 10}" stroke="${IMG.danger}" stroke-width="3"/>` : "")
-      });
-      cy += 42;
+      const timeW = timeText.length * 22;
       const pills = [];
       if (day.isToday && program?.live === true && !stream.cancelled) pills.push(["EN DIRECT", "rgba(255,107,135,0.18)", IMG.rose]);
       if (stream.cancelled) pills.push(["ANNULE", "rgba(240,85,95,0.18)", IMG.danger]);
       if (stream.past && !stream.cancelled) pills.push(["TERMINE", "rgba(255,255,255,0.08)", IMG.muted]);
       if (stream.postponed) pills.push(["REPORTE", "rgba(255,255,255,0.08)", IMG.ink]);
-      if (pills.length) {
-        parts.push({
-          y: cy,
-          svg: (ox, oy) => {
-            let px = ox;
-            return pills
-              .map(([label, fill, color]) => {
-                const pill = imagePill(px, oy, label, fill, color);
-                px += pill.width + 6;
-                return pill.svg;
-              })
-              .join("");
-          }
-        });
-        cy += 34;
-      }
+      parts.push({
+        y: cy + 32,
+        svg: (ox, oy) => {
+          let px = ox + timeW + 16;
+          const pillsSvg = pills
+            .map(([label, fill, color]) => {
+              const pill = imagePill(px, oy - 21, label, fill, color);
+              px += pill.width + 6;
+              return pill.svg;
+            })
+            .join("");
+          return (
+            `<text x="${ox}" y="${oy}" font-size="32" font-weight="700" fill="${timeColor}">${svgText(timeText)}</text>` +
+            (stream.cancelled ? `<line x1="${ox}" y1="${oy - 11}" x2="${ox + timeW}" y2="${oy - 11}" stroke="${IMG.danger}" stroke-width="3"/>` : "") +
+            pillsSvg
+          );
+        }
+      });
+      cy += 44;
       if (stream.description && !stream.cancelled) {
-        const lines = imageWrap(stream.description, inner, 14, 3);
-        lines.forEach((line, i) => parts.push({ y: cy + 15 + i * 19, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" fill="${IMG.ink}">${svgText(line)}</text>` }));
-        cy += lines.length * 19 + 10;
+        const lines = imageWrap(stream.description, inner, 15, 3);
+        lines.forEach((line, i) => parts.push({ y: cy + 16 + i * 21, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="15" fill="${IMG.ink}">${svgText(line)}</text>` }));
+        cy += lines.length * 21 + 10;
       }
       if (!stream.cancelled) {
         if (!stream.items.length && !stream.past) {
-          parts.push({ y: cy + 15, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" font-style="italic" fill="${IMG.muted}">Programme bientot annonce</text>` });
-          cy += 26;
+          parts.push({ y: cy + 16, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="15" font-style="italic" fill="${IMG.muted}">Programme bientot annonce</text>` });
+          cy += 28;
         }
+        const items = [];
         for (const item of stream.items) {
           const thumb = await imageThumb(item.thumbnail);
-          const subjectLines = imageWrap(item.subject, inner - 46, 14, 2);
+          const subjectLines = imageWrap(item.subject, itemW - 60, 15, 2);
           const meta = [item.time ? planningHour(item.time) : "", item.category].filter(Boolean).join(" · ");
-          const metaLine = imageWrap(meta, inner - 46, 12, 1)[0] || "";
-          const subjectColor = item.status === "current" ? IMG.rose : IMG.ink;
-          const faded = item.status === "done" ? ` opacity="0.55"` : "";
-          const id = `c${clipId++}`;
+          const metaLine = imageWrap(meta, itemW - 60, 13, 1)[0] || "";
           const current = item.status === "current";
-          const blockH = Math.max(48, subjectLines.length * 18 + (metaLine ? 18 : 0) + (current ? 17 : 0) + 4);
-          parts.push({
-            y: cy,
-            svg: (ox, oy) => {
-              defs += `<clipPath id="${id}"><rect x="${ox}" y="${oy}" width="36" height="48" rx="5"/></clipPath>`;
-              const image = thumb
-                ? `<image href="${thumb}" x="${ox}" y="${oy}" width="36" height="48" preserveAspectRatio="xMidYMid slice" clip-path="url(#${id})"/>`
-                : `<rect x="${ox}" y="${oy}" width="36" height="48" rx="5" fill="rgba(255,255,255,0.06)"/>`;
-              const tx = ox + 46;
-              const subject = subjectLines
-                .map((line, i) => `<text x="${tx}" y="${oy + 15 + i * 18}" font-size="14" font-weight="700" fill="${subjectColor}">${svgText(line)}</text>`)
-                .join("");
-              const metaY = oy + 15 + subjectLines.length * 18;
-              const metaSvg = metaLine ? `<text x="${tx}" y="${metaY}" font-size="12" fill="${IMG.muted}">${svgText(metaLine)}</text>` : "";
-              const currentSvg = current
-                ? `<text x="${tx}" y="${metaY + (metaLine ? 17 : 0)}" font-size="12" font-weight="700" fill="${IMG.rose}">En cours</text>`
-                : "";
-              return `<g${faded}>${image}${subject}${metaSvg}${currentSvg}</g>`;
-            }
+          const h = Math.max(62, subjectLines.length * 20 + (metaLine ? 19 : 0) + (current ? 18 : 0) + 4);
+          items.push({ item, thumb, subjectLines, metaLine, current, h });
+        }
+        for (let r = 0; r < items.length; r += itemCols) {
+          const line = items.slice(r, r + itemCols);
+          const baseY = cy;
+          line.forEach((entry, c) => {
+            const id = `c${clipId++}`;
+            parts.push({
+              y: baseY,
+              svg: (ox, oy) => {
+                const x = ox + c * (itemW + itemGap);
+                defs += `<clipPath id="${id}"><rect x="${x}" y="${oy}" width="46" height="62" rx="6"/></clipPath>`;
+                const image = entry.thumb
+                  ? `<image href="${entry.thumb}" x="${x}" y="${oy}" width="46" height="62" preserveAspectRatio="xMidYMid slice" clip-path="url(#${id})"/>`
+                  : `<rect x="${x}" y="${oy}" width="46" height="62" rx="6" fill="rgba(255,255,255,0.06)"/>`;
+                const tx = x + 58;
+                const subjectColor = entry.current ? IMG.rose : IMG.ink;
+                const subject = entry.subjectLines
+                  .map((text, i) => `<text x="${tx}" y="${oy + 17 + i * 20}" font-size="15" font-weight="700" fill="${subjectColor}">${svgText(text)}</text>`)
+                  .join("");
+                const metaY = oy + 17 + entry.subjectLines.length * 20;
+                const metaSvg = entry.metaLine ? `<text x="${tx}" y="${metaY}" font-size="13" fill="${IMG.muted}">${svgText(entry.metaLine)}</text>` : "";
+                const currentSvg = entry.current
+                  ? `<text x="${tx}" y="${metaY + (entry.metaLine ? 18 : 0)}" font-size="13" font-weight="700" fill="${IMG.rose}">En cours</text>`
+                  : "";
+                return `<g${entry.item.status === "done" ? ` opacity="0.55"` : ""}>${image}${subject}${metaSvg}${currentSvg}</g>`;
+              }
+            });
           });
-          cy += blockH + 10;
+          cy += Math.max(...line.map((entry) => entry.h)) + 12;
         }
       }
-      cy += 8;
+      cy += 4;
     }
-    // Lives prevus pour d'autres chaines (declaration de service, taches de l'espace modo) : pas sur
-    // le planning public, seulement ici.
-    const services = (program?.modo?.tasks || []).filter((t) => t.service && t.date === day.date && !t.late);
-    if (services.length && !day.streams.length && parts.length > 2) {
-      parts.pop();
-      cy -= 30;
-    }
-    for (const service of services) {
+    for (const [si, service] of services.entries()) {
+      if (si > 0 || day.streams.length) {
+        cy += 6;
+      }
       const hours = `${planningHour(service.time)}${service.end ? ` - ${planningHour(service.end)}` : ""}`;
-      const label = imageWrap(String(service.title || `Live #${service.service}`).replace(/^\S*\s*(?=Live)/u, ""), inner, 14, 2);
+      const label = imageWrap(String(service.title || `Live #${service.service}`).replace(/^\S*\s*(?=Live)/u, ""), inner - 320, 15, 2);
       parts.push({
-        y: cy + 6,
-        svg: (ox, oy) => imagePill(ox, oy, "LIVE PRÉVU", "rgba(109,94,247,0.18)", "#b9b0ff").svg
+        y: cy + 24,
+        svg: (ox, oy) => {
+          const pill = imagePill(ox, oy - 18, "LIVE PRÉVU", "rgba(109,94,247,0.18)", "#b9b0ff");
+          const hx = ox + pill.width + 14;
+          return (
+            `${pill.svg}<text x="${hx}" y="${oy}" font-size="22" font-weight="700" fill="#b9b0ff">${svgText(hours)}</text>` +
+            label.map((text, i) => `<text x="${hx + hours.length * 13 + 18}" y="${oy - 1 + i * 19}" font-size="15" fill="${IMG.ink}">${svgText(text)}</text>`).join("")
+          );
+        }
       });
-      cy += 36;
-      parts.push({ y: cy + 20, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="20" font-weight="700" fill="#b9b0ff">${svgText(hours)}</text>` });
-      cy += 28;
-      label.forEach((line, i) => parts.push({ y: cy + 14 + i * 18, svg: (ox, oy) => `<text x="${ox}" y="${oy}" font-size="14" fill="${IMG.ink}">${svgText(line)}</text>` }));
-      cy += label.length * 18 + 12;
+      cy += 24 + Math.max(1, label.length) * 19 + 6;
     }
-    columns.push({ day, parts, height: cy });
+    const hasContent = day.streams.length > 0 || services.length > 0;
+    rows.push({ day, parts, hasContent, height: hasContent ? Math.max(84, cy + 32) : 54 });
   }
-  const colH = Math.max(220, ...columns.map((c) => c.height + 20));
-  columns.forEach((column, i) => {
-    const x = pad + i * (colW + gap);
-    const { day } = column;
-    const stroke = day.isToday ? IMG.accent : day.streams.length && !day.isPast ? "rgba(69,224,210,0.45)" : IMG.line;
+  let rowY = gridTop;
+  for (const { day, parts, hasContent, height } of rows) {
+    const stroke = day.isToday ? IMG.accent : hasContent && !day.isPast ? "rgba(69,224,210,0.45)" : IMG.line;
+    const name = svgText(day.isToday ? "Aujourd'hui" : day.name);
+    const nameColor = day.isToday ? IMG.accent : hasContent ? IMG.ink : IMG.muted;
+    const label = hasContent
+      ? `<text x="${pad + 22}" y="${rowY + 44}" font-size="23" font-weight="700" fill="${nameColor}">${name}</text>` +
+        `<text x="${pad + 22}" y="${rowY + 68}" font-size="15" fill="${IMG.muted}">${svgText(day.short)}</text>`
+      : `<text x="${pad + 22}" y="${rowY + 34}" font-size="18" font-weight="700" fill="${nameColor}">${name}<tspan dx="12" font-size="14" font-weight="400" fill="${IMG.muted}">${svgText(day.short)}</tspan></text>` +
+        `<text x="${width - pad - 22}" y="${rowY + 33}" font-size="15" fill="${IMG.muted}" opacity="0.8" text-anchor="end">${svgText(day.emptyText)}</text>`;
     out.push(
-      `<g${day.isPast ? ` opacity="0.62"` : ""}><rect x="${x}" y="${gridTop}" width="${colW}" height="${colH}" rx="16" fill="${day.streams.length ? IMG.panel : IMG.panelSoft}" stroke="${stroke}" stroke-width="${day.isToday ? 2 : 1}"${
-        day.streams.length || day.isToday ? "" : ` stroke-dasharray="6 5"`
-      }/>${column.parts.map((part) => part.svg(x + 14, gridTop + 14 + part.y)).join("")}</g>`
+      `<g${day.isPast ? ` opacity="0.62"` : ""}><rect x="${pad}" y="${rowY}" width="${width - pad * 2}" height="${height}" rx="16" fill="${hasContent ? IMG.panel : IMG.panelSoft}" stroke="${stroke}" stroke-width="${day.isToday ? 2 : 1}"${
+        hasContent || day.isToday ? "" : ` stroke-dasharray="6 5"`
+      }/>${label}${parts.map((part) => part.svg(contentX, rowY + 16 + part.y)).join("")}</g>`
     );
-  });
+    rowY += height + rowGap;
+  }
+  const gridBottom = rowY - rowGap;
 
   // Pied
-  const footY = gridTop + colH + 34;
+  const footY = gridBottom + 34;
   const updated = doc.receivedAt
     ? `Mis a jour le ${new Date(doc.receivedAt).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short", timeZone: PLANNING_PARIS })}`
     : "";
