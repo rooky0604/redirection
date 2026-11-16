@@ -203,21 +203,39 @@ const requestListener = async (req, res) => {
         const reason = String(form.motif || "").trim().slice(0, 120);
         try {
           // Membre choisi dans la liste (« Pseudo — 1234… ») ou ID colle ; sinon recherche du pseudo.
-          let userId = /^\d{15,25}$/.test(String(form.userId || "")) ? String(form.userId) : (/(\d{15,25})\s*\)?\s*$/.exec(typed) || [])[1] || "";
-          if (!userId) {
-            if (!typed) throw new Error("Indique le membre (pseudo Discord ou ID).");
-            const { members = [] } = await modoApi(doc, viewer, "ticket.members", { query: typed });
-            const exact = members.filter((m) => [m.name, m.username].some((n) => String(n || "").toLowerCase() === typed.toLowerCase()));
+          const resolve = async (text) => {
+            const value = String(text || "").trim();
+            const id = (/(\d{15,25})\s*\)?\s*$/.exec(value) || [])[1];
+            if (id) return id;
+            if (!value) return "";
+            const { members = [] } = await modoApi(doc, viewer, "ticket.members", { query: value });
+            const exact = members.filter((m) => [m.name, m.username].some((n) => String(n || "").toLowerCase() === value.toLowerCase()));
             const pick = exact.length === 1 ? exact[0] : members.length === 1 ? members[0] : null;
             if (!pick) {
               throw new Error(members.length
-                ? `Plusieurs membres correspondent a « ${typed} » : ${members.slice(0, 5).map((m) => `${m.name} (@${m.username})`).join(", ")}. Choisis-le dans la liste.`
-                : `Aucun membre du serveur ne correspond a « ${typed} ».`);
+                ? `Plusieurs membres correspondent à « ${value} » : ${members.slice(0, 5).map((m) => `${m.name} (@${m.username})`).join(", ")}. Choisis-le dans la liste.`
+                : `Aucun membre du serveur ne correspond à « ${value} ».`);
             }
-            userId = pick.id;
+            return pick.id;
+          };
+          if (form.mode === "salon") {
+            // Ticket classique : salon sur le serveur Discord, un ou plusieurs membres.
+            const ids = String(form.userIds || "").split(",").filter((id) => /^\d{15,25}$/.test(id));
+            const extra = typed ? await resolve(typed) : "";
+            if (extra) ids.push(extra);
+            const unique = [...new Set(ids)].slice(0, 10);
+            if (!unique.length) throw new Error("Ajoute au moins un membre (pseudo Discord ou ID).");
+            await modoApi(doc, viewer, "ticket.open", { mode: "salon", userIds: unique, reason });
+            redirect(res, `/modo/tickets?success=${encodeURIComponent(`Salon de ticket créé sur Discord (${unique.length} membre${unique.length > 1 ? "s" : ""} mentionné${unique.length > 1 ? "s" : ""})`)}`);
+            return;
+          }
+          let userId = /^\d{15,25}$/.test(String(form.userId || "")) ? String(form.userId) : "";
+          if (!userId) {
+            if (!typed) throw new Error("Indique le membre (pseudo Discord ou ID).");
+            userId = await resolve(typed);
           }
           const opened = await modoApi(doc, viewer, "ticket.open", { userId, reason });
-          redirect(res, `/modo/tickets/${Number(opened.id)}?success=${encodeURIComponent("Ticket ouvert : le membre a recu le MP du bot")}`);
+          redirect(res, `/modo/tickets/${Number(opened.id)}?success=${encodeURIComponent("Ticket ouvert : le membre a reçu le MP du bot")}`);
         } catch (error) {
           redirect(res, `/modo/tickets?error=${encodeURIComponent(error.message)}`);
         }
@@ -3999,24 +4017,69 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           canReply && (!live.ticketChannel || live.ticketChannel === doc.channel)
             ? `<details class="td-new" style="margin:0 0 10px;">
                 <summary style="cursor:pointer;font-weight:600;padding:6px 2px;">➕ Ouvrir un ticket</summary>
-                <form method="post" action="/modo/tickets/ouvrir" style="display:grid;gap:8px;margin-top:8px;">
-                  <input type="text" name="membre" id="td-new-member" list="td-new-members" autocomplete="off" required placeholder="Pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
+                <form method="post" action="/modo/tickets/ouvrir" id="td-new-form" style="display:grid;gap:8px;margin-top:8px;">
+                  <fieldset style="border:0;padding:0;margin:0;display:grid;gap:4px;">
+                    <legend style="font-weight:600;margin-bottom:4px;">Quel type de ticket ?</legend>
+                    <label><input type="radio" name="mode" value="mp" checked /> En MP avec le bot (1 membre, tu réponds ici)</label>
+                    <label><input type="radio" name="mode" value="salon" /> Ticket classique : salon sur Discord (plusieurs membres possibles)</label>
+                  </fieldset>
+                  <input type="text" name="membre" id="td-new-member" list="td-new-members" autocomplete="off" placeholder="Pseudo Discord ou ID" aria-label="Membre du serveur Discord" />
                   <datalist id="td-new-members"></datalist>
+                  <div id="td-new-chips" style="display:none;flex-wrap:wrap;gap:6px;"></div>
+                  <button type="button" id="td-new-add" style="display:none;">+ Ajouter ce membre</button>
                   <input type="hidden" name="userId" id="td-new-id" />
+                  <input type="hidden" name="userIds" id="td-new-ids" />
                   <input type="text" name="motif" maxlength="120" placeholder="Motif (facultatif)" aria-label="Motif du ticket" />
-                  <button type="submit">Ouvrir le ticket en MP</button>
-                  <small style="opacity:.7;">Le membre recoit un MP du bot ; tu lui reponds ici.</small>
+                  <button type="submit" id="td-new-submit">Ouvrir le ticket en MP</button>
+                  <small id="td-new-hint" style="opacity:.7;">Le membre reçoit un MP du bot ; tu lui réponds ici.</small>
                 </form>
               </details>
               <script>
                 (() => {
+                  const form = document.getElementById("td-new-form");
                   const input = document.getElementById("td-new-member");
                   const list = document.getElementById("td-new-members");
                   const hidden = document.getElementById("td-new-id");
-                  if (!input || !list || !hidden) return;
+                  const idsField = document.getElementById("td-new-ids");
+                  const chips = document.getElementById("td-new-chips");
+                  const add = document.getElementById("td-new-add");
+                  const submit = document.getElementById("td-new-submit");
+                  const hint = document.getElementById("td-new-hint");
+                  if (!form || !input || !list || !hidden) return;
                   let timer = null;
                   let found = [];
+                  const picked = new Map();
                   const label = (m) => m.name + " (@" + m.username + ") — " + m.id;
+                  const isId = (v) => v.length >= 15 && v.length <= 25 && [...v].every((c) => c >= "0" && c <= "9");
+                  const salon = () => (form.querySelector("input[name=mode]:checked") || {}).value === "salon";
+                  const sync = () => {
+                    const isSalon = salon();
+                    add.style.display = isSalon ? "" : "none";
+                    chips.style.display = isSalon && picked.size ? "flex" : "none";
+                    submit.textContent = isSalon ? "Créer le salon de ticket sur Discord" : "Ouvrir le ticket en MP";
+                    hint.textContent = isSalon ? "Ajoute un ou plusieurs membres : ils sont mentionnés dans un nouveau salon de ticket sur le serveur." : "Le membre reçoit un MP du bot ; tu lui réponds ici.";
+                    idsField.value = isSalon ? [...picked.keys()].join(",") : "";
+                    chips.replaceChildren(...[...picked.values()].map((m) => {
+                      const chip = document.createElement("button");
+                      chip.type = "button";
+                      chip.textContent = m.name + " ✕";
+                      chip.title = "Retirer";
+                      chip.addEventListener("click", () => { picked.delete(m.id); sync(); });
+                      return chip;
+                    }));
+                  };
+                  const current = () => found.find((m) => label(m) === input.value) || (isId(input.value.trim()) ? { id: input.value.trim(), name: input.value.trim(), username: "" } : null);
+                  add.addEventListener("click", () => {
+                    const m = current();
+                    if (!m) { input.focus(); return; }
+                    picked.set(m.id, m);
+                    input.value = ""; hidden.value = "";
+                    sync();
+                  });
+                  form.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", sync));
+                  form.addEventListener("submit", () => {
+                    if (salon()) { const m = current(); if (m) { picked.set(m.id, m); input.value = ""; } sync(); }
+                  });
                   input.addEventListener("input", () => {
                     const hit = found.find((m) => label(m) === input.value);
                     hidden.value = hit ? hit.id : "";
@@ -4032,6 +4095,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                       } catch {}
                     }, 250);
                   });
+                  sync();
                 })();
               </script>`
             : ""
