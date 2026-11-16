@@ -2746,7 +2746,7 @@ function cleanPlanningProgram(body) {
     category: str(item?.category, 100),
     thumbnail: httpsUrl(item?.thumbnail),
     status: ["current", "done", "planning"].includes(item?.status) ? item.status : "upcoming",
-    // Titre masque sur Discord (rooky-tv) : seulement dans l'espace modo (ni photo, ni messages, ni page /planning).
+    // Titre masque sur Discord (rooky-tv) : pas sur la page /planning ; webhook : reste, sauf un titre d'organisation.
     imageOnly: item?.imageOnly === true
   });
   const modoUrl = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)[:/])\S+$/i.test(String(body.modoUrl || "")) ? String(body.modoUrl).slice(0, 500) : "";
@@ -4716,16 +4716,20 @@ function planningImageKey(doc) {
 // Vrai si la derniere image generee n'a pas pu recuperer toutes ses jaquettes : elle sera refaite.
 let planningThumbsMissing = false;
 
+// Titre montre dans le webhook (photo et messages) : tout, sauf un titre d'organisation masque sur Discord.
+const planningWebhookItem = (item) => !(item.imageOnly && item.status === "planning");
+
 async function buildPlanningSvg(doc) {
   const program = doc.program;
   const base = planningWeek(program);
-  // Titres « Masqués sur Discord » : pas sur la photo (ni dans les messages des streams) ; ils
-  // restent dans l'espace modo du site.
+  // Webhook (photo et messages des streams) : un titre Twitch « Masqué sur Discord » y reste (le
+  // masquage ne vaut que pour « Programme du stream » de rooky-tv) ; un titre d'organisation masqué
+  // en disparait. L'espace modo montre tout.
   const week = {
     ...base,
     days: base.days.map((day) => ({
       ...day,
-      streams: day.streams.map((stream) => ({ ...stream, items: (stream.items || []).filter((item) => !item.imageOnly) }))
+      streams: day.streams.map((stream) => ({ ...stream, items: (stream.items || []).filter(planningWebhookItem) }))
     }))
   };
   // Jaquettes telechargees en parallele (le dessin les relit ensuite dans le cache).
@@ -5004,7 +5008,7 @@ function planningWeekMessages(program) {
   const days = [];
   for (const day of week.days) {
     for (const stream of day.streams) {
-      const items = (stream.items || []).filter((item) => !item.imageOnly);
+      const items = (stream.items || []).filter(planningWebhookItem);
       const types = [...new Set(items.filter((item) => item.status !== "planning").map((item) => String(item.category || "").trim()).filter(Boolean))];
       const state = stream.cancelled ? "❌ *annulé*" : stream.postponed ? "⏩ *reporté*" : day.isPast ? "✅ *terminé*" : day.isToday ? "🔴 *aujourd'hui*" : "";
       const lines = [`### ${day.name} ${day.short} — ${stream.time ? planningHour(stream.time) : "heure à venir"}`];
