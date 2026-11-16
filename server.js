@@ -205,7 +205,8 @@ const requestListener = async (req, res) => {
           // Membre choisi dans la liste (« Pseudo — 1234… ») ou ID colle ; sinon recherche du pseudo.
           const resolve = async (text) => {
             const value = String(text || "").trim();
-            const id = (/(\d{15,25})\s*\)?\s*$/.exec(value) || [])[1];
+            // ID Discord : le premier nombre de 15 a 25 chiffres (un ID Twitch en a moins).
+            const id = (/(\d{15,25})/.exec(value) || [])[1];
             if (id) return id;
             if (!value) return "";
             const { members = [] } = await modoApi(doc, viewer, "ticket.members", { query: value });
@@ -4063,7 +4064,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                   let timer = null;
                   let found = [];
                   const picked = new Map();
-                  const label = (m) => m.name + " (@" + m.username + ") — " + m.id;
+                  const label = (m) => "Discord : " + m.name + " (@" + m.username + ") — " + m.id + " · Twitch : " + (m.twitch ? m.twitch.login + (m.twitch.id ? " — " + m.twitch.id : "") : "non lié");
                   const isId = (v) => v.length >= 15 && v.length <= 25 && [...v].every((c) => c >= "0" && c <= "9");
                   const salon = () => (form.querySelector("input[name=mode]:checked") || {}).value === "salon";
                   const sync = () => {
