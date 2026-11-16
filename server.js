@@ -3167,10 +3167,28 @@ function renderPublicPlanning(res, doc) {
       }
       .pw-zoom-close:hover { background: rgba(255, 255, 255, 0.16); }
       .pw-zoom .pw-day-head { padding-right: 44px; justify-content: flex-start; gap: 12px; }
-      @media (max-width: 1100px) { .pw-week { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+      /* Comme sur mobile, un jour par ligne (plus lisible avec plusieurs titres), adapte au bureau :
+         le jour a gauche, les streams a droite et les titres sur plusieurs colonnes. */
+      .pw { max-width: 1180px; width: 100%; margin: 0 auto; }
+      .pw-week { grid-template-columns: 1fr; }
+      .pw-day { min-height: 0; }
+      .pw-day:not(.has-stream) { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; }
+      .pw-day:not(.has-stream) .pw-day-head { gap: 10px; justify-content: flex-start; }
+      @media (min-width: 761px) {
+        .pw-week .pw-day.has-stream { grid-template-columns: 150px minmax(0, 1fr); gap: 18px; padding: 16px 20px; align-items: start; }
+        .pw-week .pw-day.has-stream .pw-day-head { flex-direction: column; align-items: flex-start; gap: 2px; padding-top: 4px; }
+        .pw-week .pw-day.has-stream .pw-day-name { font-size: 1.15rem; }
+        .pw-week .pw-day.has-stream .pw-day-date { font-size: 13px; }
+        .pw-week .pw-day.has-stream > .pw-stream { grid-column: 2; }
+        .pw-week .pw-day.has-stream > .pw-stream + .pw-stream { border-top: 1px solid var(--line); padding-top: 12px; }
+        .pw-week .pw-stream { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 14px; }
+        .pw-week .pw-stream > .pw-desc, .pw-week .pw-stream > .pw-items, .pw-week .pw-stream > .pw-empty { grid-column: 1 / -1; }
+        .pw-week .pw-time { font-size: 1.6rem; }
+        .pw-week .pw-items { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 16px; }
+        .pw-week .pw-item img, .pw-week .pw-noimg { width: 46px; height: 61px; border-radius: 6px; }
+        .pw-week .pw-subject { font-size: 14px; -webkit-line-clamp: 2; }
+      }
       @media (max-width: 760px) {
-        .pw-week { grid-template-columns: 1fr; }
-        .pw-day { min-height: 0; }
         .pw-day:not(.has-stream) { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; }
         .pw-day:not(.has-stream) .pw-day-head { gap: 10px; justify-content: flex-start; }
         .pw-hero { flex-direction: column-reverse; align-items: flex-start; }
