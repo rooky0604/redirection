@@ -4956,9 +4956,9 @@ async function buildPlanningSvg(doc) {
   const labelW = 200;
   const contentX = pad + 20 + labelW;
   const inner = width - pad - 24 - contentX;
-  const itemCols = 3;
   const itemGap = 22;
-  const itemW = (inner - itemGap * (itemCols - 1)) / itemCols;
+  // Colonnes de titres selon leur nombre : 4 -> une ligne de 4, 5-6 -> 2 lignes de 3, 7 et plus -> 4 par ligne.
+  const itemColsFor = (count) => (count === 4 || count >= 7 ? 4 : 3);
   const out = [];
   let defs = "";
   let clipId = 0;
@@ -5040,9 +5040,11 @@ async function buildPlanningSvg(doc) {
           cy += 28;
         }
         const items = [];
+        const itemCols = itemColsFor(stream.items.length);
+        const itemW = (inner - itemGap * (itemCols - 1)) / itemCols;
         for (const item of stream.items) {
           const thumb = await imageThumb(item.thumbnail);
-          const subjectLines = imageWrap(item.subject, itemW - 60, 15, 2);
+          const subjectLines = imageWrap(item.subject, itemW - 60, 15, 3);
           const meta = [item.time ? planningHour(item.time) : "", item.category].filter(Boolean).join(" · ");
           const metaLine = imageWrap(meta, itemW - 60, 13, 1)[0] || "";
           const current = item.status === "current";
