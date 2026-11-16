@@ -4015,9 +4015,10 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         }
         ${
           canReply && (!live.ticketChannel || live.ticketChannel === doc.channel)
-            ? `<details class="td-new" style="margin:0 0 10px;">
-                <summary style="cursor:pointer;font-weight:600;padding:6px 2px;">➕ Ouvrir un ticket</summary>
-                <form method="post" action="/modo/tickets/ouvrir" id="td-new-form" style="display:grid;gap:8px;margin-top:8px;">
+            ? `<button type="button" class="td-new-open" id="td-new-open" style="width:100%;margin:0 0 10px;">➕ Ouvrir un ticket</button>
+              <dialog class="td-calendar" id="td-new-dialog" style="width:min(480px, calc(100vw - 32px));" aria-label="Ouvrir un ticket">
+                <div class="td-calendar-head"><h2>➕ Ouvrir un ticket</h2><button type="button" id="td-new-close" aria-label="Fermer">✕</button></div>
+                <form method="post" action="/modo/tickets/ouvrir" id="td-new-form" style="display:grid;gap:10px;">
                   <fieldset style="border:0;padding:0;margin:0;display:grid;gap:4px;">
                     <legend style="font-weight:600;margin-bottom:4px;">Quel type de ticket ?</legend>
                     <label><input type="radio" name="mode" value="mp" checked /> En MP avec le bot (1 membre, tu réponds ici)</label>
@@ -4033,9 +4034,13 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                   <button type="submit" id="td-new-submit">Ouvrir le ticket en MP</button>
                   <small id="td-new-hint" style="opacity:.7;">Le membre reçoit un MP du bot ; tu lui réponds ici.</small>
                 </form>
-              </details>
+              </dialog>
               <script>
                 (() => {
+                  const dialog = document.getElementById("td-new-dialog");
+                  document.getElementById("td-new-open")?.addEventListener("click", () => { dialog?.showModal(); document.getElementById("td-new-member")?.focus(); });
+                  document.getElementById("td-new-close")?.addEventListener("click", () => dialog?.close());
+                  dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
                   const form = document.getElementById("td-new-form");
                   const input = document.getElementById("td-new-member");
                   const list = document.getElementById("td-new-members");
