@@ -3775,7 +3775,7 @@ const TICKET_DESK_CSS = `
   .cm-anon input { width: 16px; height: 16px; margin: 0; }
   .cm-anon small { opacity: .8; }
   .cm-actions { display: flex; gap: 8px; }
-  .td-typing { display: flex; gap: 8px; align-items: center; font-size: 13px; color: #c9bcff; padding: 8px 18px; background: rgba(124, 92, 255, 0.08); border-bottom: 1px solid var(--line); }
+  .td-typing { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); padding: 6px 18px 8px; }
   .td-typing[hidden] { display: none; }
   .td-dots { display: inline-flex; gap: 3px; }
   .td-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: td-blink 1.2s infinite ease-in-out; }
@@ -4014,7 +4014,6 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           <form method="post" class="td-status-form">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>
         </div>` : ""}
       </header>
-      <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
       ${banForm}
       ${canReply && flash?.exported ? `<dialog class="td-export-dialog" id="td-export-dialog" open>
         <button type="button" class="td-export-x" aria-label="Annuler" title="Annuler" onclick="this.closest('dialog').close()">\u2715</button>
@@ -4036,6 +4035,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
       <div class="td-toast" id="td-toast" hidden></div>
       <p class="td-livewarn" id="td-livewarn" hidden></p>
       <button type="button" class="td-new" id="td-new" hidden>Nouveau message — afficher</button>
+      <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
       ${
         canReply
           ? ticket.status === "open"
