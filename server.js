@@ -4352,7 +4352,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           } catch {}
           busy = false;
         };
-        setInterval(tick, 3000);
+        setInterval(tick, 1000);
         tick();
       })();
     </script>`;
