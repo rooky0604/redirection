@@ -263,7 +263,12 @@ const requestListener = async (req, res) => {
           logTicketLive(ticketId, `membre ${state.memberTyping ? "en train d'ecrire" : "n'ecrit pas"}`, state.memberTyping ? "typing" : "idle");
           logTicketDiag(ticketId, state.diag);
           if (body.typing === true) logTicketLive(ticketId, `${viewer.n || "modo"} tape une reponse (signal envoye au MP)`, `mod:${Math.floor(Date.now() / 30000)}`);
-          return sendJson(res, 200, { memberTyping: !!state.memberTyping, lastId: Number(state.lastId) || 0, status: state.status });
+          return sendJson(res, 200, {
+            memberTyping: !!state.memberTyping,
+            lastId: Number(state.lastId) || 0,
+            status: state.status,
+            typingDiag: state.diag || null,
+          });
         } catch (error) {
           logTicketLive(ticketId, `ERREUR suivi en direct : ${error.message}`, `err:${error.message}:${Math.floor(Date.now() / 60000)}`);
           return sendJson(res, 502, { error: error.message });
@@ -4346,9 +4351,28 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               warn.textContent = "Suivi en direct indisponible (en train d'ecrire, nouveaux messages)" + (err.error ? " : " + err.error : "") + ".";
               warn.hidden = false;
             } else {
-              warn.hidden = true;
               const state = await res.json();
               typingBox.hidden = !state.memberTyping;
+              const diag = state.typingDiag;
+              const relevantBots = Array.isArray(diag?.bots)
+                ? diag.bots.filter((bot) => !diag.botScope || bot.scope === diag.botScope)
+                : [];
+              const readyBots = relevantBots.filter((bot) => bot.readyAt);
+              const intentBots = readyBots.filter((bot) => bot.intentOn === true);
+              const dmSeenWithoutTyping = intentBots.some((bot) => bot.lastDmMessageAt)
+                && !intentBots.some((bot) => bot.lastTypingAt);
+              if (!readyBots.length) {
+                warn.textContent = "Detection de frappe indisponible : le bot du ticket n'a pas encore confirme son redemarrage.";
+                warn.hidden = false;
+              } else if (!intentBots.length) {
+                warn.textContent = "Detection de frappe indisponible : l'intent Discord des messages prives n'est pas actif sur le bot.";
+                warn.hidden = false;
+              } else if (dmSeenWithoutTyping) {
+                warn.textContent = "Le bot recoit les MP, mais Discord ne lui transmet aucun signal de frappe pour le moment.";
+                warn.hidden = false;
+              } else {
+                warn.hidden = true;
+              }
               if (state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status) await refresh();
             }
           } catch {}
