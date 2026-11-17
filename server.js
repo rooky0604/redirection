@@ -267,7 +267,6 @@ const requestListener = async (req, res) => {
             memberTyping: !!state.memberTyping,
             lastId: Number(state.lastId) || 0,
             status: state.status,
-            typingDiag: state.diag || null,
           });
         } catch (error) {
           logTicketLive(ticketId, `ERREUR suivi en direct : ${error.message}`, `err:${error.message}:${Math.floor(Date.now() / 60000)}`);
@@ -4353,26 +4352,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             } else {
               const state = await res.json();
               typingBox.hidden = !state.memberTyping;
-              const diag = state.typingDiag;
-              const relevantBots = Array.isArray(diag?.bots)
-                ? diag.bots.filter((bot) => !diag.botScope || bot.scope === diag.botScope)
-                : [];
-              const readyBots = relevantBots.filter((bot) => bot.readyAt);
-              const intentBots = readyBots.filter((bot) => bot.intentOn === true);
-              const dmSeenWithoutTyping = intentBots.some((bot) => bot.lastDmMessageAt)
-                && !intentBots.some((bot) => bot.lastTypingAt);
-              if (!readyBots.length) {
-                warn.textContent = "Detection de frappe indisponible : le bot du ticket n'a pas encore confirme son redemarrage.";
-                warn.hidden = false;
-              } else if (!intentBots.length) {
-                warn.textContent = "Detection de frappe indisponible : l'intent Discord des messages prives n'est pas actif sur le bot.";
-                warn.hidden = false;
-              } else if (dmSeenWithoutTyping) {
-                warn.textContent = "Le bot recoit les MP, mais Discord ne lui transmet aucun signal de frappe pour le moment.";
-                warn.hidden = false;
-              } else {
-                warn.hidden = true;
-              }
+              warn.hidden = true;
               if (state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status) await refresh();
             }
           } catch {}
