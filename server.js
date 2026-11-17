@@ -3775,7 +3775,7 @@ const TICKET_DESK_CSS = `
   .cm-anon input { width: 16px; height: 16px; margin: 0; }
   .cm-anon small { opacity: .8; }
   .cm-actions { display: flex; gap: 8px; }
-  .td-typing { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); padding: 0 18px 8px; }
+  .td-typing { display: flex; gap: 8px; align-items: center; font-size: 13px; color: #c9bcff; padding: 8px 18px; background: rgba(124, 92, 255, 0.08); border-bottom: 1px solid var(--line); }
   .td-typing[hidden] { display: none; }
   .td-dots { display: inline-flex; gap: 3px; }
   .td-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: td-blink 1.2s infinite ease-in-out; }
@@ -3981,15 +3981,16 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         })${ticket.ban.reason ? ` : ${escapeHtml(ticket.ban.reason)}` : ""}</div>`
       : "";
     const banForm = canReply && !ticket.ban
-      ? `<details class="md-form">
-          <summary>🚫 Bannir des tickets</summary>
-          <form method="post" class="mt-reply" style="margin-top:8px;">
+      ? `<dialog class="td-export-dialog" id="td-ban-dialog">
+          <button type="button" class="td-export-x" aria-label="Annuler" title="Annuler" onclick="this.closest('dialog').close()">✕</button>
+          <h2>🚫 Bannir des tickets</h2>
+          <form method="post" class="mt-reply">
             <input type="text" name="reason" maxlength="500" placeholder="Motif (obligatoire)" required />
             <input type="text" name="duration" maxlength="12" placeholder="Duree : 30m, 12h, 7j, 2sem — vide = definitif" />
             <p class="md-hint">Inscrit au casier du membre, comme le ban tickets des salons Discord : il ne pourra plus ouvrir de ticket, ni en salon ni en MP. Le ticket est ferme.</p>
-            <div class="mt-actions"><button type="submit" name="action" value="ban" class="danger">Bannir des tickets</button></div>
+            <div class="mt-actions"><button type="button" class="secondary" onclick="this.closest('dialog').close()">Annuler</button><button type="submit" name="action" value="ban" class="danger">Confirmer le bannissement</button></div>
           </form>
-        </details>`
+        </dialog>`
       : "";
     pane = `
       <header class="td-head">
@@ -4009,9 +4010,12 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             <button type="submit" name="action" value="category" class="secondary">Changer</button>
           </form>
           <form method="post" class="td-export-form"><button type="submit" name="action" value="export" class="secondary" title="Transcript PDF dans le salon des logs tickets">\ud83d\udcc4 Exporter</button></form>
+          ${!ticket.ban ? `<button type="button" class="danger" onclick="document.getElementById('td-ban-dialog')?.showModal()">🚫 Bannir</button>` : ""}
           <form method="post" class="td-status-form">${ticket.status === "open" ? `<button type="submit" name="action" value="close" class="secondary">Fermer le ticket</button>` : `<button type="submit" name="action" value="reopen" class="secondary">Rouvrir le ticket</button>`}</form>
         </div>` : ""}
       </header>
+      <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
+      ${banForm}
       ${canReply && flash?.exported ? `<dialog class="td-export-dialog" id="td-export-dialog" open>
         <button type="button" class="td-export-x" aria-label="Annuler" title="Annuler" onclick="this.closest('dialog').close()">\u2715</button>
         <h2>\ud83d\udcc4 Ticket exporte</h2>
@@ -4028,9 +4032,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         ${data.error ? `<div class="message error">${escapeHtml(data.error)}</div>` : ""}
         ${ban}
         <div class="cm-chat">${bubbles || `<p class="md-empty">Pas encore de message.</p>`}</div>
-        ${banForm}
       </div>
-      <div class="td-typing" id="td-typing" hidden><span class="td-dots"><i></i><i></i><i></i></span><span><strong>${escapeHtml(ticket.owner)}</strong> est en train d'ecrire…</span></div>
       <div class="td-toast" id="td-toast" hidden></div>
       <p class="td-livewarn" id="td-livewarn" hidden></p>
       <button type="button" class="td-new" id="td-new" hidden>Nouveau message — afficher</button>
