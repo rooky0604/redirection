@@ -987,21 +987,22 @@ const requestListener = async (req, res) => {
 
     // Equipe : streamer + modos de la chaine (rooky-tv), leurs roles et leurs groupes locaux.
     if (pathname === "/admin/equipe" && method === "GET") {
-      if (!teamAccess(req, readPlanning(planningSiteChannel())).canView) {
+      const doc = readPlanning(planningSiteChannel());
+      const access = await teamAccessLive(req, doc);
+      if (!access.canView) {
         redirect(res, "/login");
         return;
       }
-      const doc = readPlanning(planningSiteChannel());
       const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch((error) => ({ error: error.message }));
       const session = readModoSession(req, doc.channel);
-      const canEdit = teamAccess(req, doc).canEdit || Boolean(session?.u && team.streamer?.id && String(team.streamer.id) === String(session.u));
+      const canEdit = access.canEdit || Boolean(session?.u && team.streamer?.id && String(team.streamer.id) === String(session.u));
       return renderAdminTeam(res, doc, team, getFlashMessage(url), canEdit, isAuthenticated(req) ? "admin" : "streamer");
     }
 
     if (pathname === "/admin/equipe" && method === "POST") {
       const access = await teamAccessLive(req, readPlanning(planningSiteChannel()));
       if (!access.canEdit) {
-        redirect(res, access.canView ? "/admin/equipe?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
+        redirect(res, access.canView ? "/admin/equipe?error=" + encodeURIComponent("Seuls le streamer et les moderateurs modifient les groupes locaux.") : "/login");
         return;
       }
       const params = await parseFormParams(req);
@@ -1042,7 +1043,7 @@ const requestListener = async (req, res) => {
     if (pathname === "/admin/tickets" && method === "POST") {
       const access = await teamAccessLive(req, readPlanning(planningSiteChannel()));
       if (!access.canEdit) {
-        redirect(res, access.canView ? "/admin/tickets?error=" + encodeURIComponent("Seuls le streamer et le proprietaire modifient les groupes locaux.") : "/login");
+        redirect(res, access.canView ? "/admin/tickets?error=" + encodeURIComponent("Seuls le streamer et les moderateurs modifient les groupes locaux.") : "/login");
         return;
       }
       const params = await parseFormParams(req);
@@ -4469,7 +4470,7 @@ function filterModoLive(live, viewer, doc) {
 function adminViewer(req, doc) {
   const session = readModoSession(req, doc.channel);
   if (session?.a === true) return { ...session, admin: true };
-  if (session?.r === "streamer" && !isPasswordSession(req)) return session;
+  if (session && !isPasswordSession(req)) return session;
   return { n: "Admin", r: "admin", admin: true, password: true };
 }
 
@@ -4479,12 +4480,12 @@ function isPasswordSession(req) {
   return Boolean(token && sessions.has(token));
 }
 
-// Pages Equipe et Groupes locaux : visibles par les admins et le streamer ; seuls le streamer, le
-// proprietaire de rooky-tv et la connexion par mot de passe (proprietaire du site) les modifient.
+// Pages Equipe et Groupes locaux : streamer et modos connectes par rooky-tv. Les acces permanents
+// (proprietaires) sont directs ; le statut d'un modo est revalide en direct avant chaque ecriture.
 function teamAccess(req, doc) {
   const session = readModoSession(req, doc.channel);
   const canEdit = isPasswordSession(req) || session?.r === "streamer" || session?.st === true || (session?.a === true && session?.o === true);
-  const canView = canEdit || isAuthenticated(req);
+  const canView = canEdit || isAuthenticated(req) || session?.r === "modo";
   return { canView, canEdit };
 }
 
@@ -4495,6 +4496,10 @@ async function teamAccessLive(req, doc) {
   if (access.canEdit || !access.canView) return access;
   const session = readModoSession(req, doc.channel);
   if (!session?.u) return access;
+  if (session.r === "modo") {
+    const verified = await modoApi(doc, adminViewer(req, doc), "rights").then(() => true).catch(() => false);
+    return verified ? { ...access, canEdit: true } : { canView: false, canEdit: false };
+  }
   const team = await modoApi(doc, adminViewer(req, doc), "team.list").catch(() => null);
   return team?.streamer?.id && String(team.streamer.id) === String(session.u) ? { ...access, canEdit: true } : access;
 }
@@ -4582,7 +4587,7 @@ function renderAdminTickets(res, doc, viewer, meta, flash, canEdit = true, who =
         ${summary}
         <p class="ag-hint" style="margin-top:8px;">Modos connectes (${users.length}) : ${users.length ? users.map((u) => escapeHtml(u.name || u.id)).join(", ") : "aucun pour l'instant — ils apparaissent apres leur premier « Acces modo »."}</p>
       </section>
-      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et le proprietaire modifient les groupes locaux.</div>`}
+      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et les moderateurs actuels modifient les groupes locaux.</div>`}
       <fieldset class="ag-lock"${canEdit ? "" : " disabled"}>
       ${groupCards}
       <form method="post" class="card ag-add">
@@ -4718,7 +4723,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       </div>
       ${renderMessages(flash)}
       ${team.error ? `<div class="message error">rooky-tv : ${escapeHtml(team.error)}</div>` : ""}
-      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et le proprietaire modifient les groupes locaux.</div>`}
+      ${canEdit ? "" : `<div class="message error">Lecture seule : seuls le streamer et les moderateurs actuels modifient les groupes locaux.</div>`}
       <section class="tm-cards">${cards.map((c) => `<div class="tm-card"><span class="tm-card-icon">${c.icon}</span><div><small>${escapeHtml(c.label)}</small><strong>${c.value}</strong></div></div>`).join("")}</section>
       <input type="search" class="tm-search" placeholder="Rechercher par nom ou identifiant..." aria-label="Rechercher un membre" />
       <div class="tm-wrap"><table class="tm-table">
@@ -4776,7 +4781,7 @@ function renderDocumentation(res, who, logout) {
             "<strong>Equipe</strong> : membres de la chaine (lus sur rooky-tv), leurs roles d'acces, leur derniere visite et leurs groupes locaux (+ pour en ajouter plusieurs, × pour retirer).",
             "<strong>Groupes locaux</strong> : une categorie de ticket cochee dans un groupe est reservee a ses membres ; les autres categories restent visibles par tous les modos.",
             "Un groupe peut etre lie a un role Discord : l'avoir sur le serveur suffit (verifie par rooky-tv). Le groupe ne donne aucun role.",
-            "Seuls le streamer et le proprietaire modifient les groupes ; les autres admins les voient en lecture seule."
+            "Le streamer et les moderateurs actuels peuvent modifier les groupes locaux."
           ])
         ]
       : []),
