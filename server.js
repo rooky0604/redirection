@@ -16,6 +16,7 @@ const PLANNING_DIR = path.join(STORAGE_DIR, "planning");
 // Espace modo : modos deja connectes par « Acces modo » et groupes locaux de visibilite des tickets.
 const MODO_USERS_FILE = path.join(STORAGE_DIR, "modo-users.json");
 const MODO_GROUPS_FILE = path.join(STORAGE_DIR, "modo-groups.json");
+const SITE_REQUESTS_FILE = path.join(STORAGE_DIR, "site-requests.json");
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -64,6 +65,56 @@ const requestListener = async (req, res) => {
       clearCookie(res, "session");
       clearCookie(res, "modo");
       redirect(res, "/login");
+      return;
+    }
+
+    if (pathname === "/register" && method === "GET") {
+      const code = String(url.searchParams.get("code") || "");
+      if (code) {
+        const verifyUrl = process.env.BOT_REGISTER_VERIFY_URL || "https://bot.rooky.fr/api/site-registration/verify";
+        const response = await fetch(verifyUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }), signal: AbortSignal.timeout(10000) }).catch(() => null);
+        const identity = response ? await response.json().catch(() => ({})) : {};
+        if (!response?.ok || !identity.userId || !identity.guildId) return renderRegister(res, null, null, { error: identity.error || "Liaison avec bot.rooky.fr impossible." });
+        const payload = Buffer.from(JSON.stringify({ ...identity, e: Date.now() + 30 * 24 * 60 * 60_000 })).toString("base64url");
+        setCookie(res, "site_register", signToken(payload), { httpOnly: true, secure: useSecureCookies, maxAge: 30 * 24 * 60 * 60 });
+        redirect(res, "/register");
+        return;
+      }
+      const identity = readRegisterIdentity(req);
+      return renderRegister(res, identity, identity ? findSiteRequest(identity.guildId) : null, getFlashMessage(url));
+    }
+
+    if (pathname === "/register" && method === "POST") {
+      const identity = readRegisterIdentity(req);
+      if (!identity) return redirect(res, "/register?error=" + encodeURIComponent("Relie d'abord ton compte avec bot.rooky.fr."));
+      if (identity.role !== "owner") return redirect(res, "/register?error=" + encodeURIComponent("Seul le propriétaire Discord peut envoyer ou modifier la demande."));
+      const form = await parseForm(req);
+      const siteUrl = String(form.siteUrl || "").trim().replace(/\/+$/, "");
+      if (!parseAbsoluteTarget(siteUrl)) return redirect(res, "/register?error=" + encodeURIComponent("URL du site invalide."));
+      upsertSiteRequest(identity, siteUrl);
+      redirect(res, "/register?success=" + encodeURIComponent("Demande envoyée. Elle est maintenant en attente."));
+      return;
+    }
+
+    if (pathname === "/admin/requests" && method === "GET") {
+      if (!isAuthenticated(req)) return redirect(res, "/login");
+      return renderSiteRequests(res, readSiteRequests(), getFlashMessage(url));
+    }
+
+    if (pathname === "/admin/requests" && method === "POST") {
+      if (!isAuthenticated(req)) return redirect(res, "/login");
+      const form = await parseForm(req);
+      const requests = readSiteRequests();
+      const item = requests.find((entry) => entry.id === String(form.id || ""));
+      if (!item) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Demande introuvable."));
+      const action = String(form.action || "");
+      const linkCode = String(form.linkCode || "").trim();
+      if (action === "accept" && !/^https?:\/\/.+#.{20,}$/.test(linkCode)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Colle le code de liaison complet du site déployé."));
+      item.status = action === "accept" ? "accepted" : "refused";
+      item.linkCode = action === "accept" ? linkCode : "";
+      item.decidedAt = Date.now();
+      writeSiteRequests(requests);
+      redirect(res, "/admin/requests?success=" + encodeURIComponent(action === "accept" ? "Demande acceptée." : "Demande refusée."));
       return;
     }
 
@@ -1235,6 +1286,31 @@ function ensureDataFile() {
   if (!fs.existsSync(MONITORS_FILE)) {
     fs.writeFileSync(MONITORS_FILE, JSON.stringify({ webhooks: [], bots: [] }, null, 2) + "\n", "utf8");
   }
+  if (!fs.existsSync(SITE_REQUESTS_FILE)) fs.writeFileSync(SITE_REQUESTS_FILE, "[]\n", "utf8");
+}
+
+function readSiteRequests() {
+  ensureDataFile();
+  try { const value = JSON.parse(fs.readFileSync(SITE_REQUESTS_FILE, "utf8")); return Array.isArray(value) ? value : []; } catch { return []; }
+}
+
+function writeSiteRequests(requests) { fs.writeFileSync(SITE_REQUESTS_FILE, `${JSON.stringify(requests, null, 2)}\n`, "utf8"); }
+function findSiteRequest(guildId) { return readSiteRequests().find((entry) => String(entry.guildId) === String(guildId)) || null; }
+
+function upsertSiteRequest(identity, siteUrl) {
+  if (identity.role !== "owner") return;
+  const requests = readSiteRequests();
+  let item = requests.find((entry) => String(entry.guildId) === String(identity.guildId));
+  if (!item) { item = { id: crypto.randomBytes(10).toString("hex"), guildId: String(identity.guildId), createdAt: Date.now() }; requests.push(item); }
+  Object.assign(item, { guildName: String(identity.guildName || identity.guildId).slice(0, 100), ownerId: String(identity.userId), ownerName: String(identity.displayName || "Propriétaire Discord").slice(0, 80), siteUrl, status: item.status === "accepted" ? "accepted" : "pending", updatedAt: Date.now() });
+  writeSiteRequests(requests);
+}
+
+function readRegisterIdentity(req) {
+  const signed = parseCookies(req.headers.cookie || "").site_register || "";
+  const payload = signed ? verifyToken(signed) : "";
+  if (!payload) return null;
+  try { const identity = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")); return identity?.userId && identity?.guildId && Number(identity.e) > Date.now() ? identity : null; } catch { return null; }
 }
 
 const DEFAULT_SITE_CONFIG = {
@@ -6034,6 +6110,41 @@ function renderNotFound(res, requestHost, pathname) {
   );
 }
 
+function renderRegister(res, identity, request, flash = {}) {
+  const status = request?.status || "new";
+  const isOwner = identity?.role === "owner";
+  const steps = [
+    [true, "Compte Discord lié à bot.rooky.fr"],
+    [Boolean(identity), "Propriétaire du serveur Discord vérifié"],
+    [Boolean(request), "Demande envoyée"],
+    [status === "accepted", status === "refused" ? "Demande refusée" : "Validation par Rooky"]
+  ];
+  const content = `<section class="card auth-card" style="max-width:680px">
+    <h1>Inscription du site</h1>${renderMessages(flash)}
+    ${!identity ? `<p>La liaison est réservée au propriétaire du serveur Discord.</p><a class="link-button" href="https://bot.rooky.fr/liens">Lier avec bot.rooky.fr</a>` : `
+      <p><strong>${escapeHtml(identity.guildName || identity.guildId)}</strong><br><span style="color:var(--muted)">${escapeHtml(identity.displayName || identity.userId)}</span></p>
+      <div class="card" style="padding:16px">${steps.map(([done, label]) => `<p style="margin:8px 0;color:${done ? "var(--success)" : "var(--muted)"}">${done ? "✓" : "○"} ${escapeHtml(label)}</p>`).join("")}</div>
+      ${status === "accepted" ? isOwner ? `<div class="message success">Demande acceptée. Ton code de liaison est déverrouillé.</div><label><span>Code de liaison — à garder pour toi</span><input value="${escapeHtml(request.linkCode || "")}" readonly onclick="this.select()"></label><p>Sur <strong>bot.rooky.fr</strong> : Absences &amp; programme → Programme sur Discord → Sites redirection → colle ce code puis clique sur « Relier ».</p>` : `<div class="message success">Le site a été accepté. Le code reste réservé au propriétaire Discord.</div>` : status === "pending" ? `<div class="message">La demande est en cours, veuillez patienter.</div><p>Étapes déjà terminées affichées ci-dessus.</p>` : status === "refused" ? `<div class="message error">La demande a été refusée.${isOwner ? " Tu peux corriger l’URL et la renvoyer." : ""}</div>` : !isOwner ? `<div class="message">Le propriétaire Discord n’a pas encore envoyé de demande.</div>` : ""}
+      ${isOwner && status !== "accepted" ? `<form method="post" action="/register"><label><span>URL du site à déployer</span><input type="url" name="siteUrl" value="${escapeHtml(request?.siteUrl || "")}" placeholder="https://mon-site.fr" required></label><button type="submit">${request ? "Mettre à jour la demande" : "Envoyer la demande"}</button></form>` : ""}
+    `}
+  </section>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Inscription du site", content));
+}
+
+function renderSiteRequests(res, requests, flash = {}) {
+  const cards = requests.length ? requests.slice().sort((a, b) => b.createdAt - a.createdAt).map((item) => `<section class="card">
+    <h2>${escapeHtml(item.guildName || item.guildId)}</h2>
+    <p>Propriétaire : <strong>${escapeHtml(item.ownerName || item.ownerId)}</strong> · Discord ${escapeHtml(item.ownerId)}</p>
+    <p>Site : <a href="${escapeHtml(item.siteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(item.siteUrl)}</a></p>
+    <p>Statut : <strong>${item.status === "accepted" ? "Accepté" : item.status === "refused" ? "Refusé" : "En attente"}</strong></p>
+    <form method="post" action="/admin/requests" class="form-grid"><input type="hidden" name="id" value="${escapeHtml(item.id)}"><label><span>Code de liaison du site déployé</span><input type="password" name="linkCode" placeholder="https://…/api/planning/sync#…"></label><div><button name="action" value="accept">Accepter et déverrouiller</button> <button class="secondary" name="action" value="refuse">Refuser</button></div></form>
+  </section>`).join("") : `<section class="card"><p>Aucune demande pour le moment.</p></section>`;
+  const content = `<header class="topbar"><div><h1>Demandes de sites</h1><p>Validation des propriétaires Discord et déverrouillage des codes de liaison.</p></div></header>${renderMessages(flash)}${cards}`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Demandes de sites", content, { wide: true, side: { who: "admin", active: "requests" } }));
+}
+
 function renderMessages(flash) {
   const parts = [];
   if (flash.error) {
@@ -6070,6 +6181,7 @@ function renderSideNav(side) {
   if (side.who === "admin") {
     parts.push(`<div class="side-label">Site</div>`);
     parts.push(link("redirects", "/admin", "\ud83d\udd17", "Redirections"));
+    parts.push(link("requests", "/admin/requests", "\ud83d\udce5", "Demandes de sites"));
     parts.push(link("preview", "/", "\ud83d\udc41\ufe0f", "Apercu", ` target="_blank" rel="noreferrer"`));
     parts.push(link("stats", "/admin/stats", "\ud83d\udcca", "Statistiques"));
     parts.push(link("site", "/admin/site", "\ud83c\udfa8", "Personnalisation"));
