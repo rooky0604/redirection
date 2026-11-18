@@ -3829,7 +3829,8 @@ function renderModoTicket(res, doc, viewer, live, data, flash, tab = "") {
 }
 
 const TICKET_DESK_CSS = `
-  .td { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 70vh; height: calc(100vh - 68px); height: calc(100dvh - 68px); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; background: rgba(14, 16, 23, 0.92); }
+  .app-main { margin-left: 0; }
+  .td { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 70vh; height: calc(100vh - 68px); height: calc(100dvh - 68px); border: 1px solid var(--line); border-left: 0; border-radius: 0 18px 18px 0; overflow: hidden; background: rgba(14, 16, 23, 0.92); }
   .td-list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
   .td-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 12px; padding: 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); }
   .td-tabs a { text-align: center; padding: 8px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 14px; }
@@ -3959,7 +3960,8 @@ const TICKET_DESK_CSS = `
   .td-export-dialog form { display: inline; }
   .td-export-x { position: absolute; top: 10px; right: 10px; min-width: 32px; padding: 4px 8px; background: transparent; border: 1px solid var(--line); color: var(--muted); }
   @media (max-width: 860px) {
-    .td { grid-template-columns: 1fr; height: auto; min-height: 0; }
+    .app-main { margin: 18px 16px 32px; }
+    .td { grid-template-columns: 1fr; height: auto; min-height: 0; border-left: 1px solid var(--line); border-radius: 18px; }
     .td-list { border-right: 0; }
     .td.has-ticket .td-list { display: none; }
     .td:not(.has-ticket) .td-pane { display: none; }
