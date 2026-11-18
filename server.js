@@ -4753,7 +4753,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
     .join("");
   const content = `
     <style>
-      .tm { display: grid; gap: 16px; }
+      .tm { display: grid; grid-template-rows: auto auto auto auto minmax(260px, 1fr) auto; gap: 16px; min-height: calc(100vh - 68px); }
       .tm-top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
       .tm-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
       .tm-card { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: rgba(22, 25, 34, 0.92); }
@@ -4762,9 +4762,9 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       .tm-card small { display: block; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .tm-card strong { font-size: 1.6rem; line-height: 1.1; }
       .tm-search { width: 100%; box-sizing: border-box; }
-      .tm-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+      .tm-wrap { min-height: 260px; height: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: rgba(14, 16, 23, 0.62); }
       .tm-table { width: 100%; border-collapse: collapse; min-width: 820px; }
-      .tm-table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+      .tm-table th { position: sticky; top: 0; z-index: 2; text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--line); background: #10131b; }
       .tm-table td { padding: 10px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); vertical-align: middle; font-size: 14px; }
       .tm-table tr:target td { background: rgba(124, 92, 255, 0.1); }
       .tm-name { font-weight: 600; color: #8ab4ff; }
@@ -4791,6 +4791,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       .tm-act.on { background: rgba(87, 242, 135, 0.15); color: #57f287; }
       .tm-act.mid { background: rgba(254, 231, 92, 0.12); color: #fee75c; }
       .tm-act.off { background: rgba(255, 255, 255, 0.06); color: var(--muted); }
+      @media (max-width: 860px) { .tm { min-height: calc(100vh - 92px); } }
     </style>
     <main class="tm">
       <div class="tm-top">
