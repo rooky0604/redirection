@@ -105,9 +105,22 @@ const requestListener = async (req, res) => {
       if (!isAuthenticated(req)) return redirect(res, "/login");
       const form = await parseForm(req);
       const requests = readSiteRequests();
+      const action = String(form.action || "");
+      if (action === "create") {
+        const guildId = String(form.guildId || "").trim();
+        const ownerId = String(form.ownerId || "").trim();
+        const guildName = String(form.guildName || "").trim().slice(0, 100);
+        const ownerName = String(form.ownerName || "").trim().slice(0, 80);
+        const siteUrl = String(form.siteUrl || "").trim().replace(/\/+$/, "");
+        if (!/^\d{5,25}$/.test(guildId) || !/^\d{5,25}$/.test(ownerId)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Les identifiants Discord sont invalides."));
+        if (!parseAbsoluteTarget(siteUrl)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("L'URL du site est invalide."));
+        if (requests.some((entry) => String(entry.guildId) === guildId)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Une demande existe déjà pour ce serveur Discord."));
+        requests.push({ id: crypto.randomBytes(10).toString("hex"), guildId, guildName: guildName || guildId, ownerId, ownerName: ownerName || ownerId, siteUrl, status: "pending", linkCode: "", createdAt: Date.now(), updatedAt: Date.now(), createdByAdmin: true });
+        writeSiteRequests(requests);
+        return redirect(res, "/admin/requests?success=" + encodeURIComponent("Demande créée en attente. Tu peux maintenant tester son traitement."));
+      }
       const item = requests.find((entry) => entry.id === String(form.id || ""));
       if (!item) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Demande introuvable."));
-      const action = String(form.action || "");
       const linkCode = String(form.linkCode || "").trim();
       if (action === "accept" && !/^https?:\/\/.+#.{20,}$/.test(linkCode)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Colle le code de liaison complet du site déployé."));
       item.status = action === "accept" ? "accepted" : "refused";
@@ -6145,7 +6158,18 @@ function renderSiteRequests(res, requests, flash = {}) {
     <p>Statut : <strong>${item.status === "accepted" ? "Accepté" : item.status === "refused" ? "Refusé" : "En attente"}</strong></p>
     <form method="post" action="/admin/requests" class="form-grid"><input type="hidden" name="id" value="${escapeHtml(item.id)}"><label><span>Code de liaison du site déployé</span><input type="password" name="linkCode" placeholder="https://…/api/planning/sync#…"></label><div><button name="action" value="accept">Accepter et déverrouiller</button> <button class="secondary" name="action" value="refuse">Refuser</button></div></form>
   </section>`).join("") : `<section class="card"><p>Aucune demande pour le moment.</p></section>`;
-  const content = `<header class="topbar"><div><h1>Demandes de sites</h1><p>Validation des propriétaires Discord et déverrouillage des codes de liaison.</p></div></header>${renderMessages(flash)}${cards}`;
+  const content = `<header class="topbar"><div><h1>Demandes de sites</h1><p>Validation des propriétaires Discord et déverrouillage des codes de liaison.</p></div></header>${renderMessages(flash)}
+    <details class="card"><summary style="cursor:pointer;font-weight:700;font-size:1.05rem">＋ Créer une demande pour un autre Discord</summary>
+      <form method="post" action="/admin/requests" class="form-grid" style="margin-top:18px">
+        <input type="hidden" name="action" value="create">
+        <label><span>ID du serveur Discord</span><input name="guildId" inputmode="numeric" placeholder="123456789…" required></label>
+        <label><span>Nom du serveur</span><input name="guildName" placeholder="Mon serveur"></label>
+        <label><span>ID Discord du propriétaire</span><input name="ownerId" inputmode="numeric" placeholder="123456789…" required></label>
+        <label><span>Nom du propriétaire</span><input name="ownerName" placeholder="Nom du streamer"></label>
+        <label><span>URL prévue du site</span><input type="url" name="siteUrl" placeholder="https://mon-site.fr" required></label>
+        <button type="submit">Créer la demande en attente</button>
+      </form>
+    </details>${cards}`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Demandes de sites", content, { wide: true, side: { who: "admin", active: "requests" } }));
 }
