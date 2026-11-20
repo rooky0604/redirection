@@ -2015,6 +2015,10 @@ function sendDiscordEmbed(webhookUrl, embed) {
   });
 }
 
+// Bots deja verifies depuis le demarrage du serveur : la 1re verification apres une relance de la
+// machine (reboot) envoie toujours un embed « Reboot » avec l'etat du bot, meme sans changement.
+const monitorCheckedSinceBoot = new Set();
+
 async function checkAndNotifyBot(bot, config) {
   const result = await checkBotStatus(bot.guildId, bot.botId, bot.botUsername);
   const previousStatus = bot.status || "inconnu";
@@ -2030,6 +2034,34 @@ async function checkAndNotifyBot(bot, config) {
   console.log(`[monitoring] ${label}: ${result.status} (precedent: ${previousStatus})`);
   bot.lastError = "";
   bot.lastCheckedAt = new Date().toISOString();
+
+  const bootKey = String(bot.id || bot.botId || `${bot.guildId}:${bot.botUsername || bot.name || ""}`);
+  if (!monitorCheckedSinceBoot.has(bootKey)) {
+    monitorCheckedSinceBoot.add(bootKey);
+    const webhook = getBotWebhook(config, bot);
+    if (webhook) {
+      const online = result.status === "en ligne";
+      const sendResult = await sendDiscordEmbed(webhook.url, {
+        title: `🔄 Reboot — ${label}`,
+        description: [
+          "Relance de la machine détectée : la surveillance a redémarré.",
+          online ? "Le bot est en ligne." : "Le bot est hors ligne.",
+          previousStatus !== "inconnu" && previousStatus !== result.status
+            ? `Avant la relance : ${previousStatus}.`
+            : ""
+        ].filter(Boolean).join("\n"),
+        color: online ? 0x5865f2 : 0xf0555f,
+        timestamp: new Date().toISOString()
+      });
+      if (sendResult.ok) {
+        console.log(`[monitoring] ${label}: embed reboot envoye vers "${webhook.name}"`);
+      } else {
+        console.error(`[monitoring] ${label}: echec envoi embed reboot: ${sendResult.status || ""} ${sendResult.error || ""}`);
+      }
+    }
+    bot.status = result.status;
+    return;
+  }
 
   if (result.status === previousStatus) {
     return;
