@@ -3829,11 +3829,8 @@ function modoShell(doc, viewer, inner) {
     </style>
     <main class="md">
       <section class="md-hero">
-        <div>
-          <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
-          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}.</p>
-        </div>
-
+        <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
+        <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}</p>
       </section>
       ${inner}
     </main>`;
