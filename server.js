@@ -3987,7 +3987,7 @@ const TICKET_DESK_CSS = `
   .cm-edit-row { display: flex; gap: 6px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
   .cm-edit-row small { margin-right: auto; color: var(--muted); }
   .cm-img { max-width: min(100%, 420px); max-height: 300px; border-radius: 8px; margin-top: 6px; display: block; }
-  .cm-anon { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+  .cm-anon { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); white-space: nowrap; cursor: pointer; }
   .cm-anon input { width: 16px; height: 16px; margin: 0; }
   .cm-anon small { opacity: .8; }
   .cm-actions { display: flex; gap: 8px; }
@@ -4045,6 +4045,9 @@ const TICKET_DESK_CSS = `
   .td-compose textarea:focus { outline: none; border-color: rgba(124, 92, 255, 0.7); }
   .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
   .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+  .td-compose-row .cm-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .td-compose { flex: 0 0 auto; }
+  .td-compose textarea { max-height: 30vh; }
   .td-calendar { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
   .td-members { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
   .td-members:empty { display: none; }
@@ -4275,7 +4278,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             ? `<form method="post" class="td-compose mt-reply">
                 <textarea name="content" rows="3" maxlength="3500" placeholder="Repondre a ${escapeHtml(ticket.owner)}"></textarea>
                 <div class="td-compose-row">
-                  <label class="cm-anon"><input type="checkbox" name="anonymous" value="1" /> Anonyme <small>(signe « l'equipe » au lieu de ton nom)</small></label>
+                  <label class="cm-anon" title="Signé « l'équipe » au lieu de ton nom"><input type="checkbox" name="anonymous" value="1" /> Anonyme</label>
                   <span class="cm-actions"><button type="button" class="secondary td-calendar-open">\ud83d\udcc5 Calendrier</button><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
                 </div>
               </form>`
@@ -4430,6 +4433,22 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         // Rafraichissement partiel (jamais toute la page) : la liste des tickets, le menu, la
         // conversation et l'en-tete du ticket sont remplaces sur place ; la zone de reponse et les
         // formulaires ouverts ne bougent pas. Reponse et note staff envoyees sans recharger.
+        // Page fixe (ordinateur) : la zone tickets prend exactement la hauteur restante sous le
+        // bandeau, seule la conversation defile (pas de 2e ascenseur pour toute la page).
+        const fitDesk = () => {
+          const td = document.querySelector("section.td");
+          if (!td) return;
+          if (window.matchMedia("(max-width: 860px)").matches) { td.style.height = ""; return; }
+          const top = td.getBoundingClientRect().top + window.scrollY;
+          let height = Math.max(420, window.innerHeight - top - 16);
+          td.style.height = height + "px";
+          // Marges sous la zone (bas de page) : on retire ce qui depasse encore de l'ecran.
+          const overflow = document.documentElement.scrollHeight - window.innerHeight;
+          if (overflow > 0) td.style.height = Math.max(420, height - overflow) + "px";
+          window.scrollTo(0, 0);
+        };
+        fitDesk();
+        window.addEventListener("resize", fitDesk);
         const scrollDown = () => { const b = document.getElementById("td-body"); if (b) b.scrollTop = b.scrollHeight; };
         scrollDown();
         let lastKey = 0;
