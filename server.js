@@ -372,7 +372,7 @@ const requestListener = async (req, res) => {
           }
           if (form.action === "propose") {
             // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
-            const streams = params.getAll("stream").map((key) => ({ key, end: params.get(`end_${key}`) || "" }));
+            const streams = params.getAll("stream").map((key) => ({ key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "" }));
             const custom = form.custom_date && form.custom_time ? { date: form.custom_date, time: form.custom_time, end: form.custom_end || "" } : null;
             await modoApi(doc, viewer, "ticket.propose", { id, streams, custom });
             redirect(res, `${back}?success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
@@ -3887,7 +3887,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
         <h2>\ud83d\udcc5 Creneaux <span class="md-tag${status === "chosen" ? " bad" : status === "accepted" ? " ok" : ""}">${pending.length > 1 ? `${pending.length} demandes a valider` : statusText[status] || escapeHtml(status)}</span></h2>
         ${(offer.decisions || []).length ? `<ul class="md-sugg">${offer.decisions.map((item) => `<li><span><strong>${escapeHtml(item.text)}</strong></span><span class="md-tag${item.status === "accepted" ? " ok" : " bad"}">${item.status === "accepted" ? "Accepte" : "Refuse"}</span></li>`).join("")}</ul>` : ""}
         <ul class="md-sugg">${(offer.streams || [])
-          .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.start))} \u2192 ${escapeHtml(planningHour(st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
+          .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.from || st.start))} \u2192 ${escapeHtml(planningHour(st.to || st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
           .join("")}</ul>
         ${pending.length ? `<ul class="md-sugg">${pending.map((item) => `<li class="md-offer-row"><span><strong>Demande de l'invite :</strong> ${escapeHtml(item.text)}${item.early ? " <span class=\"md-tag\">avant le debut</span>" : ""} ${stagedTag(item)}</span>${
           canDecide
@@ -3926,7 +3926,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
                   (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
                     <span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.time))}</strong>
                     <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
-                    <span class="md-slot-end">fin <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" /></span></label>`
+                    <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>`
                 )
                 .join("")
             : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
@@ -3936,7 +3936,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
           <input type="time" name="custom_time" aria-label="Debut" />
           <input type="time" name="custom_end" aria-label="Fin" />
         </div>
-        <p class="md-hint">L'invite recoit ces streams en MP avec leurs titres (sans les titres d'organisation) et choisit le titre et son heure, jusqu'a 2 h avant le debut du stream. Tu valides ensuite ici.</p>
+        <p class="md-hint">Pour chaque stream coche, choisis le creneau (de … a …) : l'invite recoit ces streams en MP avec leurs titres (sans les titres d'organisation) et ne peut choisir son heure qu'a l'interieur du creneau. Tu valides ensuite ici.</p>
         <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
       </form>
     </details>`;
@@ -5119,7 +5119,7 @@ function renderDocumentation(res, who, logout) {
       "Liste a gauche (Ouverts / Fermes, nouveaux messages en premier), conversation a droite. La page se met a jour toute seule.",
       "<strong>Fermer / Rouvrir</strong> en haut du ticket. <strong>Bannir des tickets</strong> : inscrit au casier du membre (meme ban que sur Discord) et ferme le ticket.",
       "Certaines categories peuvent etre reservees a des groupes locaux : un ticket que tu ne vois pas ne t'est pas destine.",
-      ...(lead ? ["<strong>Proposer des creneaux</strong> : tes streams de la semaine (et une autre date) ; l'invite choisit en MP le titre et son heure (jusqu'a 2 h avant le debut). <strong>Valider</strong> change le programme de ce stream sans le nom de l'invite et le previent en MP."] : [])
+      ...(lead ? ["<strong>Proposer des creneaux</strong> : tes streams de la semaine (et une autre date) ; l'invite choisit en MP le titre et son heure (dans le creneau que tu fixes). <strong>Valider</strong> change le programme de ce stream sans le nom de l'invite et le previent en MP."] : [])
     ]),
     ...(lead
       ? [
