@@ -359,6 +359,8 @@ const requestListener = async (req, res) => {
         const params = await parseFormParams(req);
         const form = Object.fromEntries(params.entries());
         const back = `/modo/tickets/${id}`;
+        // Action faite depuis un menu des creneaux : il se rouvre apres le rechargement.
+        const menuQ = form.menu === "reponses" || form.menu === "proposer" ? `menu=${form.menu}&` : "";
         try {
           // Meme regle de visibilite que l'affichage, avant toute action.
           const current = await modoApi(doc, viewer, "ticket.get", { id });
@@ -375,56 +377,56 @@ const requestListener = async (req, res) => {
             const streams = params.getAll("stream").map((key) => ({ key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "" }));
             const custom = form.custom_date && form.custom_time ? { date: form.custom_date, time: form.custom_time, end: form.custom_end || "" } : null;
             await modoApi(doc, viewer, "ticket.propose", { id, streams, custom });
-            redirect(res, `${back}?success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
             return;
           }
           if (form.action === "offer_accept" || form.action === "offer_refuse" || form.action === "offer_counter") {
             // Prepare la reponse (rien n'est envoye) ; re-cliquer le meme choix l'annule.
             const decision = form.action === "offer_accept" ? "accept" : form.action === "offer_counter" ? "counter" : "refuse";
             await modoApi(doc, viewer, "ticket.offer.decide", { id, decision, choiceId: form.choice_id || "", time: form.counter_time || "" });
-            redirect(res, `${back}?success=${encodeURIComponent("Choix note : envoie la reponse a l'invite quand tout est pret")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Choix note : envoie la reponse a l'invite quand tout est pret")}`);
             return;
           }
           if (form.action === "export") {
             await modoApi(doc, viewer, "ticket.export", { id });
-            redirect(res, `${back}?exported=1&success=${encodeURIComponent("Ticket exporte dans les logs tickets")}`);
+            redirect(res, `${back}?${menuQ}exported=1&success=${encodeURIComponent("Ticket exporte dans les logs tickets")}`);
             return;
           }
           if (form.action === "transcript_send") {
             await modoApi(doc, viewer, "ticket.transcript.send", { id });
-            redirect(res, `${back}?success=${encodeURIComponent("Transcript envoye au membre en MP")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Transcript envoye au membre en MP")}`);
             return;
           }
           if (form.action === "offer_open" || form.action === "offer_close") {
             const open = form.action === "offer_open";
             await modoApi(doc, viewer, "ticket.offer.open", { id, open });
-            redirect(res, `${back}?success=${encodeURIComponent(open ? "Creneaux ouverts : l'invite a recu les creneaux libres en MP" : "Creneaux fermes : l'invite ne peut plus en demander")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent(open ? "Creneaux ouverts : l'invite a recu les creneaux libres en MP" : "Creneaux fermes : l'invite ne peut plus en demander")}`);
             return;
           }
           if (form.action === "offer_send") {
             await modoApi(doc, viewer, "ticket.offer.send", { id });
-            redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en un seul MP a l'invite (programme modifie pour les creneaux acceptes)")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Reponse envoyee en un seul MP a l'invite (programme modifie pour les creneaux acceptes)")}`);
             return;
           }
           if (form.action === "edit_message") {
             await modoApi(doc, viewer, "ticket.message.edit", { id, messageId: Number(form.message_id) || 0, content: form.content });
-            redirect(res, `${back}?success=${encodeURIComponent("Message modifié")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Message modifié")}`);
             return;
           }
           if (form.action === "reply" || form.action === "note") {
             const note = form.action === "note";
             await modoApi(doc, viewer, "ticket.reply", { id, content: form.content, note, anonymous: !note && form.anonymous === "1" });
-            redirect(res, `${back}?success=${encodeURIComponent(note ? "Note staff ajoutee (le membre ne la voit pas)" : form.anonymous === "1" ? "Reponse anonyme envoyee en MP" : "Reponse envoyee en MP")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent(note ? "Note staff ajoutee (le membre ne la voit pas)" : form.anonymous === "1" ? "Reponse anonyme envoyee en MP" : "Reponse envoyee en MP")}`);
           } else if (form.action === "ban") {
             // Ban tickets : inscrit au casier du membre par rooky-tv (meme source que les salons ticket).
             await modoApi(doc, viewer, "ticket.ban", { id, reason: form.reason, duration: form.duration });
-            redirect(res, `${back}?success=${encodeURIComponent("Ban tickets inscrit au casier, ticket ferme")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Ban tickets inscrit au casier, ticket ferme")}`);
           } else {
             await modoApi(doc, viewer, "ticket.status", { id, status: form.action === "reopen" ? "open" : "closed" });
-            redirect(res, `${back}?success=${encodeURIComponent(form.action === "reopen" ? "Ticket rouvert" : "Ticket ferme")}`);
+            redirect(res, `${back}?${menuQ}success=${encodeURIComponent(form.action === "reopen" ? "Ticket rouvert" : "Ticket ferme")}`);
           }
         } catch (error) {
-          redirect(res, `${back}?error=${encodeURIComponent(error.message)}`);
+          redirect(res, `${back}?${menuQ}error=${encodeURIComponent(error.message)}`);
         }
         return;
       }
@@ -3762,6 +3764,19 @@ const MODO_CSS = `
   .md-form textarea { width: 100%; box-sizing: border-box; }
   .md-hint { margin: 0; font-size: 12px; color: var(--muted); }
   .md-sugg { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  /* Menu Reponses des creneaux : une ligne par creneau, etat colore a gauche, qui propose / tranche. */
+  .md-answer-h { margin: 4px 0 8px; font-size: 0.95rem; }
+  .md-answer-h:not(:first-child) { margin-top: 16px; }
+  .md-answers li.md-answer { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; flex-wrap: wrap; padding: 8px 10px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); border-left: 3px solid var(--line); }
+  .md-answers li.md-answer > span:first-child { display: grid; gap: 2px; min-width: 0; flex: 1 1 260px; }
+  .md-answers li.md-answer small { color: var(--muted); }
+  .md-answers li.md-answer small strong { color: var(--ink); font-weight: 600; }
+  .md-answer-todo { border-left-color: #f5c542 !important; }
+  .md-answer-wait { border-left-color: #8ab4ff !important; }
+  .md-answer-ok { border-left-color: #2ecc71 !important; }
+  .md-answer-bad { border-left-color: #f0555f !important; }
+  .md-answer-side { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .td-badge { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; background: #f0555f; color: #fff; font-size: 11px; font-weight: 700; }
   .md-sugg li { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 13px; }
   .md-sugg li > span:first-child { display: grid; min-width: 0; overflow-wrap: anywhere; }
   .md-sugg small { color: var(--muted); }
@@ -3853,94 +3868,111 @@ function renderModoTickets(res, doc, viewer, live, flash, tab = "") {
 
 // Creneaux proposes a l'invite (rooky-tv src/siteTickets.js) : etat, choix a valider, et formulaire
 // de proposition (streams des 7 prochains jours + autre date) pour le streamer et les admins.
-function renderSlotOffer(doc, ticket, canDecide) {
+// Creneaux d'un ticket, en deux menus separes (rooky-tv src/siteTickets.js fournit les donnees) :
+// - « Proposer des creneaux » : ouvrir / fermer, creneaux envoyes a l'invite, formulaire ;
+// - « Reponses » : une seule liste, chaque creneau avec son etat (a valider, en attente de l'invite,
+//   accepte, refuse), qui l'a propose et qui a tranche.
+function renderSlotMenus(doc, ticket, canDecide) {
   const offer = ticket.offer;
   const slotsClosed = !offer || offer.closed !== false;
-  const openCloseForm = canDecide && ticket.status === "open"
-    ? `<form method="post" class="md-slots-toggle">${slotsClosed
-        ? `<span class="md-tag bad">\ud83d\udd12 Creneaux fermes</span><button type="submit" name="action" value="offer_open">\ud83d\udd13 Ouvrir les creneaux</button>`
-        : `<span class="md-tag ok">\ud83d\udd13 Creneaux ouverts</span><button type="submit" name="action" value="offer_close" class="secondary">\ud83d\udd12 Fermer les creneaux</button>`}</form>`
-    : "";
-  const statusText = {
-    proposed: "En attente du choix de l'invite (en MP)",
-    chosen: "L'invite a choisi : a valider",
-    countered: "Autre heure proposee : en attente de l'invite",
-    accepted: "Valide",
-    refused: "Refuse"
-  };
-  // Demandes de l'invite pas encore decidees (plusieurs possibles) ; anciens rooky-tv : offer.choice.
+  const owner = ticket.owner || "Invite";
+  const dayOf = (date) => `${planningDayParts(date).name} ${planningDayParts(date).short}`;
+
+  /* ------------------------------ Reponses ------------------------------ */
   const pending = offer
     ? (Array.isArray(offer.pending) ? offer.pending : offer.status === "chosen" && offer.choice ? [{ id: "", ...offer.choice }] : [])
     : [];
   const counters = Array.isArray(offer?.counters) ? offer.counters : [];
-  const status = pending.length ? "chosen" : counters.length ? "countered" : offer?.status;
+  const decisions = Array.isArray(offer?.decisions) ? offer.decisions : [];
   const stagedCount = pending.filter((item) => item.staged).length;
   const stagedTag = (item) => item.staged === "accept"
-    ? `<span class="md-tag ok">\u2705 a valider</span>`
+    ? `<span class="md-tag ok">✅ sera validee</span>`
     : item.staged === "refuse"
-      ? `<span class="md-tag bad">\u274c a refuser</span>`
+      ? `<span class="md-tag bad">❌ sera refusee</span>`
       : item.staged === "counter"
-        ? `<span class="md-tag">\ud83d\udd52 autre heure : ${escapeHtml(planningHour(item.counterTime))}</span>`
+        ? `<span class="md-tag">🕒 autre heure : ${escapeHtml(planningHour(item.counterTime))}</span>`
         : "";
-  const offerBox = offer
+  const who = (label, name) => `<small>${label} <strong>${escapeHtml(name || "?")}</strong></small>`;
+  const row = (status, body, side = "") => `<li class="md-answer md-answer-${status}"><span>${body}</span>${side}</li>`;
+  const pendingRows = pending.map((item) => row("todo",
+    `<strong>${escapeHtml(item.text)}</strong>${item.early ? ` <span class="md-tag">avant le debut</span>` : ""} ${stagedTag(item)}${who("Propose par", item.proposedBy || owner)}`,
+    `<span class="md-answer-side"><span class="md-tag bad">A valider</span>${
+      canDecide
+        ? `<span class="md-offer-actions">
+            <form method="post" class="md-decide"><input type="hidden" name="menu" value="reponses" /><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><button type="submit" name="action" value="offer_accept"${item.staged === "accept" ? ` class="on"` : ""}>Valider</button><button type="submit" name="action" value="offer_refuse" class="secondary${item.staged === "refuse" ? " on" : ""}">Refuser</button></form>
+            ${(item.times || []).filter((time) => time !== item.time).length ? `<form method="post" class="md-decide"><input type="hidden" name="menu" value="reponses" /><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><select name="counter_time" aria-label="Autre heure">${(item.times || []).filter((time) => time !== item.time).map((time) => `<option value="${escapeHtml(time)}"${item.counterTime === time ? " selected" : ""}>${escapeHtml(planningHour(time))}</option>`).join("")}</select><button type="submit" name="action" value="offer_counter" class="secondary${item.staged === "counter" ? " on" : ""}">Autre heure</button></form>` : ""}
+          </span>`
+        : ""
+    }</span>`)).join("");
+  const counterRows = counters.map((item) => row("wait",
+    `<strong>🕒 ${escapeHtml(item.text)}</strong>${item.originalText ? `<small>Demande initiale : ${escapeHtml(item.originalText)}</small>` : ""}${who("Propose par", item.proposedBy || "L'equipe")}`,
+    `<span class="md-answer-side"><span class="md-tag">En attente de ${escapeHtml(owner)}</span></span>`)).join("");
+  const decisionRows = decisions.slice().reverse().map((item) => row(item.status === "accepted" ? "ok" : "bad",
+    `<strong>${escapeHtml(item.text)}</strong>${who("Propose par", item.proposedBy || "?")}${item.decidedBy ? who(item.status === "accepted" ? "Accepte par" : "Refuse par", item.decidedBy) : ""}${item.decidedAt ? `<small>${escapeHtml(modoDateTime(item.decidedAt))}</small>` : ""}`,
+    `<span class="md-answer-side"><span class="md-tag${item.status === "accepted" ? " ok" : " bad"}">${item.status === "accepted" ? "Acceptee" : "Refusee"}</span></span>`)).join("");
+  const group = (title, rows) => (rows ? `<h3 class="md-answer-h">${title}</h3><ul class="md-sugg md-answers">${rows}</ul>` : "");
+  const answers = pendingRows || counterRows || decisionRows
     ? `<section class="md-form">
-        <h2>\ud83d\udcc5 Creneaux <span class="md-tag${status === "chosen" ? " bad" : status === "accepted" ? " ok" : ""}">${pending.length > 1 ? `${pending.length} demandes a valider` : statusText[status] || escapeHtml(status)}</span></h2>
-        ${(offer.decisions || []).length ? `<ul class="md-sugg">${offer.decisions.map((item) => `<li><span><strong>${escapeHtml(item.text)}</strong></span><span class="md-tag${item.status === "accepted" ? " ok" : " bad"}">${item.status === "accepted" ? "Accepte" : "Refuse"}</span></li>`).join("")}</ul>` : ""}
-        <ul class="md-sugg">${(offer.streams || [])
-          .map((st) => `<li><span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.from || st.start))} \u2192 ${escapeHtml(planningHour(st.to || st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
-          .join("")}</ul>
-        ${pending.length ? `<ul class="md-sugg">${pending.map((item) => `<li class="md-offer-row"><span><strong>Demande de l'invite :</strong> ${escapeHtml(item.text)}${item.early ? " <span class=\"md-tag\">avant le debut</span>" : ""} ${stagedTag(item)}</span>${
-          canDecide
-            ? `<span class="md-offer-actions">
-                <form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><button type="submit" name="action" value="offer_accept"${item.staged === "accept" ? ` class="on"` : ""}>Valider</button><button type="submit" name="action" value="offer_refuse" class="secondary${item.staged === "refuse" ? " on" : ""}">Refuser</button></form>
-                ${(item.times || []).filter((time) => time !== item.time).length ? `<form method="post" class="md-decide"><input type="hidden" name="choice_id" value="${escapeHtml(item.id || "")}" /><select name="counter_time" aria-label="Autre heure">${(item.times || []).filter((time) => time !== item.time).map((time) => `<option value="${escapeHtml(time)}"${item.counterTime === time ? " selected" : ""}>${escapeHtml(planningHour(time))}</option>`).join("")}</select><button type="submit" name="action" value="offer_counter" class="secondary${item.staged === "counter" ? " on" : ""}">Proposer une autre heure</button></form>` : ""}
-              </span>`
-            : ""
-        }</li>`).join("")}</ul>` : ""}
-        ${counters.length ? `<ul class="md-sugg">${counters.map((item) => `<li><span><strong>\ud83d\udd52 Autre heure proposee :</strong> ${escapeHtml(item.text)}${item.originalText ? `<small>Demande initiale : ${escapeHtml(item.originalText)}</small>` : ""}</span><span class="md-tag">en attente de l'invite</span></li>`).join("")}</ul>` : ""}
-        ${
-          canDecide && pending.length
-            ? `<form method="post" class="mt-actions"><button type="submit" name="action" value="offer_send"${stagedCount ? "" : " disabled"}>Envoyer la reponse a l'invite${stagedCount ? ` (${stagedCount})` : ""}</button></form>
-               <p class="md-hint">Valide, refuse ou propose une autre heure pour chaque demande (re-cliquer annule), puis envoie : l'invite recoit un seul MP (acceptes / refuses / autre heure). Il accepte ou refuse chaque autre heure une par une ; acceptee = validee, refusee = il refait une demande. Valider change l'heure du titre pour ce stream, sans le nom de l'invite.</p>`
-            : ""
-        }
+        ${group(`⏳ A valider${pending.length ? ` (${pending.length})` : ""}`, pendingRows)}
+        ${canDecide && pending.length
+          ? `<form method="post" class="mt-actions"><input type="hidden" name="menu" value="reponses" /><button type="submit" name="action" value="offer_send"${stagedCount ? "" : " disabled"}>Envoyer la reponse a ${escapeHtml(owner)}${stagedCount ? ` (${stagedCount})` : ""}</button></form>
+             <p class="md-hint">Valide, refuse ou propose une autre heure (re-cliquer annule), puis envoie : un seul MP part a l'invite.</p>`
+          : ""}
+        ${group(`🕒 En attente de ${escapeHtml(owner)}${counters.length ? ` (${counters.length})` : ""}`, counterRows)}
+        ${group(`📜 Historique${decisions.length ? ` (${decisions.length})` : ""}`, decisionRows)}
       </section>`
+    : `<p class="md-empty">Aucune reponse pour l'instant : les demandes de ${escapeHtml(owner)} apparaitront ici.</p>`;
+
+  /* -------------------------- Proposer des creneaux -------------------------- */
+  const openCloseForm = canDecide && ticket.status === "open"
+    ? `<form method="post" class="md-slots-toggle"><input type="hidden" name="menu" value="proposer" />${slotsClosed
+        ? `<span class="md-tag bad">🔒 Creneaux fermes</span><button type="submit" name="action" value="offer_open">🔓 Ouvrir les creneaux</button>`
+        : `<span class="md-tag ok">🔓 Creneaux ouverts</span><button type="submit" name="action" value="offer_close" class="secondary">🔒 Fermer les creneaux</button>`}</form>`
     : "";
-  if (!canDecide || ticket.status !== "open" || pending.length) return openCloseForm + offerBox;
-  const today = planningToday();
-  const last = planningAddDays(today, 6);
-  const streams = planningTidyStreams(doc.program?.modo?.streams || [], today).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
-  const endOf = (st) => {
-    const [h, m] = String(st.time || "21:00").split(":").map(Number);
-    const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
-    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-  };
-  const form = `
-    <details class="md-form">
-      <summary>\ud83d\udcc5 ${offer ? "Proposer d'autres creneaux" : "Proposer des creneaux"}</summary>
-      <form method="post" class="mt-reply" style="margin-top:8px;">
-        ${
-          streams.length
-            ? streams
-                .map(
-                  (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
-                    <span><strong>${escapeHtml(planningDayParts(st.date).name)} ${escapeHtml(planningDayParts(st.date).short)} · ${escapeHtml(planningHour(st.time))}</strong>
-                    <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
-                    <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>`
-                )
-                .join("")
-            : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
-        }
-        <div class="md-form-row"><span class="md-hint" style="flex:0 0 100%;">Autre date (optionnel) :</span>
-          <input type="date" name="custom_date" min="${today}" />
-          <input type="time" name="custom_time" aria-label="Debut" />
-          <input type="time" name="custom_end" aria-label="Fin" />
-        </div>
-        <p class="md-hint">Pour chaque stream coche, choisis le creneau (de … a …) : l'invite recoit ces streams en MP avec leurs titres (sans les titres d'organisation) et ne peut choisir son heure qu'a l'interieur du creneau. Tu valides ensuite ici.</p>
-        <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
-      </form>
-    </details>`;
-  return openCloseForm + offerBox + form;
+  const current = (offer?.streams || []).length
+    ? `<section class="md-form"><h3 class="md-answer-h">📤 Creneaux envoyes a ${escapeHtml(owner)}</h3><ul class="md-sugg">${offer.streams
+        .map((st) => `<li><span><strong>${escapeHtml(dayOf(st.date))} · ${escapeHtml(planningHour(st.from || st.start))} → ${escapeHtml(planningHour(st.to || st.end))}</strong>${st.titles.length ? `<small>${st.titles.map(escapeHtml).join(" · ")}</small>` : `<small>${st.custom ? "Autre date" : "Programme libre"}</small>`}</span></li>`)
+        .join("")}</ul></section>`
+    : "";
+  let form = "";
+  if (canDecide && ticket.status === "open") {
+    const today = planningToday();
+    const last = planningAddDays(today, 6);
+    const streams = planningTidyStreams(doc.program?.modo?.streams || [], today).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
+    const endOf = (st) => {
+      const [h, m] = String(st.time || "21:00").split(":").map(Number);
+      const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
+      return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+    };
+    form = `
+      <section class="md-form">
+        <h3 class="md-answer-h">➕ ${offer?.streams?.length ? "Proposer d'autres creneaux" : "Proposer des creneaux"}</h3>
+        <form method="post" class="mt-reply">
+          <input type="hidden" name="menu" value="proposer" />
+          ${
+            streams.length
+              ? streams
+                  .map(
+                    (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
+                      <span><strong>${escapeHtml(dayOf(st.date))} · ${escapeHtml(planningHour(st.time))}</strong>
+                      <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
+                      <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>`
+                  )
+                  .join("")
+              : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
+          }
+          <div class="md-form-row"><span class="md-hint" style="flex:0 0 100%;">Autre date (optionnel) :</span>
+            <input type="date" name="custom_date" min="${today}" />
+            <input type="time" name="custom_time" aria-label="Debut" />
+            <input type="time" name="custom_end" aria-label="Fin" />
+          </div>
+          <p class="md-hint">Pour chaque stream coche, choisis le creneau (de … a …) : l'invite ne peut choisir son heure qu'a l'interieur. Ses demandes arrivent dans le menu Reponses.</p>
+          <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
+        </form>
+      </section>`;
+  }
+  const propose = openCloseForm + current + form || `<p class="md-empty">Aucun creneau propose pour ce ticket.</p>`;
+  return { propose, answers, todo: pending.length };
 }
 
 function renderModoTicket(res, doc, viewer, live, data, flash, tab = "") {
@@ -3973,7 +4005,7 @@ const TICKET_DESK_CSS = `
   .cm-chat { display: grid; gap: 2px; }
   .cm-day { display: flex; align-items: center; gap: 12px; margin: 14px 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
   .cm-day::before, .cm-day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-  .cm-sys { text-align: center; color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .cm-sys { text-align: center; color: var(--muted); font-size: 12px; margin: 6px 0; white-space: pre-line; line-height: 1.5; }
   .cm-row { display: flex; gap: 12px; padding: 6px 8px; border-radius: 8px; margin-top: 10px; }
   .cm-row.grouped { margin-top: 0; padding-top: 1px; padding-bottom: 1px; }
   .cm-row:hover { background: rgba(255, 255, 255, 0.025); }
@@ -4242,6 +4274,8 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           </form>
         </dialog>`
       : "";
+    // Creneaux : deux menus separes (Proposer / Reponses), chacun dans sa fenetre.
+    const slotMenus = renderSlotMenus(doc, ticket, data.canDecide === true);
     pane = `
       <header class="td-head">
         <div class="td-head-main">
@@ -4293,18 +4327,22 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
                 <textarea name="content" rows="3" maxlength="3500" placeholder="Repondre a ${escapeHtml(ticket.owner)}"></textarea>
                 <div class="td-compose-row">
                   <label class="cm-anon" title="Signé « l'équipe » au lieu de ton nom"><input type="checkbox" name="anonymous" value="1" /> Anonyme</label>
-                  <span class="cm-actions"><button type="button" class="secondary td-calendar-open">\ud83d\udcc5 Calendrier</button><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
+                  <span class="cm-actions"><button type="button" class="secondary td-menu-open" data-dialog="td-slots-propose">\ud83d\udcc5 Proposer</button><button type="button" class="secondary td-menu-open" data-dialog="td-slots-answers">\ud83d\udccb R\u00e9ponses${slotMenus.todo ? ` <span class="td-badge">${slotMenus.todo}</span>` : ""}</button><button type="submit" name="action" value="note" class="secondary" title="Visible seulement par l'equipe">\ud83d\udd12 Note staff</button><button type="submit" name="action" value="reply">Envoyer</button></span>
                 </div>
               </form>`
             : `<form method="post" class="td-compose mt-reply">
                 <textarea name="content" rows="2" maxlength="3500" placeholder="Note staff (ticket ferme : le membre ne la voit pas)"></textarea>
-                <div class="td-compose-row"><span class="md-hint">Ticket ferme : seules les notes staff sont possibles.</span><span class="cm-actions"><button type="button" class="secondary td-calendar-open">\ud83d\udcc5 Calendrier</button><button type="submit" name="action" value="note" class="secondary">\ud83d\udd12 Note staff</button></span></div>
+                <div class="td-compose-row"><span class="md-hint">Ticket ferme : seules les notes staff sont possibles.</span><span class="cm-actions"><button type="button" class="secondary td-menu-open" data-dialog="td-slots-propose">\ud83d\udcc5 Proposer</button><button type="button" class="secondary td-menu-open" data-dialog="td-slots-answers">\ud83d\udccb R\u00e9ponses${slotMenus.todo ? ` <span class="td-badge">${slotMenus.todo}</span>` : ""}</button><button type="submit" name="action" value="note" class="secondary">\ud83d\udd12 Note staff</button></span></div>
               </form>`
           : `<div class="td-compose"><p class="md-empty">Lecture seule : ton groupe peut lire les tickets, pas y repondre.</p></div>`
       }
-      <dialog class="td-calendar" id="td-calendar">
-        <div class="td-calendar-head"><h2>\ud83d\udcc5 Calendrier de ${escapeHtml(ticket.owner)}</h2><button type="button" class="secondary" id="td-calendar-close" aria-label="Fermer">\u2715</button></div>
-        ${renderSlotOffer(doc, ticket, data.canDecide === true) || `<p class="md-empty">Aucun creneau propose pour ce ticket.</p>`}
+      <dialog class="td-calendar" id="td-slots-propose">
+        <div class="td-calendar-head"><h2>\ud83d\udcc5 Proposer des cr\u00e9neaux \u00e0 ${escapeHtml(ticket.owner)}</h2><button type="button" class="secondary td-dialog-close" aria-label="Fermer">\u2715</button></div>
+        ${slotMenus.propose}
+      </dialog>
+      <dialog class="td-calendar" id="td-slots-answers">
+        <div class="td-calendar-head"><h2>\ud83d\udccb R\u00e9ponses de ${escapeHtml(ticket.owner)}</h2><button type="button" class="secondary td-dialog-close" aria-label="Fermer">\u2715</button></div>
+        ${slotMenus.answers}
       </dialog>`;
   }
 
@@ -4439,12 +4477,24 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     </section>
     <script>
       (() => {
-        const calendar = document.getElementById("td-calendar");
-        document.querySelectorAll(".td-calendar-open").forEach((button) => button.addEventListener("click", () => calendar?.showModal()));
-        document.getElementById("td-calendar-close")?.addEventListener("click", () => calendar?.close());
-        calendar?.addEventListener("click", (event) => {
-          if (event.target === calendar) calendar.close();
+        // Menus des creneaux (Proposer / Reponses) : les boutons sont dans la zone de saisie, qui
+        // peut etre remplacee sur place, d'ou l'ecoute sur le document.
+        document.addEventListener("click", (event) => {
+          const open = event.target.closest(".td-menu-open");
+          if (open) { document.getElementById(open.dataset.dialog)?.showModal(); return; }
+          if (event.target.closest(".td-dialog-close")) { event.target.closest("dialog")?.close(); return; }
+          if (event.target.matches("#td-slots-propose, #td-slots-answers")) event.target.close();
         });
+        // Apres une action dans un menu, il se rouvre (parametre menu=proposer|reponses).
+        try {
+          const u = new URL(location.href);
+          const menu = u.searchParams.get("menu");
+          if (menu) {
+            document.getElementById(menu === "reponses" ? "td-slots-answers" : "td-slots-propose")?.showModal();
+            u.searchParams.delete("menu");
+            history.replaceState(history.state, "", u);
+          }
+        } catch (e) {}
         // Rafraichissement partiel (jamais toute la page) : la liste des tickets, le menu, la
         // conversation et l'en-tete du ticket sont remplaces sur place ; la zone de reponse et les
         // formulaires ouverts ne bougent pas. Reponse et note staff envoyees sans recharger.
