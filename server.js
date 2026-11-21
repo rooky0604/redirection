@@ -374,7 +374,13 @@ const requestListener = async (req, res) => {
           }
           if (form.action === "propose") {
             // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
-            const streams = params.getAll("stream").map((key) => ({ key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "" }));
+            // Titres invites coches sous chaque stream, avec leur zone (de … a …).
+            const streams = params.getAll("stream").map((key) => ({
+              key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "",
+              ...(params.has(`gt_list_${key}`)
+                ? { titles: params.getAll(`gt_${key}`).map((tid) => ({ id: tid, from: params.get(`gtfrom_${key}_${tid}`) || "", to: params.get(`gtto_${key}_${tid}`) || "" })) }
+                : {})
+            }));
             const custom = form.custom_date && form.custom_time ? { date: form.custom_date, time: form.custom_time, end: form.custom_end || "" } : null;
             await modoApi(doc, viewer, "ticket.propose", { id, streams, custom });
             redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
@@ -2958,7 +2964,11 @@ function cleanPlanningProgram(body) {
             key: /^\d{4}-\d{2}-\d{2}(#[2-9])?$/.test(String(day?.key || "")) ? day.key : "",
             duration: Number.isFinite(Number(day?.duration)) && Number(day.duration) > 0 ? Math.min(1440, Math.round(Number(day.duration))) : null,
             description: str(day?.description, 1500),
-            items: list(day?.items, 30).map(cleanItem).filter((item) => item.subject)
+            items: list(day?.items, 30).map(cleanItem).filter((item) => item.subject),
+            // Titres invites proposables pour ce stream (zone par defaut du programme de rooky-tv).
+            guestTitles: list(day?.guestTitles, 25)
+              .map((t) => ({ id: str(t?.id, 40), label: str(t?.label, 120), from: time(t?.from), to: time(t?.to) }))
+              .filter((t) => /^[\w-]{1,40}$/.test(t.id) && t.label)
           }))
           .filter((day) => day.date),
         tasks: list(body.modo.tasks, 200)
@@ -3786,6 +3796,9 @@ const MODO_CSS = `
   .md-slot > span:nth-child(2) { display: grid; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
   .md-slot small { color: var(--muted); }
   .md-slot-end { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  /* Titre invite sous son stream : meme ligne (case + de … a …), decalee et teintee. */
+  .md-slot-guest { margin-left: 28px; padding: 6px 10px; border-bottom: 0; border-left: 2px solid rgba(69, 224, 210, 0.45); background: rgba(69, 224, 210, 0.04); border-radius: 0 8px 8px 0; margin-top: 4px; }
+  .md-slot-guest strong { font-size: 13px; }
   .md-decide button { padding: 6px 10px; font-size: 13px; }
   .md-decide button.on { outline: 2px solid #f5c542; outline-offset: 1px; }
   .md-decide select { padding: 5px 8px; font-size: 13px; }
@@ -3956,7 +3969,15 @@ function renderSlotMenus(doc, ticket, canDecide) {
                     (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
                       <span><strong>${escapeHtml(dayOf(st.date))} · ${escapeHtml(planningHour(st.time))}</strong>
                       <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
-                      <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>`
+                      <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>${
+                        (st.guestTitles || []).length
+                          ? `<input type="hidden" name="gt_list_${escapeHtml(st.key)}" value="1" />${st.guestTitles
+                              .map((t) => `<label class="md-slot md-slot-guest"><input type="checkbox" name="gt_${escapeHtml(st.key)}" value="${escapeHtml(t.id)}" checked />
+                                <span><strong>🤝 ${escapeHtml(t.label)}</strong><small>Titre invite${t.from && t.to ? ` · zone du programme : ${escapeHtml(planningHour(t.from))} → ${escapeHtml(planningHour(t.to))}` : ""}</small></span>
+                                <span class="md-slot-end">de <input type="time" name="gtfrom_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.from || st.time || "21:00")}" aria-label="Début de la zone du titre invité" /> à <input type="time" name="gtto_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.to || endOf(st))}" aria-label="Fin de la zone du titre invité" /></span></label>`)
+                              .join("")}`
+                          : ""
+                      }`
                   )
                   .join("")
               : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
