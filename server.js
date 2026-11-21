@@ -3126,6 +3126,46 @@ function planningWeekNumber(date) {
   return Math.floor((thursday - Date.UTC(thursday.getUTCFullYear(), 0, 1)) / 86400000 / 7) + 1;
 }
 
+// Titre court lisible : "**" (separateur de rooky-tv) -> " | ", "*" (repere invisible) -> espace.
+function planningCleanTitle(text) {
+  return String(text || "").replace(/\s*\*\*+\s*/g, " | ").replace(/\*/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Le meme titre sans numero de jour (« SERVICE N°7 » -> « SERVICE », « JOUR 12 | GTA » -> « GTA ») :
+// le numero n'est vraiment a jour que pour le prochain stream.
+function planningWithoutDay(text) {
+  const out = planningCleanTitle(text)
+    .replace(/\s*\b(?:jours?|days?)\s*(?:n[°ºo]\s*|#\s*|:\s*)?\d{1,4}\b/giu, " ")
+    .replace(/\s*(?<![\p{L}\d])(?:n[°º]|#)\s*\d{1,4}\b/giu, " ")
+    .replace(/\s+([|,\-–—])(?=\s*(?:[|,\-–—]|$))/g, "")
+    .replace(/^\s*[|,\-–—]\s*/, "")
+    .replace(/\s*[|,\-–—]\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return out || planningCleanTitle(text);
+}
+
+// Streams a venir : le premier (pas annule) garde son numero de jour, les suivants l'affichent sans
+// numero plutot que le meme numero repete ; "**" nettoye partout.
+function planningTidyStreams(streams, today) {
+  const upcoming = streams
+    .filter((s) => !s.past && s.date >= today && !s.cancelled && (s.items || []).length)
+    .sort((a, b) => `${a.date} ${a.time || ""}`.localeCompare(`${b.date} ${b.time || ""}`));
+  const next = upcoming[0] || null;
+  return streams.map((stream) => {
+    const strip = !stream.past && stream.date >= today && stream !== next;
+    const tidy = strip ? planningWithoutDay : planningCleanTitle;
+    return {
+      ...stream,
+      items: (stream.items || []).map((item) => ({
+        ...item,
+        subject: tidy(item.subject),
+        ...(item.title ? { title: tidy(item.title) } : {})
+      }))
+    };
+  });
+}
+
 function planningWeek(program) {
   const today = planningToday();
   // Lundi -> dimanche ; le week-end, la semaine qui arrive : samedi -> vendredi.
@@ -3134,7 +3174,7 @@ function planningWeek(program) {
   const lastDay = planningAddDays(monday, 6);
   const vacation = program?.vacation || null;
   const streamsByDay = new Map();
-  for (const stream of program?.days || []) {
+  for (const stream of planningTidyStreams(program?.days || [], today)) {
     if (stream.date < monday || stream.date > lastDay) {
       continue;
     }
