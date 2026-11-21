@@ -3652,6 +3652,9 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
       .md-hero p { margin: 0; color: var(--muted); font-size: 11px; }
       /* Bandeau colle tout en haut de la page (plus de marge au-dessus). */
       .app-main:has(> .md), main.shell:has(> .md) { margin-top: 0 !important; padding-top: 0 !important; }
+      /* Page Tickets : la zone colle aussi en bas (saisie et « Anonyme » tout en bas de l'ecran). */
+      .app-main:has(section.td), main.shell:has(section.td) { margin-bottom: 0 !important; padding-bottom: 0 !important; }
+      @media (min-width: 861px) { section.td { border-bottom: 0; border-bottom-right-radius: 0; } }
       .md { gap: 8px; }
       .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--ink); }
       .md-week-dates { color: var(--muted); font-weight: 400; }
@@ -3829,6 +3832,9 @@ function modoShell(doc, viewer, inner) {
       .md-hero p { margin: 0; color: var(--muted); font-size: 11px; }
       /* Bandeau colle tout en haut de la page (plus de marge au-dessus). */
       .app-main:has(> .md), main.shell:has(> .md) { margin-top: 0 !important; padding-top: 0 !important; }
+      /* Page Tickets : la zone colle aussi en bas (saisie et « Anonyme » tout en bas de l'ecran). */
+      .app-main:has(section.td), main.shell:has(section.td) { margin-bottom: 0 !important; padding-bottom: 0 !important; }
+      @media (min-width: 861px) { section.td { border-bottom: 0; border-bottom-right-radius: 0; } }
       .md { gap: 8px; }
       .md-empty { margin: 0; color: var(--muted); font-size: 13px; font-style: italic; }
     </style>
@@ -4048,7 +4054,7 @@ const TICKET_DESK_CSS = `
   .td-body details.md-form > summary { cursor: pointer; font-weight: 600; }
   .td-compose-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
   .td-compose-row .cm-actions { flex-wrap: wrap; justify-content: flex-end; }
-  .td-compose { flex: 0 0 auto; }
+  .td-compose { flex: 0 0 auto; padding: 8px 14px 10px; gap: 6px; }
   .td-compose textarea { max-height: 30vh; }
   .td-calendar { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
   .td-members { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
@@ -4442,7 +4448,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           if (!td) return;
           if (window.matchMedia("(max-width: 860px)").matches) { td.style.height = ""; return; }
           const top = td.getBoundingClientRect().top + window.scrollY;
-          let height = Math.max(420, window.innerHeight - top - 16);
+          let height = Math.max(420, window.innerHeight - top);
           td.style.height = height + "px";
           // Marges sous la zone (bas de page) : on retire ce qui depasse encore de l'ecran.
           const overflow = document.documentElement.scrollHeight - window.innerHeight;
