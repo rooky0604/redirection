@@ -330,6 +330,7 @@ const requestListener = async (req, res) => {
           return sendJson(res, 200, {
             memberTyping: !!state.memberTyping,
             lastId: Number(state.lastId) || 0,
+            editAt: Number(state.editAt) || 0,
             status: state.status,
           });
         } catch (error) {
@@ -401,6 +402,11 @@ const requestListener = async (req, res) => {
           if (form.action === "offer_send") {
             await modoApi(doc, viewer, "ticket.offer.send", { id });
             redirect(res, `${back}?success=${encodeURIComponent("Reponse envoyee en un seul MP a l'invite (programme modifie pour les creneaux acceptes)")}`);
+            return;
+          }
+          if (form.action === "edit_message") {
+            await modoApi(doc, viewer, "ticket.message.edit", { id, messageId: Number(form.message_id) || 0, content: form.content });
+            redirect(res, `${back}?success=${encodeURIComponent("Message modifié")}`);
             return;
           }
           if (form.action === "reply" || form.action === "note") {
@@ -3897,6 +3903,16 @@ const TICKET_DESK_CSS = `
   .cm-badge.staff { background: rgba(124, 92, 255, 0.25); color: #c9bcff; }
   .cm-badge.note { background: rgba(245, 197, 66, 0.18); color: #f5c542; }
   .cm-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; font-size: 15px; }
+  .cm-edited { font-size: 11px; color: var(--muted); margin-left: 4px; white-space: nowrap; }
+  .cm-row { position: relative; }
+  .cm-edit-open { position: absolute; top: 4px; right: 6px; min-width: 0; padding: 2px 8px; font-size: 12px; opacity: 0; background: rgb(22, 25, 34); border: 1px solid var(--line); color: var(--ink); border-radius: 8px; cursor: pointer; }
+  .cm-row:hover .cm-edit-open, .cm-edit-open:focus-visible { opacity: 1; }
+  @media (hover: none) { .cm-edit-open { opacity: 0.8; } }
+  .cm-edit { display: grid; gap: 6px; margin-top: 4px; }
+  .cm-edit[hidden] { display: none; }
+  .cm-edit textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 60px; background: rgba(255, 255, 255, 0.04); color: var(--ink); border: 1px solid rgba(124, 92, 255, 0.7); border-radius: 10px; padding: 8px 10px; font: inherit; }
+  .cm-edit-row { display: flex; gap: 6px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+  .cm-edit-row small { margin-right: auto; color: var(--muted); }
   .cm-img { max-width: min(100%, 420px); max-height: 300px; border-radius: 8px; margin-top: 6px; display: block; }
   .cm-anon { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
   .cm-anon input { width: 16px; height: 16px; margin: 0; }
@@ -4067,6 +4083,13 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
       /^https:\/\//.test(String(url || ""))
         ? `<img class="cm-av" src="${escapeHtml(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
         : `<span class="cm-av">${initial(name)}</span>`;
+    // Modifier un message de l'equipe : le sien (streamer / admins : tous). Reponse : ticket ouvert et
+    // MP retrouvable (le MP du membre est modifie aussi) ; note staff : toujours.
+    const editAll = !!(viewer.admin || viewer.password || viewer.r === "streamer" || live?.seeAll || data.seeAll || live?.rookyAdmin);
+    const canEditMessage = (m) => canReply
+      && (m.direction === "note" || (m.direction === "out" && ticket.status === "open" && m.inDm))
+      && (editAll || (viewer.u && String(m.authorId || "") === String(viewer.u)));
+    const editedLabel = (m) => (m.editedAt ? `<span class="cm-edited" title="Modifié le ${escapeHtml(modoDateTime(m.editedAt))}">(modifié)</span>` : "");
     let prev = null;
     let prevDay = "";
     const bubbles = messages
@@ -4096,10 +4119,19 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           : m.direction === "note"
             ? `<span class="cm-badge note">\ud83d\udd12 Note staff</span>`
             : `<span class="cm-badge staff">Equipe</span>${m.anonymous ? `<span class="cm-badge">anonyme</span>` : ""}`;
-        const body = `<div class="cm-text">${escapeHtml(m.content)}</div>${images}`;
+        const editable = canEditMessage(m);
+        const editForm = editable
+          ? `<form method="post" class="cm-edit" hidden>
+              <input type="hidden" name="message_id" value="${Number(m.id) || 0}" />
+              <textarea name="content" rows="3" maxlength="3500" aria-label="Modifier le message">${escapeHtml(m.content)}</textarea>
+              <div class="cm-edit-row"><small>${m.direction === "out" ? "Le MP du membre sera modifié aussi." : "Note staff : le membre ne la voit pas."}</small><button type="button" class="secondary cm-edit-cancel">Annuler</button><button type="submit" name="action" value="edit_message">Enregistrer</button></div>
+            </form>`
+          : "";
+        const body = `<div class="cm-text">${escapeHtml(m.content)}${editedLabel(m)}</div>${editForm}${images}`;
         return `${sep}<div class="cm-row${m.direction === "note" ? " note" : ""}${grouped ? " grouped" : ""}">
           ${grouped ? `<span class="cm-gutter">${escapeHtml(timeOf(m.at))}</span>` : face(isMember ? ticket.avatar : m.avatar, name)}
           <div class="cm-main">${grouped ? "" : `<div class="cm-head"><strong class="${isMember ? "" : "staff"}">${escapeHtml(name)}</strong>${badge}<time>${escapeHtml(timeOf(m.at))}</time></div>`}${body}</div>
+          ${editable ? `<button type="button" class="cm-edit-open" title="Modifier le message" aria-label="Modifier le message">✏️ Modifier</button>` : ""}
         </div>`;
       })
       .join("");
@@ -4193,7 +4225,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
     ${live.error ? `<div class="message error">rooky-tv : ${escapeHtml(live.error)}</div>` : ""}
     <section class="td${ticket || data?.error ? " has-ticket" : ""}"${
       ticket
-        ? ` data-ticket="${ticket.id}" data-last="${Math.max(0, ...(Array.isArray(data.messages) ? data.messages.map((m) => Number(m.id) || 0) : [0]))}" data-status="${escapeHtml(ticket.status)}"`
+        ? ` data-ticket="${ticket.id}" data-last="${Math.max(0, ...(Array.isArray(data.messages) ? data.messages.map((m) => Number(m.id) || 0) : [0]))}" data-edit="${Math.max(0, ...(Array.isArray(data.messages) ? data.messages.map((m) => (m.editedAt ? new Date(m.editedAt).getTime() || 0 : 0)) : [0]))}" data-status="${escapeHtml(ticket.status)}"`
         : ""
     }>
       <aside class="td-list">
@@ -4344,9 +4376,12 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           if (!desk || !desk2) return;
           const body = document.getElementById("td-body");
           const atBottom = !body || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
-          replace(".cm-chat", doc2);
           replace(".td-head", doc2);
+          // Un message en cours de modification : la conversation attend (rafraichie apres).
+          if (document.querySelector(".cm-edit:not([hidden])")) return;
+          replace(".cm-chat", doc2);
           desk.dataset.last = desk2.dataset.last;
+          desk.dataset.edit = desk2.dataset.edit;
           if (atBottom) scrollDown();
           // Ticket ferme / rouvert : la zone de reponse change directement, sans recharger la page.
           if (desk2.dataset.status !== desk.dataset.status) {
@@ -4432,6 +4467,51 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
             }
         });
 
+        // Modifier un message de l'equipe : le formulaire remplace le texte, envoi sans recharger.
+        const closeEdits = () => document.querySelectorAll(".cm-edit:not([hidden])").forEach((f) => {
+          f.hidden = true;
+          const text = f.parentElement?.querySelector(".cm-text");
+          if (text) text.hidden = false;
+        });
+        document.addEventListener("click", (event) => {
+          const open = event.target.closest(".cm-edit-open");
+          if (open) {
+            closeEdits();
+            const row = open.closest(".cm-row");
+            const form = row?.querySelector(".cm-edit");
+            if (!form) return;
+            row.querySelector(".cm-text").hidden = true;
+            form.hidden = false;
+            const box = form.querySelector("textarea");
+            box.focus();
+            box.setSelectionRange(box.value.length, box.value.length);
+            return;
+          }
+          if (event.target.closest(".cm-edit-cancel")) { closeEdits(); refresh(); }
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && event.target.closest?.(".cm-edit")) { closeEdits(); refresh(); }
+        });
+        document.addEventListener("submit", async (event) => {
+          const form = event.target.closest(".cm-edit");
+          if (!form) return;
+          event.preventDefault();
+          const data = new URLSearchParams(new FormData(form));
+          data.set("action", "edit_message");
+          const buttons = [...form.querySelectorAll("button")];
+          buttons.forEach((b) => { b.disabled = true; });
+          try {
+            const res = await fetch(location.pathname, { method: "POST", body: data, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+            const doc2 = await parse(res);
+            const failed = toast(doc2);
+            if (failed) { buttons.forEach((b) => { b.disabled = false; }); return; }
+            closeEdits();
+            swap(doc2);
+          } catch {
+            buttons.forEach((b) => { b.disabled = false; });
+          }
+        });
+
         // Fermer / Rouvrir sans rechargement complet : l'en-tete, la conversation, la liste et la
         // zone de saisie sont remplaces par leur version a jour.
         document.addEventListener("submit", async (event) => {
@@ -4477,7 +4557,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
               const state = await res.json();
               typingBox.hidden = !state.memberTyping;
               warn.hidden = true;
-              if (state.lastId > Number(desk.dataset.last || 0) || state.status !== desk.dataset.status) await refresh();
+              if (state.lastId > Number(desk.dataset.last || 0) || state.editAt > Number(desk.dataset.edit || 0) || state.status !== desk.dataset.status) await refresh();
             }
           } catch {}
           busy = false;
