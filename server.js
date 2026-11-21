@@ -3646,9 +3646,10 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
     <style>
       ${MODO_CSS}
       .md { display: grid; gap: 10px; }
-      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
-      .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
-      .md-hero p { margin: 0; color: var(--muted); }
+      /* Bandeau d'une seule ligne fine : la place va au contenu (tickets, planning). */
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: baseline; }
+      .md-hero h1 { margin: 0; font-size: 0.95rem; line-height: 1.4; }
+      .md-hero p { margin: 0; color: var(--muted); font-size: 12px; }
       .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--ink); }
       .md-week-dates { color: var(--muted); font-weight: 400; }
       .md-days { display: grid; gap: 8px; }
@@ -3675,11 +3676,8 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
     </style>
     <main class="md">
       <section class="md-hero">
-        <div>
-          <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
-          <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"}. Visible seulement par l'equipe de la chaine.</p>
-        </div>
-
+        <h1>Espace modo${doc.channel ? ` \u00b7 #${escapeHtml(doc.channel)}` : ""}</h1>
+        <p>Connecte : ${escapeHtml(viewer.n || "")}${viewer.password ? " (mot de passe)" : viewer.admin ? " (admin, par Discord)" : viewer.r === "streamer" ? " (streamer)" : " (modo)"} \u00b7 visible seulement par l'equipe</p>
       </section>
       ${modoNav("planning", live, rights)}
       ${renderMessages(flash)}
@@ -3822,9 +3820,10 @@ function modoShell(doc, viewer, inner) {
     <style>
       ${MODO_CSS}
       .md { display: grid; gap: 10px; }
-      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
-      .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
-      .md-hero p { margin: 0; color: var(--muted); }
+      /* Bandeau d'une seule ligne fine : la place va au contenu (tickets, planning). */
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: baseline; }
+      .md-hero h1 { margin: 0; font-size: 0.95rem; line-height: 1.4; }
+      .md-hero p { margin: 0; color: var(--muted); font-size: 12px; }
       .md-empty { margin: 0; color: var(--muted); font-size: 13px; font-style: italic; }
     </style>
     <main class="md">
