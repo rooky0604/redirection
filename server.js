@@ -3097,7 +3097,14 @@ function planningDayParts(date) {
   return { name: PLANNING_DAYS[weekday], short: `${d} ${PLANNING_MONTHS_SHORT[m - 1]}`, weekday };
 }
 
+// Titre Twitch entier sur la page publique, sans les commandes du chat (\u00ab !discord !insta \u00bb) en fin.
+function planningFullTitle(item) {
+  const full = String(item.title || "").replace(/(?:\s+![\w-]+)+\s*$/u, "").trim();
+  return full || item.subject;
+}
+
 function renderPlanningItem(item) {
+  item = { ...item, subject: planningFullTitle(item) };
   const icon = item.status === "current" ? "\u25b6\ufe0f" : item.status === "done" ? "\u2705" : item.status === "planning" ? "\ud83d\udccc" : "";
   return `
     <li class="pw-item pw-${item.status}">
@@ -3315,7 +3322,6 @@ function renderPublicPlanning(res, doc) {
       .pw-item img, .pw-noimg { width: 34px; height: 45px; border-radius: 5px; object-fit: cover; flex: 0 0 auto; background: rgba(255, 255, 255, 0.06); }
       .pw-subject {
         font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere;
-        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
       }
       .pw-meta { font-size: 12px; color: var(--muted); }
       .pw-now { color: #ff6b87; font-weight: 700; }
@@ -3364,9 +3370,9 @@ function renderPublicPlanning(res, doc) {
         .pw-week .pw-stream { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 14px; }
         .pw-week .pw-stream > .pw-desc, .pw-week .pw-stream > .pw-items, .pw-week .pw-stream > .pw-empty { grid-column: 1 / -1; }
         .pw-week .pw-time { font-size: 1.6rem; }
-        .pw-week .pw-items { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 16px; }
+        .pw-week .pw-items { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px 16px; }
         .pw-week .pw-item img, .pw-week .pw-noimg { width: 46px; height: 61px; border-radius: 6px; }
-        .pw-week .pw-subject { font-size: 14px; -webkit-line-clamp: 2; }
+        .pw-week .pw-subject { font-size: 14px; -webkit-line-clamp: unset; display: block; }
       }
       @media (max-width: 760px) {
         .pw-day:not(.has-stream) { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; }
