@@ -238,7 +238,9 @@ const requestListener = async (req, res) => {
       if (suggestionMatch && method === "POST") {
         const form = await parseForm(req);
         try {
-          const result = await modoApi(doc, viewer, "suggestion.decide", { id: Number(suggestionMatch[1]), decision: form.decision === "accept" ? "accept" : "refuse" });
+          const result = form.decision === "delete"
+            ? await modoApi(doc, viewer, "suggestion.delete", { id: Number(suggestionMatch[1]) })
+            : await modoApi(doc, viewer, "suggestion.decide", { id: Number(suggestionMatch[1]), decision: form.decision === "accept" ? "accept" : "refuse" });
           redirect(res, `/modo?success=${encodeURIComponent(result.text || "Decision enregistree")}`);
         } catch (error) {
           redirect(res, `/modo?error=${encodeURIComponent(error.message)}`);
@@ -3626,8 +3628,12 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
                 .map(
                   (sg) => `<li><span>${escapeHtml(MODO_ALL_KINDS[sg.kind] || sg.kind)} <strong>${escapeHtml(sg.title)}</strong><small>${escapeHtml(modoDateTime(sg.dueAt))} · par ${escapeHtml(sg.author || "?")}</small>${sg.notes ? `<small>${escapeHtml(sg.notes)}</small>` : ""}</span>${
                     live.canDecide && sg.status === "pending"
-                      ? `<form method="post" action="/modo/suggestions/${Number(sg.id)}" class="md-decide"><button type="submit" name="decision" value="accept">Ajouter</button><button type="submit" name="decision" value="refuse" class="secondary">Refuser</button></form>`
-                      : `<span class="md-tag${sg.status === "refused" ? " bad" : sg.status === "accepted" ? " ok" : ""}">${suggestionStatus[sg.status] || sg.status}</span>`
+                      ? `<form method="post" action="/modo/suggestions/${Number(sg.id)}" class="md-decide"><button type="submit" name="decision" value="accept">Ajouter</button><button type="submit" name="decision" value="refuse" class="secondary">Refuser</button><button type="submit" name="decision" value="delete" class="danger" title="Supprimer la suggestion" onclick="return confirm('Supprimer cette suggestion ?')">🗑️</button></form>`
+                      : `<span class="md-tag${sg.status === "refused" ? " bad" : sg.status === "accepted" ? " ok" : ""}">${suggestionStatus[sg.status] || sg.status}</span>${
+                          live.canDecide
+                            ? `<form method="post" action="/modo/suggestions/${Number(sg.id)}" class="md-decide"><button type="submit" name="decision" value="delete" class="danger" title="Supprimer la suggestion${sg.status === "accepted" ? " (la tâche reste dans le planning)" : ""}" onclick="return confirm('Supprimer cette suggestion ?${sg.status === "accepted" ? " La tâche ajoutée reste dans le planning." : ""}')">🗑️</button></form>`
+                            : ""
+                        }`
                   }</li>`
                 )
                 .join("")}</ul>`
