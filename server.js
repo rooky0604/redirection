@@ -3909,7 +3909,7 @@ function renderModoTickets(res, doc, viewer, live, flash, tab = "") {
 // - « Proposer des creneaux » : ouvrir / fermer, creneaux envoyes a l'invite, formulaire ;
 // - « Reponses » : une seule liste, chaque creneau avec son etat (a valider, en attente de l'invite,
 //   accepte, refuse), qui l'a propose et qui a tranche.
-function renderSlotMenus(doc, ticket, canDecide) {
+function renderSlotMenus(doc, ticket, canDecide, freshGuest = null) {
   const offer = ticket.offer;
   const slotsClosed = !offer || offer.closed !== false;
   const owner = ticket.owner || "Invite";
@@ -3975,7 +3975,13 @@ function renderSlotMenus(doc, ticket, canDecide) {
   if (canDecide && ticket.status === "open") {
     const today = planningToday();
     const last = planningAddDays(today, 6);
-    const streams = planningTidyStreams(doc.program?.modo?.streams || [], today).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
+    // Titres invites lus a l'instant par rooky-tv (ticket.get) quand il les fournit : zone a jour
+    // meme si la derniere synchro du programme est plus ancienne.
+    const streams = planningTidyStreams(doc.program?.modo?.streams || [], today)
+      .filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled)
+      .map((st) => (freshGuest && Array.isArray(freshGuest[st.key])
+        ? { ...st, guestTitles: freshGuest[st.key].filter((t) => t && t.id && t.label).map((t) => ({ id: String(t.id), label: String(t.label), from: /^\d{2}:\d{2}$/.test(String(t.from || "")) ? t.from : "", to: /^\d{2}:\d{2}$/.test(String(t.to || "")) ? t.to : "" })) }
+        : st));
     const endOf = (st) => {
       const [h, m] = String(st.time || "21:00").split(":").map(Number);
       const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
@@ -4345,7 +4351,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         </dialog>`
       : "";
     // Creneaux : deux menus separes (Proposer / Reponses), chacun dans sa fenetre.
-    const slotMenus = renderSlotMenus(doc, ticket, data.canDecide === true);
+    const slotMenus = renderSlotMenus(doc, ticket, data.canDecide === true, data.guestTitles && typeof data.guestTitles === "object" ? data.guestTitles : null);
     pane = `
       <header class="td-head">
         <div class="td-head-main">
