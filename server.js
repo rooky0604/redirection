@@ -3645,7 +3645,7 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
   const content = `
     <style>
       ${MODO_CSS}
-      .md { display: grid; gap: 18px; }
+      .md { display: grid; gap: 10px; }
       .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
       .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
       .md-hero p { margin: 0; color: var(--muted); }
@@ -3821,7 +3821,7 @@ function modoShell(doc, viewer, inner) {
   return `
     <style>
       ${MODO_CSS}
-      .md { display: grid; gap: 18px; }
+      .md { display: grid; gap: 10px; }
       .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 20px; padding: 20px 22px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: center; }
       .md-hero h1 { margin: 0 0 4px; font-size: 1.5rem; }
       .md-hero p { margin: 0; color: var(--muted); }
