@@ -3160,10 +3160,10 @@ const planningDayOf = (text) => {
 };
 const planningSetDay = (text, n) => planningCleanTitle(text).replace(PLANNING_DAY_RE, (all, word) => `${word}${n}`);
 
-// Streams a venir, numerotes a la suite : le prochain stream garde le numero envoye par rooky-tv
-// (celui qui sera vraiment diffuse), puis +1 par journee de stream (8, 9...). Un stream annule ne
-// compte pas (les suivants se decalent) et s'affiche sans numero ; un titre qui n'est pas dans le
-// prochain stream (numero inconnu) aussi. "**" nettoye partout.
+// Streams a venir, numerotes a la suite. rooky-tv envoie chaque titre avec son numero actuel (celui
+// du prochain stream) ; redirection ajoute seulement le rang du stream : +0 pour le prochain, +1 par
+// journee de stream ensuite (7, 8, 9...). Aucun titre n'est reconnu ou compare. Un stream annule ne
+// compte pas (les suivants se decalent) et s'affiche sans numero. "**" nettoye partout.
 function planningTidyStreams(streams, today) {
   const upcoming = streams
     .filter((s) => !s.past && s.date >= today && (s.items || []).length)
@@ -3171,28 +3171,23 @@ function planningTidyStreams(streams, today) {
   // Rang de chaque journee de stream (annulees exclues) : 0 pour la premiere, 1, 2...
   const rank = new Map();
   for (const s of upcoming) if (!s.cancelled && !rank.has(s.date)) rank.set(s.date, rank.size);
-  const first = upcoming.find((s) => !s.cancelled) || null;
-  // Numero de depart de chaque titre (sans son numero), lu dans le prochain stream.
-  const keyOf = (item) => planningWithoutDay(item.title || item.subject).toLowerCase();
-  const base = new Map();
-  for (const item of first?.items || []) {
-    const n = planningDayOf(item.title) ?? planningDayOf(item.subject);
-    if (n !== null && !base.has(keyOf(item))) base.set(keyOf(item), n);
-  }
+  const shift = (text, offset) => {
+    const n = planningDayOf(text);
+    return n === null ? planningCleanTitle(text) : planningSetDay(text, n + offset);
+  };
   return streams.map((stream) => {
     const isUpcoming = !stream.past && stream.date >= today;
     return {
       ...stream,
       items: (stream.items || []).map((item) => {
-        if (!isUpcoming || stream === first) {
+        if (!isUpcoming) {
           return { ...item, subject: planningCleanTitle(item.subject), ...(item.title ? { title: planningCleanTitle(item.title) } : {}) };
         }
-        const start = base.get(keyOf(item));
-        if (stream.cancelled || start === undefined || !rank.has(stream.date)) {
+        if (stream.cancelled || !rank.has(stream.date)) {
           return { ...item, subject: planningWithoutDay(item.subject), ...(item.title ? { title: planningWithoutDay(item.title) } : {}) };
         }
-        const n = start + rank.get(stream.date) - rank.get(first.date);
-        return { ...item, subject: planningSetDay(item.subject, n), ...(item.title ? { title: planningSetDay(item.title, n) } : {}) };
+        const offset = rank.get(stream.date);
+        return { ...item, subject: shift(item.subject, offset), ...(item.title ? { title: shift(item.title, offset) } : {}) };
       })
     };
   });
