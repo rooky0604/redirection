@@ -374,13 +374,22 @@ const requestListener = async (req, res) => {
           }
           if (form.action === "propose") {
             // Creneaux proposes a l'invite : streams coches de la semaine (+ fin), et/ou une autre date.
-            // Titres invites coches sous chaque stream, avec leur zone (de … a …).
-            const streams = params.getAll("stream").map((key) => ({
-              key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "",
-              ...(params.has(`gt_list_${key}`)
-                ? { titles: params.getAll(`gt_${key}`).map((tid) => ({ id: tid, from: params.get(`gtfrom_${key}_${tid}`) || "", to: params.get(`gtto_${key}_${tid}`) || "" })) }
-                : {})
-            }));
+            // Titres invites coches (avec leur zone) et streams au programme coches (« autre jeu »,
+            // sans titre invite). Un titre invite coche suffit a proposer son stream : la zone du
+            // stream couvre alors celles des titres coches.
+            const progMin = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(String(t || "")); if (!m) return null; const v = Number(m[1]) * 60 + Number(m[2]); return v < 480 ? v + 1440 : v; };
+            const programKeys = params.getAll("stream");
+            const guestKeys = [...new Set([...params.keys()].filter((name) => /^gt_/.test(name)).map((name) => name.slice(3)))];
+            const streams = [...new Set([...guestKeys, ...programKeys])].map((key) => {
+              const titles = params.getAll(`gt_${key}`).map((tid) => ({ id: tid, from: params.get(`gtfrom_${key}_${tid}`) || "", to: params.get(`gtto_${key}_${tid}`) || "" }));
+              if (programKeys.includes(key) || !titles.length) {
+                return { key, start: params.get(`start_${key}`) || "", end: params.get(`end_${key}`) || "", titles };
+              }
+              const valid = titles.filter((t) => progMin(t.from) !== null && progMin(t.to) !== null);
+              const start = valid.reduce((a, t) => (a === "" || progMin(t.from) < progMin(a) ? t.from : a), "");
+              const end = valid.reduce((a, t) => (a === "" || progMin(t.to) > progMin(a) ? t.to : a), "");
+              return { key, start, end, titles };
+            });
             const custom = form.custom_date && form.custom_time ? { date: form.custom_date, time: form.custom_time, end: form.custom_end || "" } : null;
             await modoApi(doc, viewer, "ticket.propose", { id, streams, custom });
             redirect(res, `${back}?${menuQ}success=${encodeURIComponent("Creneaux envoyes en MP a l'invite")}`);
@@ -3797,7 +3806,22 @@ const MODO_CSS = `
   .md-slot small { color: var(--muted); }
   .md-slot-end { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
   /* Titre invite sous son stream : meme ligne (case + de … a …), decalee et teintee. */
-  .md-slot-guest { margin-left: 28px; padding: 6px 10px; border-bottom: 0; border-left: 2px solid rgba(69, 224, 210, 0.45); background: rgba(69, 224, 210, 0.04); border-radius: 0 8px 8px 0; margin-top: 4px; }
+  .md-slot-guest { padding: 6px 10px; border-bottom: 0; border-left: 2px solid rgba(69, 224, 210, 0.45); background: rgba(69, 224, 210, 0.04); border-radius: 0 8px 8px 0; margin-top: 4px; }
+  .md-propose-h { margin: 4px 0 6px; font-size: 0.9rem; }
+  .md-slot-day { margin-bottom: 10px; }
+  .md-slot-dayhead { font-weight: 700; font-size: 13px; margin: 6px 0 2px; }
+  .md-slot-dayhead span { font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .md-propose-more { margin: 12px 0 4px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .md-propose-more > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+  .md-propose-more[open] > summary { margin-bottom: 6px; }
+  /* Creneaux proposes, affiches dans la conversation du ticket (meme mise en forme que les listes). */
+  .cm-card { margin: 10px auto; max-width: 560px; border: 1px solid rgba(69, 224, 210, 0.35); background: rgba(69, 224, 210, 0.05); border-radius: 12px; padding: 10px 14px; font-size: 13px; }
+  .cm-card-head { font-weight: 700; margin-bottom: 6px; }
+  .cm-card ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .cm-card li strong { display: block; }
+  .cm-card li small { color: var(--muted); }
+  .cm-card-foot { margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .cm-card time { color: var(--muted); font-size: 11px; margin-left: 6px; font-weight: 400; }
   .md-slot-guest strong { font-size: 13px; }
   .md-decide button { padding: 6px 10px; font-size: 13px; }
   .md-decide button.on { outline: 2px solid #f5c542; outline-offset: 1px; }
@@ -3957,42 +3981,55 @@ function renderSlotMenus(doc, ticket, canDecide) {
       const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
       return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
     };
+    // 1. Titres invites d'abord, par jour : une ligne (case + zone de … a …) par titre.
+    // 2. « Proposer un autre jeu » (a derouler) : les streams au programme, sans titre invite
+    //    (l'invite choisit seulement son heure), et une autre date.
+    const guestDays = streams.filter((st) => (st.guestTitles || []).length);
+    const guestBlock = guestDays.length
+      ? guestDays
+          .map((st) => `<div class="md-slot-day">
+              <div class="md-slot-dayhead">${escapeHtml(dayOf(st.date))} <span>stream a ${escapeHtml(planningHour(st.time))}</span></div>
+              ${st.guestTitles
+                .map((t) => `<label class="md-slot md-slot-guest"><input type="checkbox" name="gt_${escapeHtml(st.key)}" value="${escapeHtml(t.id)}" />
+                  <span><strong>🤝 ${escapeHtml(t.label)}</strong>${t.from && t.to ? `<small>Zone du programme : ${escapeHtml(planningHour(t.from))} → ${escapeHtml(planningHour(t.to))}</small>` : ""}</span>
+                  <span class="md-slot-end">de <input type="time" name="gtfrom_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.from || st.time || "21:00")}" aria-label="Début de la zone" /> à <input type="time" name="gtto_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.to || endOf(st))}" aria-label="Fin de la zone" /></span></label>`)
+                .join("")}
+            </div>`)
+          .join("")
+      : `<p class="md-empty">Aucun titre invite ouvert cette semaine (rooky-tv, Programme : « Ouvrir aux invites »).</p>`;
+    const programBlock = streams.length
+      ? streams
+          .map((st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
+              <span><strong>${escapeHtml(dayOf(st.date))} · ${escapeHtml(planningHour(st.time))}</strong>
+              <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
+              <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>`)
+          .join("")
+      : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`;
     form = `
       <section class="md-form">
         <h3 class="md-answer-h">➕ ${offer?.streams?.length ? "Proposer d'autres creneaux" : "Proposer des creneaux"}</h3>
-        <form method="post" class="mt-reply">
+        <form method="post" class="mt-reply md-propose">
           <input type="hidden" name="menu" value="proposer" />
-          ${
-            streams.length
-              ? streams
-                  .map(
-                    (st) => `<label class="md-slot"><input type="checkbox" name="stream" value="${escapeHtml(st.key)}" />
-                      <span><strong>${escapeHtml(dayOf(st.date))} · ${escapeHtml(planningHour(st.time))}</strong>
-                      <small>${(st.items || []).filter((it) => it.status !== "planning").map((it) => escapeHtml(it.subject)).join(" · ") || "Programme libre"}</small></span>
-                      <span class="md-slot-end">de <input type="time" name="start_${escapeHtml(st.key)}" value="${escapeHtml(st.time || "21:00")}" aria-label="Début du créneau" /> à <input type="time" name="end_${escapeHtml(st.key)}" value="${endOf(st)}" aria-label="Fin du créneau" /></span></label>${
-                        (st.guestTitles || []).length
-                          ? `<input type="hidden" name="gt_list_${escapeHtml(st.key)}" value="1" />${st.guestTitles
-                              .map((t) => `<label class="md-slot md-slot-guest"><input type="checkbox" name="gt_${escapeHtml(st.key)}" value="${escapeHtml(t.id)}" checked />
-                                <span><strong>🤝 ${escapeHtml(t.label)}</strong><small>Titre invite${t.from && t.to ? ` · zone du programme : ${escapeHtml(planningHour(t.from))} → ${escapeHtml(planningHour(t.to))}` : ""}</small></span>
-                                <span class="md-slot-end">de <input type="time" name="gtfrom_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.from || st.time || "21:00")}" aria-label="Début de la zone du titre invité" /> à <input type="time" name="gtto_${escapeHtml(st.key)}_${escapeHtml(t.id)}" value="${escapeHtml(t.to || endOf(st))}" aria-label="Fin de la zone du titre invité" /></span></label>`)
-                              .join("")}`
-                          : ""
-                      }`
-                  )
-                  .join("")
-              : `<p class="md-empty">Aucun stream au planning dans les 7 prochains jours.</p>`
-          }
-          <div class="md-form-row"><span class="md-hint" style="flex:0 0 100%;">Autre date (optionnel) :</span>
-            <input type="date" name="custom_date" min="${today}" />
-            <input type="time" name="custom_time" aria-label="Debut" />
-            <input type="time" name="custom_end" aria-label="Fin" />
-          </div>
-          <p class="md-hint">Pour chaque stream coche, choisis le creneau (de … a …) : l'invite ne peut choisir son heure qu'a l'interieur. Ses demandes arrivent dans le menu Reponses.</p>
+          <h4 class="md-propose-h">🤝 Titres invites</h4>
+          ${guestBlock}
+          <details class="md-propose-more">
+            <summary>🎮 Proposer un autre jeu (streams au programme)</summary>
+            <p class="md-hint">L'invite choisit seulement son heure dans le creneau, sans titre invite.</p>
+            ${programBlock}
+            <div class="md-form-row"><span class="md-hint" style="flex:0 0 100%;">Autre date (optionnel) :</span>
+              <input type="date" name="custom_date" min="${today}" />
+              <input type="time" name="custom_time" aria-label="Debut" />
+              <input type="time" name="custom_end" aria-label="Fin" />
+            </div>
+          </details>
+          <p class="md-hint">Coche ce que tu proposes et ajuste la zone (de … a …) : l'invite ne peut se placer qu'a l'interieur. Ses demandes arrivent dans le menu Reponses.</p>
           <div class="mt-actions"><button type="submit" name="action" value="propose">Envoyer les creneaux en MP</button></div>
         </form>
       </section>`;
   }
-  const propose = openCloseForm + current + form || `<p class="md-empty">Aucun creneau propose pour ce ticket.</p>`;
+  // Les creneaux deja envoyes s'affichent dans la conversation du ticket (carte), pas ici.
+  void current;
+  const propose = openCloseForm + form || `<p class="md-empty">Aucun creneau propose pour ce ticket.</p>`;
   return { propose, answers, todo: pending.length };
 }
 
@@ -4250,6 +4287,16 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         prevDay = day;
         if (m.direction === "system") {
           prev = null;
+          // Creneaux proposes (rooky-tv) : carte, une ligne par creneau « • jour · de → a || titres ».
+          const lines = String(m.content || "").split("\n");
+          if (/^📤 /u.test(lines[0]) && lines.some((l) => l.startsWith("• "))) {
+            const items = lines.filter((l) => l.startsWith("• ")).map((l) => {
+              const [when, titles] = l.slice(2).split(" || ");
+              return `<li><strong>${escapeHtml(when)}</strong>${titles ? `<small>${escapeHtml(titles)}</small>` : ""}</li>`;
+            });
+            const foot = lines.slice(1).filter((l) => l.trim() && !l.startsWith("• "));
+            return `${sep}<div class="cm-card"><div class="cm-card-head">${escapeHtml(lines[0])}<time>${escapeHtml(timeOf(m.at))}</time></div><ul>${items.join("")}</ul>${foot.length ? `<div class="cm-card-foot">${foot.map(escapeHtml).join("<br />")}</div>` : ""}</div>`;
+          }
           return `${sep}<div class="cm-sys">${escapeHtml(m.content)} · ${escapeHtml(timeOf(m.at))}</div>`;
         }
         const isMember = m.direction === "in";
