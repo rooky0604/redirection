@@ -4180,6 +4180,8 @@ const TICKET_DESK_CSS = `
   .td-calendar-head h2 { margin: 0; font-size: 1.1rem; }
   .td-calendar-head button { min-width: 38px; }
   .td-calendar > .md-form { margin: 0 0 12px; }
+  .td-dialog-flash { margin: 0 0 12px; display: grid; gap: 6px; }
+  .td-dialog-flash .message { margin: 0; }
   .td-calendar > .md-form:last-child { margin-bottom: 0; }
   .td-back { display: none; }
   .td-export-dialog { position: fixed; inset: 0; margin: auto; z-index: 50; width: min(440px, calc(100vw - 32px)); box-sizing: border-box; color: var(--ink); background: rgb(22, 25, 34); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); }
@@ -4558,7 +4560,16 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
           const u = new URL(location.href);
           const menu = u.searchParams.get("menu");
           if (menu) {
-            document.getElementById(menu === "reponses" ? "td-slots-answers" : "td-slots-propose")?.showModal();
+            const dialog = document.getElementById(menu === "reponses" ? "td-slots-answers" : "td-slots-propose");
+            // Message du dernier envoi (erreur ou succes) : en haut du menu, sinon cache derriere lui.
+            const flashes = [...document.querySelectorAll("#td-body > .message")];
+            if (dialog && flashes.length) {
+              const box = document.createElement("div");
+              box.className = "td-dialog-flash";
+              flashes.forEach((m) => box.append(m.cloneNode(true)));
+              dialog.querySelector(".td-calendar-head")?.after(box);
+            }
+            dialog?.showModal();
             u.searchParams.delete("menu");
             history.replaceState(history.state, "", u);
           }
