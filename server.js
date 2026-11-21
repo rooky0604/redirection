@@ -3527,7 +3527,8 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
   const today = planningToday();
   const rights = modoRights(viewer, live);
   const can = (kind) => rights[kind] === "view" || rights[kind] === "edit";
-  const streams = (modo?.streams || []).filter((s) => s.date >= today && can("stream"));
+  // Meme numerotation que la page publique : numero de rooky-tv + rang du stream, annules sautes.
+  const streams = planningTidyStreams(modo?.streams || [], today).filter((s) => s.date >= today && can("stream"));
   const tasks = (modo?.tasks || []).filter((t) => (t.date >= today || t.late) && can(t.kind));
   const last = modo?.to && modo.to >= today ? modo.to : planningAddDays(today, 27);
   const updated = doc.receivedAt
@@ -3894,7 +3895,7 @@ function renderSlotOffer(doc, ticket, canDecide) {
   if (!canDecide || ticket.status !== "open" || pending.length) return openCloseForm + offerBox;
   const today = planningToday();
   const last = planningAddDays(today, 6);
-  const streams = (doc.program?.modo?.streams || []).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
+  const streams = planningTidyStreams(doc.program?.modo?.streams || [], today).filter((st) => st.key && st.date >= today && st.date <= last && !st.cancelled);
   const endOf = (st) => {
     const [h, m] = String(st.time || "21:00").split(":").map(Number);
     const total = (h * 60 + m + (Number(st.duration) || 360)) % 1440;
