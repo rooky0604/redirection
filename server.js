@@ -3647,9 +3647,12 @@ function renderModoPlanning(res, doc, viewer, live = {}, flash = {}) {
       ${MODO_CSS}
       .md { display: grid; gap: 10px; }
       /* Bandeau d'une seule ligne fine : la place va au contenu (tickets, planning). */
-      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: baseline; }
-      .md-hero h1 { margin: 0; font-size: 0.95rem; line-height: 1.4; }
-      .md-hero p { margin: 0; color: var(--muted); font-size: 12px; }
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; padding: 3px 12px; display: flex; gap: 4px 10px; flex-wrap: wrap; align-items: baseline; }
+      .md-hero h1 { margin: 0; font-size: 0.85rem; line-height: 1.3; }
+      .md-hero p { margin: 0; color: var(--muted); font-size: 11px; }
+      /* Bandeau colle tout en haut de la page (plus de marge au-dessus). */
+      .app-main:has(> .md), main.shell:has(> .md) { margin-top: 0 !important; padding-top: 0 !important; }
+      .md { gap: 8px; }
       .md-week h2 { font-size: 1.05rem; margin: 6px 0 10px; color: var(--ink); }
       .md-week-dates { color: var(--muted); font-weight: 400; }
       .md-days { display: grid; gap: 8px; }
@@ -3821,9 +3824,12 @@ function modoShell(doc, viewer, inner) {
       ${MODO_CSS}
       .md { display: grid; gap: 10px; }
       /* Bandeau d'une seule ligne fine : la place va au contenu (tickets, planning). */
-      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: baseline; }
-      .md-hero h1 { margin: 0; font-size: 0.95rem; line-height: 1.4; }
-      .md-hero p { margin: 0; color: var(--muted); font-size: 12px; }
+      .md-hero { background: rgba(22, 25, 34, 0.92); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; padding: 3px 12px; display: flex; gap: 4px 10px; flex-wrap: wrap; align-items: baseline; }
+      .md-hero h1 { margin: 0; font-size: 0.85rem; line-height: 1.3; }
+      .md-hero p { margin: 0; color: var(--muted); font-size: 11px; }
+      /* Bandeau colle tout en haut de la page (plus de marge au-dessus). */
+      .app-main:has(> .md), main.shell:has(> .md) { margin-top: 0 !important; padding-top: 0 !important; }
+      .md { gap: 8px; }
       .md-empty { margin: 0; color: var(--muted); font-size: 13px; font-style: italic; }
     </style>
     <main class="md">
