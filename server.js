@@ -3949,8 +3949,14 @@ function renderModoTicket(res, doc, viewer, live, data, flash, tab = "") {
 
 const TICKET_DESK_CSS = `
   .app-main { margin-left: 0; }
-  .td { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 70vh; height: calc(100vh - 68px); height: calc(100dvh - 68px); border: 1px solid var(--line); border-left: 0; border-radius: 0 18px 18px 0; overflow: hidden; background: rgba(14, 16, 23, 0.92); }
-  .td-list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .td { display: grid; grid-template-columns: var(--td-list, 330px) minmax(0, 1fr); min-height: 70vh; height: calc(100vh - 68px); height: calc(100dvh - 68px); border: 1px solid var(--line); border-left: 0; border-radius: 0 18px 18px 0; overflow: hidden; background: rgba(14, 16, 23, 0.92); }
+  .td-list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; position: relative; }
+  /* Poignee pour elargir / reduire la liste a la souris (largeur gardee par personne). */
+  .td-resize { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; z-index: 5; touch-action: none; }
+  .td-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background 0.15s; }
+  .td-resize:hover::after, .td.resizing .td-resize::after { background: rgba(69, 224, 210, 0.7); }
+  .td.resizing { user-select: none; cursor: col-resize; }
+  @media (max-width: 860px) { .td-resize { display: none; } }
   .td-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 12px; padding: 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); }
   .td-tabs a { text-align: center; padding: 8px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 14px; }
   .td-tabs a.on { background: rgba(124, 92, 255, 0.22); color: var(--ink); }
@@ -4313,6 +4319,7 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         : ""
     }>
       <aside class="td-list">
+        <div class="td-resize" id="td-resize" role="separator" aria-orientation="vertical" aria-label="Largeur de la liste des tickets" title="Glisser pour élargir ou réduire (double-clic : largeur par défaut)" data-user="${escapeHtml(String(viewer.u || (viewer.password ? "admin" : "")))}"></div>
         ${
           live.rookyAdmin && Array.isArray(live.channels)
             ? `<form method="get" action="/modo/tickets" class="td-chan"><select name="chaine" aria-label="Chaine des tickets" onchange="this.form.submit()">
@@ -4457,6 +4464,37 @@ function renderTicketDesk(res, doc, viewer, live, data, flash, tab) {
         };
         fitDesk();
         window.addEventListener("resize", fitDesk);
+
+        // Largeur de la liste a gauche : glisser la poignee, gardee pour cette personne (navigateur).
+        (() => {
+          const td = document.querySelector("section.td");
+          const grip = document.getElementById("td-resize");
+          if (!td || !grip) return;
+          const key = "td-list-width:" + (grip.dataset.user || "moi");
+          const MIN = 200, MAX = 560;
+          const apply = (w) => { if (w) td.style.setProperty("--td-list", Math.round(w) + "px"); else td.style.removeProperty("--td-list"); };
+          try { const saved = Number(localStorage.getItem(key)); if (saved >= MIN && saved <= MAX) apply(saved); } catch (e) {}
+          grip.addEventListener("pointerdown", (event) => {
+            if (window.matchMedia("(max-width: 860px)").matches) return;
+            event.preventDefault();
+            grip.setPointerCapture(event.pointerId);
+            td.classList.add("resizing");
+            const left = td.getBoundingClientRect().left;
+            let width = 0;
+            const move = (e) => { width = Math.min(MAX, Math.max(MIN, e.clientX - left)); apply(width); };
+            const up = () => {
+              td.classList.remove("resizing");
+              grip.removeEventListener("pointermove", move);
+              grip.removeEventListener("pointerup", up);
+              grip.removeEventListener("pointercancel", up);
+              if (width) { try { localStorage.setItem(key, String(Math.round(width))); } catch (e) {} }
+            };
+            grip.addEventListener("pointermove", move);
+            grip.addEventListener("pointerup", up);
+            grip.addEventListener("pointercancel", up);
+          });
+          grip.addEventListener("dblclick", () => { apply(0); try { localStorage.removeItem(key); } catch (e) {} });
+        })();
         const scrollDown = () => { const b = document.getElementById("td-body"); if (b) b.scrollTop = b.scrollHeight; };
         scrollDown();
         let lastKey = 0;
