@@ -644,7 +644,7 @@ const requestListener = async (req, res) => {
         return;
       }
       const threadName = String(form.threadName || "").replace(/\s+/g, " ").trim().slice(0, 100);
-      const draft = { url, threadId, threadName };
+      const draft = { url, threadId, threadName, name };
       const testResult = await sendMonitorEmbed(draft, {
         title: "Test de notification",
         description: "Si vous voyez ce message, ce webhook est correctement configure.",
@@ -724,6 +724,8 @@ const requestListener = async (req, res) => {
         return;
       }
 
+      const form = await parseForm(req);
+      const done = form.state === "done";
       const config = readMonitorConfig();
       const webhook = getPrimaryWebhook(config);
       if (!webhook) {
@@ -731,17 +733,24 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      const sendResult = await sendMonitorEmbed(webhook, {
-        title: "Maintenance en cours",
-        description: "Le serveur est actuellement en maintenance.",
-        color: 0xfee75c,
-        timestamp: new Date().toISOString()
-      });
+      const sendResult = await sendMonitorEmbed(webhook, done
+        ? {
+            title: "✅ Maintenance terminée",
+            description: "La maintenance est terminée, le serveur est de nouveau disponible.",
+            color: 0x3ddc84,
+            timestamp: new Date().toISOString()
+          }
+        : {
+            title: "Maintenance en cours",
+            description: "Le serveur est actuellement en maintenance.",
+            color: 0xfee75c,
+            timestamp: new Date().toISOString()
+          });
 
       redirect(
         res,
         sendResult.ok
-          ? "/admin/monitoring?success=Annonce%20de%20maintenance%20envoyee"
+          ? `/admin/monitoring?success=${encodeURIComponent(done ? "Fin de maintenance annoncee" : "Annonce de maintenance envoyee")}`
           : `/admin/monitoring?error=${encodeURIComponent(`Echec de l'envoi (${sendResult.status || sendResult.error || "erreur"})`)}`
       );
       return;
@@ -2105,13 +2114,25 @@ function rememberWebhookThread(webhook, threadId) {
   }
 }
 
+// Nom affiche des messages = nom donne au webhook (Discord refuse « discord » / « clyde » dans le nom).
+function webhookUsername(webhook) {
+  const name = String(webhook?.name || "").replace(/discord|clyde/gi, "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return name && name !== "Sans nom" ? name : "";
+}
+
 async function sendMonitorEmbed(webhook, embed) {
+  const username = webhookUsername(webhook);
+  const send = async (url, extra = {}) => {
+    const first = await sendDiscordEmbed(url, embed, username ? { ...extra, username } : extra);
+    // Nom refuse par Discord (formulaire invalide) : envoi avec le nom par defaut du webhook.
+    return username && !first.ok && first.code === 50035 ? sendDiscordEmbed(url, embed, extra) : first;
+  };
   const threadId = webhookThreadOf(webhook);
-  let result = await sendDiscordEmbed(withThreadId(webhook.url, threadId), embed);
+  let result = await send(withThreadId(webhook.url, threadId));
   // 220001 : salon forum sans post indique ; 10003 : le post retenu a ete supprime.
   if (!result.ok && (result.code === 220001 || (threadId && result.code === 10003))) {
     const threadName = String(webhook.threadName || "").trim() || "Monitoring";
-    result = await sendDiscordEmbed(withThreadId(webhook.url, ""), embed, { thread_name: threadName.slice(0, 100) });
+    result = await send(withThreadId(webhook.url, ""), { thread_name: threadName.slice(0, 100) });
     if (result.ok && result.data?.channel_id) {
       rememberWebhookThread(webhook, String(result.data.channel_id));
     }
@@ -2864,10 +2885,16 @@ function renderMonitoring(res, config, flash) {
     ${messages}
     <section class="card">
       <h2>Serveur en maintenance</h2>
-      <p>Envoie une annonce de maintenance generale au webhook principal.</p>
-      <form method="post" action="/admin/monitoring/maintenance">
-        <button type="submit" class="warning warning-large">Le serveur est en maintenance</button>
-      </form>
+      <p>Envoie une annonce de maintenance generale au webhook principal, puis l'annonce de fin quand c'est reparti.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        <form method="post" action="/admin/monitoring/maintenance">
+          <button type="submit" class="warning warning-large">Le serveur est en maintenance</button>
+        </form>
+        <form method="post" action="/admin/monitoring/maintenance">
+          <input type="hidden" name="state" value="done" />
+          <button type="submit" class="warning-large" style="background:#22a559;border-color:#22a559;color:#fff;">La maintenance est terminee</button>
+        </form>
+      </div>
     </section>
     <section class="card">
       <h2>Webhooks</h2>
