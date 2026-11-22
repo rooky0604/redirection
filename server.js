@@ -638,7 +638,14 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      const testResult = await sendDiscordEmbed(url, {
+      const threadId = parseThreadInput(form.thread);
+      if (threadId === null) {
+        redirect(res, "/admin/monitoring?error=" + encodeURIComponent("Post du forum invalide : colle le lien du post (clic droit sur le post > Copier le lien) ou son ID."));
+        return;
+      }
+      const threadName = String(form.threadName || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      const draft = { url, threadId, threadName };
+      const testResult = await sendMonitorEmbed(draft, {
         title: "Test de notification",
         description: "Si vous voyez ce message, ce webhook est correctement configure.",
         color: 0x6d5ef7,
@@ -661,6 +668,8 @@ const requestListener = async (req, res) => {
         id: crypto.randomBytes(4).toString("hex"),
         name: name || "Sans nom",
         url,
+        ...(draft.threadId ? { threadId: draft.threadId } : {}),
+        ...(threadName ? { threadName } : {}),
         isPrimary: config.webhooks.length === 0
       });
       writeMonitorConfig(config);
@@ -722,7 +731,7 @@ const requestListener = async (req, res) => {
         return;
       }
 
-      const sendResult = await sendDiscordEmbed(webhook.url, {
+      const sendResult = await sendMonitorEmbed(webhook, {
         title: "Maintenance en cours",
         description: "Le serveur est actuellement en maintenance.",
         color: 0xfee75c,
@@ -850,7 +859,7 @@ const requestListener = async (req, res) => {
       }
 
       const label = bot.name || bot.botUsername || bot.botId;
-      const sendResult = await sendDiscordEmbed(webhook.url, {
+      const sendResult = await sendMonitorEmbed(webhook, {
         title: label,
         description: "Ce bot est actuellement en maintenance.",
         color: 0xfee75c,
@@ -1918,6 +1927,12 @@ function readMonitorConfig() {
     webhooks[0].isPrimary = true;
   }
 
+  for (const w of webhooks) {
+    if (!w.threadId && monitorThreadCache.has(w.id)) {
+      w.threadId = monitorThreadCache.get(w.id);
+    }
+  }
+
   return {
     webhooks,
     bots: Array.isArray(parsed?.bots) ? parsed.bots : []
@@ -1987,7 +2002,7 @@ async function checkBotStatus(guildId, botId, botUsername) {
     : { status: "hors ligne", detail: "" };
 }
 
-function sendDiscordEmbed(webhookUrl, embed) {
+function sendDiscordEmbed(webhookUrl, embed, extra = {}) {
   return new Promise((resolve) => {
     let parsedUrl;
     try {
@@ -1997,7 +2012,7 @@ function sendDiscordEmbed(webhookUrl, embed) {
       return;
     }
 
-    const payload = JSON.stringify({ embeds: [embed] });
+    const payload = JSON.stringify({ ...extra, embeds: [embed] });
     let settled = false;
     const finish = (result) => {
       if (settled) {
@@ -2025,7 +2040,13 @@ function sendDiscordEmbed(webhookUrl, embed) {
         });
         res.on("end", () => {
           const ok = res.statusCode >= 200 && res.statusCode < 300;
-          finish(ok ? { ok: true, status: res.statusCode } : { ok: false, status: res.statusCode, error: body });
+          let data = null;
+          try {
+            data = body ? JSON.parse(body) : null;
+          } catch {
+            data = null;
+          }
+          finish(ok ? { ok: true, status: res.statusCode, data } : { ok: false, status: res.statusCode, error: body, code: data?.code });
         });
       }
     );
@@ -2038,6 +2059,77 @@ function sendDiscordEmbed(webhookUrl, embed) {
     req.write(payload);
     req.end();
   });
+}
+
+// Webhook d'un salon forum : Discord exige un post. Le 1er envoi ouvre le post « Monitoring » (ou le
+// post choisi a l'ajout), son ID est retenu et les envois suivants y vont.
+const monitorThreadCache = new Map();
+
+function withThreadId(url, threadId) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ""));
+  } catch {
+    return String(url || "");
+  }
+  parsed.searchParams.delete("thread_id");
+  if (threadId) {
+    parsed.searchParams.set("thread_id", threadId);
+  }
+  parsed.searchParams.set("wait", "true");
+  return parsed.toString();
+}
+
+function webhookThreadOf(webhook) {
+  if (!webhook) {
+    return "";
+  }
+  const fromUrl = /[?&]thread_id=(\d{5,25})/.exec(String(webhook.url || ""));
+  return String(webhook.threadId || monitorThreadCache.get(webhook.id) || (fromUrl ? fromUrl[1] : "") || "");
+}
+
+function rememberWebhookThread(webhook, threadId) {
+  if (!webhook || !threadId || webhook.threadId === threadId) {
+    return;
+  }
+  webhook.threadId = threadId;
+  if (!webhook.id) {
+    return;
+  }
+  monitorThreadCache.set(webhook.id, threadId);
+  const config = readMonitorConfig();
+  const stored = config.webhooks.find((w) => w.id === webhook.id);
+  if (stored && stored.threadId !== threadId) {
+    stored.threadId = threadId;
+    writeMonitorConfig(config);
+  }
+}
+
+async function sendMonitorEmbed(webhook, embed) {
+  const threadId = webhookThreadOf(webhook);
+  let result = await sendDiscordEmbed(withThreadId(webhook.url, threadId), embed);
+  // 220001 : salon forum sans post indique ; 10003 : le post retenu a ete supprime.
+  if (!result.ok && (result.code === 220001 || (threadId && result.code === 10003))) {
+    const threadName = String(webhook.threadName || "").trim() || "Monitoring";
+    result = await sendDiscordEmbed(withThreadId(webhook.url, ""), embed, { thread_name: threadName.slice(0, 100) });
+    if (result.ok && result.data?.channel_id) {
+      rememberWebhookThread(webhook, String(result.data.channel_id));
+    }
+  }
+  return result;
+}
+
+// Lien ou ID d'un post de forum (https://discord.com/channels/<serveur>/<post>[/<message>]).
+function parseThreadInput(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (/^\d{5,25}$/.test(text)) {
+    return text;
+  }
+  const link = /discord(?:app)?\.com\/channels\/(?:\d+|@me)\/(\d{5,25})/.exec(text);
+  return link ? link[1] : null;
 }
 
 // Bots deja verifies depuis le demarrage du serveur : la 1re verification apres une relance de la
@@ -2066,7 +2158,7 @@ async function checkAndNotifyBot(bot, config) {
     const webhook = getBotWebhook(config, bot);
     if (webhook) {
       const online = result.status === "en ligne";
-      const sendResult = await sendDiscordEmbed(webhook.url, {
+      const sendResult = await sendMonitorEmbed(webhook, {
         title: `🔄 Reboot — ${label}`,
         description: [
           "Relance de la machine détectée : la surveillance a redémarré.",
@@ -2096,7 +2188,7 @@ async function checkAndNotifyBot(bot, config) {
 
   const webhook = getBotWebhook(config, bot);
   if (webhook && previousStatus !== "inconnu") {
-    const sendResult = await sendDiscordEmbed(webhook.url, {
+    const sendResult = await sendMonitorEmbed(webhook, {
       title: label,
       description: result.status === "en ligne" ? "Le bot est maintenant en ligne." : "Le bot est maintenant hors ligne.",
       color: result.status === "en ligne" ? 0x3ddc84 : 0xf0555f,
@@ -2690,7 +2782,7 @@ function renderMonitoring(res, config, flash) {
           (w) => `
             <tr>
               <td><strong>${escapeHtml(w.name)}</strong>${w.isPrimary ? ' <span class="hero-badge" style="margin:0;">Principal</span>' : ""}</td>
-              <td><code>${escapeHtml(w.url)}</code></td>
+              <td><code>${escapeHtml(w.url)}</code>${webhookThreadOf(w) ? `<br /><span style="font-size:12px;color:var(--muted);">Forum : post ${escapeHtml(webhookThreadOf(w))}</span>` : ""}</td>
               <td class="actions-cell">
                 ${
                   w.isPrimary
@@ -2803,7 +2895,15 @@ function renderMonitoring(res, config, flash) {
             <span>URL du webhook Discord</span>
             <input type="text" name="url" placeholder="https://discord.com/api/webhooks/..." required />
           </label>
-          <p>Un message de test est envoye immediatement pour verifier que ca fonctionne.</p>
+          <label>
+            <span>Salon forum : post existant (facultatif)</span>
+            <input type="text" name="thread" placeholder="Lien du post (clic droit sur le post > Copier le lien) ou son ID" />
+          </label>
+          <label>
+            <span>Salon forum : titre du post a creer (facultatif)</span>
+            <input type="text" name="threadName" maxlength="100" placeholder="Monitoring" />
+          </label>
+          <p>Un message de test est envoye immediatement pour verifier que ca fonctionne. Salon forum : sans post indique, le test ouvre un post (« Monitoring » par defaut) et toutes les alertes iront dedans.</p>
           <div class="form-actions">
             <button type="submit">Ajouter</button>
           </div>
@@ -3071,7 +3171,7 @@ async function handlePlanningSync(req, res) {
   // Droits des tickets (qui peut ouvrir et traiter les tickets, regle Discord de rooky-tv) : envoyes
   // par rooky-tv seulement quand ils changent ; le site garde la derniere liste recue.
   if (body.event === "ticketPerms") {
-    const ids = Array.isArray(body.ids) ? body.ids.map(String).filter((id) => /^d{5,25}$/.test(id)).slice(0, 2000) : [];
+    const ids = Array.isArray(body.ids) ? body.ids.map(String).filter((id) => /^\d{5,25}$/.test(id)).slice(0, 2000) : [];
     writePlanning({ ...doc, ticketPerms: { ids, at: Date.now() } });
     return sendJson(res, 200, { ok: true, count: ids.length });
   }
