@@ -961,6 +961,7 @@ const requestListener = async (req, res) => {
         target,
         code: 301,
         updatedAt: new Date().toISOString(),
+        adminLabel: (form.adminLabel || "").trim(),
         public: form.public === "on",
         publicLabel: (form.publicLabel || "").trim(),
         group: (form.groupNew || "").trim() || (form.groupSelect || "").trim(),
@@ -2354,6 +2355,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
     return `
     <tr data-source="${escapeHtml(item.source)}" class="draggable-row">
       <td class="drag-handle" draggable="true" title="Glisser pour reordonner">&#8942;&#8942;</td>
+      <td>${item.adminLabel ? `<strong>${escapeHtml(item.adminLabel)}</strong>` : `<span style="color: var(--muted)">—</span>`}</td>
       <td><code>${escapeHtml(item.source)}</code></td>
       <td>${renderTargetCell(item.target)}</td>
       <td>${isPubliclyVisible(item) ? "Oui" : "Non"}</td>
@@ -2387,6 +2389,7 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
         <thead>
           <tr>
             <th></th>
+            <th>Label</th>
             <th>Source</th>
             <th>Cible</th>
             <th>Public</th>
@@ -2444,6 +2447,10 @@ function renderAdmin(res, redirects, flash, editingRedirect = null, activeTab = 
       <form method="post" action="/admin/redirects" class="form-grid">
         <input type="hidden" name="originalSource" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
         <input type="hidden" name="tab" value="${escapeHtml(activeTab)}" />
+        <label>
+          <span>Label (administration uniquement, optionnel)</span>
+          <input type="text" name="adminLabel" maxlength="120" placeholder="Ex: Lien bio TikTok" value="${escapeHtml(editingRedirect ? editingRedirect.adminLabel || "" : "")}" />
+        </label>
         <label>
           <span>URL souhaitee (facultative si "Utiliser le lien final" est coche)</span>
           <input type="text" name="source" placeholder="www.example.rooky.fr/mon-chemin ou *.exemple.fr ou /mon-chemin" value="${escapeHtml(editingRedirect ? editingRedirect.source : "")}" />
@@ -2710,7 +2717,7 @@ function renderStats(res, redirects, flash, activeTab = "") {
   const renderRow = (item, tabLabel) => {
     const resolvedTarget = resolveRedirectTarget(item.target, redirects, new Set([item.source])) || item.target;
     const platform = detectPlatform(item.source, resolvedTarget);
-    const label = item.publicLabel || (item.source.startsWith("*.") ? "" : platform.name);
+    const label = item.adminLabel || item.publicLabel || (item.source.startsWith("*.") ? "" : platform.name);
 
     return `
       <tr>
