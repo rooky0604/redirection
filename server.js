@@ -5258,13 +5258,17 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       const picker = groups.length
         ? `<details class="tm-pick"><summary aria-label="Gerer les groupes">+</summary>
             <form method="post" class="tm-pick-box"><input type="hidden" name="member" value="${escapeHtml(p.id)}" />
+              <div class="tm-pick-head">Groupes de ${escapeHtml(p.name)}</div>
+              ${groups.length > 6 ? `<input type="search" class="tm-pick-filter" placeholder="Filtrer les groupes..." aria-label="Filtrer les groupes" />` : ""}
+              <div class="tm-pick-list" role="group" aria-label="Groupes locaux">
               ${groups
                 .map((g) => {
                   const viaRole = !g.members.includes(p.id) && g.roles.some((r) => (p.roles || []).includes(r));
-                  return `<label><input type="checkbox" name="group" value="${escapeHtml(g.id)}"${g.members.includes(p.id) ? " checked" : ""} /> ${escapeHtml(g.name)}${viaRole ? ` <small>(deja par role)</small>` : ""}</label>`;
+                  return `<label class="tm-opt" data-name="${escapeHtml(String(g.name).toLowerCase())}"><input type="checkbox" name="group" value="${escapeHtml(g.id)}"${g.members.includes(p.id) ? " checked" : ""} /><span class="tm-opt-name">${escapeHtml(g.name)}</span>${viaRole ? `<small>deja par role</small>` : ""}</label>`;
                 })
                 .join("")}
-              <button type="submit" name="action" value="set">Enregistrer</button>
+              </div>
+              <div class="tm-pick-foot"><span class="tm-pick-count"></span><button type="submit" name="action" value="set">Enregistrer</button></div>
             </form>
           </details>`
         : "";
@@ -5309,10 +5313,25 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       .tm-pick { position: relative; }
       .tm-pick summary { list-style: none; cursor: pointer; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; border: 1px dashed var(--line); color: var(--muted); }
       .tm-pick summary::-webkit-details-marker { display: none; }
-      .tm-pick-box { position: absolute; z-index: 5; top: 28px; left: 0; min-width: 220px; display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: #151821; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
-      .tm-pick-box label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
-      .tm-pick-box input { width: 16px; height: 16px; margin: 0; flex: 0 0 auto; }
-      .tm-pick-box small { color: var(--muted); }
+      .tm-pick[open] summary { border-style: solid; border-color: #7c5cff; color: #c9bcff; background: rgba(124, 92, 255, 0.18); }
+      .tm-pick-box { position: absolute; z-index: 5; top: 28px; left: 0; width: 260px; display: grid; gap: 8px; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: #151821; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
+      .tm-pick-head { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tm-pick-filter { width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 13px; }
+      .tm-pick-list { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
+      .tm-opt { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer; border: 1px solid transparent; user-select: none; }
+      .tm-opt:hover { background: rgba(255, 255, 255, 0.05); }
+      .tm-opt:has(input:checked) { background: rgba(124, 92, 255, 0.16); border-color: rgba(124, 92, 255, 0.45); color: #e4dcff; }
+      .tm-opt input { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 0; flex: 0 0 auto; border-radius: 5px; border: 1.5px solid rgba(255, 255, 255, 0.28); background: transparent; display: grid; place-items: center; cursor: pointer; transition: background .12s, border-color .12s; }
+      .tm-opt input::after { content: ""; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg) translate(-1px, -1px); opacity: 0; }
+      .tm-opt input:checked { background: #7c5cff; border-color: #7c5cff; }
+      .tm-opt input:checked::after { opacity: 1; }
+      .tm-opt input:focus-visible { outline: 2px solid #8ab4ff; outline-offset: 2px; }
+      .tm-opt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tm-opt small { flex: 0 0 auto; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: rgba(69, 224, 210, 0.14); color: #45e0d2; }
+      .tm-opt[hidden] { display: none; }
+      .tm-pick-foot { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
+      .tm-pick-count { font-size: 12px; color: var(--muted); }
+      .tm-pick-foot button { margin: 0; padding: 7px 14px; }
       .tm-none { color: var(--muted); }
       .tm-act { font-size: 12px; padding: 3px 8px; border-radius: 6px; }
       .tm-act.on { background: rgba(87, 242, 135, 0.15); color: #57f287; }
@@ -5350,6 +5369,37 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
         });
         document.addEventListener("keydown", (event) => {
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") { event.preventDefault(); input.focus(); }
+          if (event.key === "Escape") document.querySelectorAll(".tm-pick[open]").forEach((d) => { d.open = false; });
+        });
+        // Liste de selection des groupes : un seul menu ouvert, fermeture au clic dehors, compteur, filtre.
+        const picks = [...document.querySelectorAll(".tm-pick")];
+        const count = (box) => {
+          const n = box.querySelectorAll(".tm-opt input:checked").length;
+          const out = box.querySelector(".tm-pick-count");
+          if (out) out.textContent = n ? n + " selectionne" + (n > 1 ? "s" : "") : "Aucun groupe";
+        };
+        picks.forEach((pick) => {
+          const box = pick.querySelector(".tm-pick-box");
+          if (!box) return;
+          count(box);
+          box.addEventListener("change", () => count(box));
+          pick.addEventListener("toggle", () => {
+            if (!pick.open) return;
+            picks.forEach((other) => { if (other !== pick) other.open = false; });
+            const filter = box.querySelector(".tm-pick-filter");
+            if (filter) filter.focus();
+          });
+          const filter = box.querySelector(".tm-pick-filter");
+          if (filter) {
+            filter.addEventListener("input", () => {
+              const q = filter.value.trim().toLowerCase();
+              box.querySelectorAll(".tm-opt").forEach((opt) => { opt.hidden = q && !opt.dataset.name.includes(q); });
+            });
+            filter.addEventListener("keydown", (event) => { if (event.key === "Enter") event.preventDefault(); });
+          }
+        });
+        document.addEventListener("click", (event) => {
+          picks.forEach((pick) => { if (pick.open && !pick.contains(event.target)) pick.open = false; });
         });
       })();
     </script>`;
