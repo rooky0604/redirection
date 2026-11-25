@@ -1117,6 +1117,13 @@ const requestListener = async (req, res) => {
       const back = (key, message) => redirect(res, `/admin/equipe?${key}=${encodeURIComponent(message)}#m-${member}`);
       if (!/^\d{5,25}$/.test(member)) return back("error", "Membre invalide.");
       const groups = readModoGroups();
+      if (params.get("action") === "add") {
+        const group = groups.find((g) => g.id === params.get("group"));
+        if (!group) return back("error", "Choisis un groupe.");
+        if (!group.members.includes(member)) group.members.push(member);
+        writeModoGroups(groups);
+        return back("success", `Ajoute au groupe « ${group.name} ».`);
+      }
       if (params.get("action") === "remove") {
         const group = groups.find((g) => g.id === params.get("group"));
         if (!group) return back("error", "Groupe introuvable.");
@@ -5255,22 +5262,16 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
               : `<span class="tm-chip" style="padding-right:9px;">${escapeHtml(g.name)}</span>`;
         })
         .join("");
-      const picker = groups.length
-        ? `<details class="tm-pick"><summary aria-label="Gerer les groupes">+</summary>
-            <form method="post" class="tm-pick-box"><input type="hidden" name="member" value="${escapeHtml(p.id)}" />
-              <div class="tm-pick-head">Groupes de ${escapeHtml(p.name)}</div>
-              ${groups.length > 6 ? `<input type="search" class="tm-pick-filter" placeholder="Filtrer les groupes..." aria-label="Filtrer les groupes" />` : ""}
-              <div class="tm-pick-list" role="group" aria-label="Groupes locaux">
-              ${groups
-                .map((g) => {
-                  const viaRole = !g.members.includes(p.id) && g.roles.some((r) => (p.roles || []).includes(r));
-                  return `<label class="tm-opt" data-name="${escapeHtml(String(g.name).toLowerCase())}"><input type="checkbox" name="group" value="${escapeHtml(g.id)}"${g.members.includes(p.id) ? " checked" : ""} /><span class="tm-opt-name">${escapeHtml(g.name)}</span>${viaRole ? `<small>deja par role</small>` : ""}</label>`;
-                })
-                .join("")}
-              </div>
-              <div class="tm-pick-foot"><span class="tm-pick-count"></span><button type="submit" name="action" value="set">Enregistrer</button></div>
-            </form>
-          </details>`
+      // Liste deroulante des groupes dont la personne ne fait pas encore partie : choisir = ajouter.
+      const available = groups.filter((g) => !mine.includes(g));
+      const picker = available.length
+        ? `<form method="post" class="tm-add"><input type="hidden" name="member" value="${escapeHtml(p.id)}" /><input type="hidden" name="action" value="add" />
+            <select name="group" class="tm-add-select" aria-label="Ajouter ${escapeHtml(p.name)} a un groupe" onchange="if (this.value) this.form.submit()">
+              <option value="">+ Ajouter un groupe…</option>
+              ${available.map((g) => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`).join("")}
+            </select>
+            <noscript><button type="submit">Ajouter</button></noscript>
+          </form>`
         : "";
       return `<tr id="m-${escapeHtml(p.id)}" data-search="${escapeHtml(`${p.name} ${p.id}`.toLowerCase())}">
         <td><div class="tm-name">${escapeHtml(p.name)}</div><div class="tm-id">${escapeHtml(p.id)}</div></td>
@@ -5310,28 +5311,10 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       .tm-chip.role { padding-right: 9px; background: rgba(69, 224, 210, 0.14); color: #45e0d2; }
       .tm-chip button { all: unset; cursor: pointer; padding: 0 4px; border-radius: 4px; font-size: 14px; line-height: 1; }
       .tm-chip button:hover { background: rgba(255, 255, 255, 0.15); }
-      .tm-pick { position: relative; }
-      .tm-pick summary { list-style: none; cursor: pointer; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; border: 1px dashed var(--line); color: var(--muted); }
-      .tm-pick summary::-webkit-details-marker { display: none; }
-      .tm-pick[open] summary { border-style: solid; border-color: #7c5cff; color: #c9bcff; background: rgba(124, 92, 255, 0.18); }
-      .tm-pick-box { position: absolute; z-index: 5; top: 28px; left: 0; width: 260px; display: grid; gap: 8px; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: #151821; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
-      .tm-pick-head { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .tm-pick-filter { width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 13px; }
-      .tm-pick-list { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
-      .tm-opt { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer; border: 1px solid transparent; user-select: none; }
-      .tm-opt:hover { background: rgba(255, 255, 255, 0.05); }
-      .tm-opt:has(input:checked) { background: rgba(124, 92, 255, 0.16); border-color: rgba(124, 92, 255, 0.45); color: #e4dcff; }
-      .tm-opt input { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 0; flex: 0 0 auto; border-radius: 5px; border: 1.5px solid rgba(255, 255, 255, 0.28); background: transparent; display: grid; place-items: center; cursor: pointer; transition: background .12s, border-color .12s; }
-      .tm-opt input::after { content: ""; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg) translate(-1px, -1px); opacity: 0; }
-      .tm-opt input:checked { background: #7c5cff; border-color: #7c5cff; }
-      .tm-opt input:checked::after { opacity: 1; }
-      .tm-opt input:focus-visible { outline: 2px solid #8ab4ff; outline-offset: 2px; }
-      .tm-opt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .tm-opt small { flex: 0 0 auto; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: rgba(69, 224, 210, 0.14); color: #45e0d2; }
-      .tm-opt[hidden] { display: none; }
-      .tm-pick-foot { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
-      .tm-pick-count { font-size: 12px; color: var(--muted); }
-      .tm-pick-foot button { margin: 0; padding: 7px 14px; }
+      .tm-add { display: inline; margin: 0; }
+      .tm-add-select { width: auto; max-width: 190px; margin: 0; padding: 3px 26px 3px 9px; font-size: 12px; border-radius: 6px; border: 1px dashed var(--line); background-color: transparent; color: var(--muted); cursor: pointer; }
+      .tm-add-select:hover, .tm-add-select:focus { border-style: solid; border-color: #7c5cff; color: #c9bcff; }
+      .tm-add-select option { background: #151821; color: #e8eaf0; }
       .tm-none { color: var(--muted); }
       .tm-act { font-size: 12px; padding: 3px 8px; border-radius: 6px; }
       .tm-act.on { background: rgba(87, 242, 135, 0.15); color: #57f287; }
@@ -5340,7 +5323,6 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
       @media (max-width: 860px) {
         .tm { min-height: calc(100vh - 92px); }
         .tm-wrap { overflow-x: auto; overflow-y: visible; }
-        .tm-pick-box { left: auto; right: 0; }
       }
     </style>
     <main class="tm">
@@ -5357,7 +5339,7 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
         <thead><tr><th>Nom</th><th>Statut</th><th>Roles Discord</th><th>Groupes locaux</th><th>Derniere visite</th><th>Activite (site)</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="6" class="tm-none">Personne pour l'instant.</td></tr>`}</tbody>
       </table></div>
-      <p class="md-hint" style="color:var(--muted);font-size:13px;margin:0;">Roles et equipe lus sur rooky-tv. Une pastille turquoise vient d'un role Discord lie au groupe (a changer sur Discord / rooky-tv) ; les autres se retirent avec \u00d7. « + » pour ajouter plusieurs groupes d'un coup. Creer ou supprimer un groupe : Groupes locaux.</p>
+      <p class="md-hint" style="color:var(--muted);font-size:13px;margin:0;">Roles et equipe lus sur rooky-tv. Une pastille turquoise vient d'un role Discord lie au groupe (a changer sur Discord / rooky-tv) ; les autres se retirent avec \u00d7. « Ajouter un groupe » pour en ajouter un. Creer ou supprimer un groupe : Groupes locaux.</p>
     </main>
     <script>
       (() => {
@@ -5369,37 +5351,6 @@ function renderAdminTeam(res, doc, team, flash, canEdit = true, who = "admin") {
         });
         document.addEventListener("keydown", (event) => {
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") { event.preventDefault(); input.focus(); }
-          if (event.key === "Escape") document.querySelectorAll(".tm-pick[open]").forEach((d) => { d.open = false; });
-        });
-        // Liste de selection des groupes : un seul menu ouvert, fermeture au clic dehors, compteur, filtre.
-        const picks = [...document.querySelectorAll(".tm-pick")];
-        const count = (box) => {
-          const n = box.querySelectorAll(".tm-opt input:checked").length;
-          const out = box.querySelector(".tm-pick-count");
-          if (out) out.textContent = n ? n + " selectionne" + (n > 1 ? "s" : "") : "Aucun groupe";
-        };
-        picks.forEach((pick) => {
-          const box = pick.querySelector(".tm-pick-box");
-          if (!box) return;
-          count(box);
-          box.addEventListener("change", () => count(box));
-          pick.addEventListener("toggle", () => {
-            if (!pick.open) return;
-            picks.forEach((other) => { if (other !== pick) other.open = false; });
-            const filter = box.querySelector(".tm-pick-filter");
-            if (filter) filter.focus();
-          });
-          const filter = box.querySelector(".tm-pick-filter");
-          if (filter) {
-            filter.addEventListener("input", () => {
-              const q = filter.value.trim().toLowerCase();
-              box.querySelectorAll(".tm-opt").forEach((opt) => { opt.hidden = q && !opt.dataset.name.includes(q); });
-            });
-            filter.addEventListener("keydown", (event) => { if (event.key === "Enter") event.preventDefault(); });
-          }
-        });
-        document.addEventListener("click", (event) => {
-          picks.forEach((pick) => { if (pick.open && !pick.contains(event.target)) pick.open = false; });
         });
       })();
     </script>`;
@@ -5436,7 +5387,7 @@ function renderDocumentation(res, who, logout) {
     ...(lead
       ? [
           section("\ud83d\udc65", "Equipe et groupes locaux", [
-            "<strong>Equipe</strong> : membres de la chaine (lus sur rooky-tv), leurs roles d'acces, leur derniere visite et leurs groupes locaux (+ pour en ajouter plusieurs, × pour retirer).",
+            "<strong>Equipe</strong> : membres de la chaine (lus sur rooky-tv), leurs roles d'acces, leur derniere visite et leurs groupes locaux (liste « Ajouter un groupe », × pour retirer).",
             "<strong>Groupes locaux</strong> : une categorie de ticket cochee dans un groupe est reservee a ses membres ; les autres categories restent visibles par tous les modos.",
             "Un groupe peut etre lie a un role Discord : l'avoir sur le serveur suffit (verifie par rooky-tv). Le groupe ne donne aucun role.",
             "Le streamer et les moderateurs actuels peuvent modifier les groupes locaux."
