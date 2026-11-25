@@ -6534,7 +6534,17 @@ function renderLinkRow(link) {
 }
 
 // side : onglets en colonne a gauche du contenu (pages d'administration) ; sinon en ligne (accueil).
-function renderCssTabs(tabs, idPrefix, activeLabel = "", { side = false } = {}) {
+// hash : chaque onglet a une ancre (#mes-jeux) mise dans l'URL au clic, et ouverte directement si presente.
+function tabHashSlug(label) {
+  return String(label || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function renderCssTabs(tabs, idPrefix, activeLabel = "", { side = false, hash = false } = {}) {
   if (tabs.length <= 1) {
     return tabs.length ? tabs[0].content : "";
   }
@@ -6547,9 +6557,29 @@ function renderCssTabs(tabs, idPrefix, activeLabel = "", { side = false } = {}) 
   const inputs = tabs
     .map(
       (tab, index) =>
-        `<input type="radio" name="${idPrefix}-group" id="${idPrefix}-${index}" class="tab-input" ${index === activeIndex ? "checked" : ""} />`
+        `<input type="radio" name="${idPrefix}-group" id="${idPrefix}-${index}" class="tab-input"${hash ? ` data-hash="${escapeHtml(tabHashSlug(tab.label) || `onglet-${index + 1}`)}"` : ""} ${index === activeIndex ? "checked" : ""} />`
     )
     .join("");
+  const hashScript = hash
+    ? `<script>
+        (function () {
+          var inputs = Array.prototype.slice.call(document.querySelectorAll('input[name="${idPrefix}-group"][data-hash]'));
+          function fromHash() {
+            var slug = decodeURIComponent((location.hash || "").slice(1)).toLowerCase();
+            if (!slug) return;
+            var match = inputs.find(function (input) { return input.dataset.hash === slug; });
+            if (match) match.checked = true;
+          }
+          inputs.forEach(function (input) {
+            input.addEventListener("change", function () {
+              if (input.checked) history.replaceState(null, "", "#" + input.dataset.hash);
+            });
+          });
+          window.addEventListener("hashchange", fromHash);
+          fromHash();
+        })();
+      </script>`
+    : "";
   const labels = tabs
     .map((tab, index) => `<label for="${idPrefix}-${index}" class="tab-label">${escapeHtml(tab.label)}</label>`)
     .join("");
@@ -6571,6 +6601,7 @@ function renderCssTabs(tabs, idPrefix, activeLabel = "", { side = false } = {}) 
       <div class="tab-labels">${labels}</div>
       <div class="tab-panels">${panels}</div>
       <style>${visibilityRules}</style>
+      ${hashScript}
     </div>
   `;
 }
@@ -6592,7 +6623,7 @@ function renderLinksSection(publicLinks) {
     content: `<div class="links-list">${tab.links.map(renderLinkRow).join("")}</div>`
   }));
 
-  return renderCssTabs(tabs, "home-tab");
+  return renderCssTabs(tabs, "home-tab", "", { hash: true });
 }
 
 function renderHome(res, redirects) {
