@@ -6799,7 +6799,9 @@ const SETUP_COPY_SCRIPT = `
           button.addEventListener("click", function () {
             var input = document.getElementById(button.getAttribute("data-copy"));
             input.select();
-            var done = function () { button.textContent = "Copié !"; setTimeout(function () { button.textContent = "Copier"; }, 1500); };
+            var label = button.getAttribute("data-label") || button.textContent;
+            button.setAttribute("data-label", label);
+            var done = function () { button.textContent = "Copié !"; setTimeout(function () { button.textContent = label; }, 1500); };
             if (navigator.clipboard) navigator.clipboard.writeText(input.value).then(done, function () { document.execCommand("copy"); done(); });
             else { document.execCommand("copy"); done(); }
           });
@@ -6964,13 +6966,15 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         </label>
         <label>
           <span>Résultat du script</span>
-          <textarea class="sa-text" name="text" placeholder="## Ma configuration PC&#10;&#10;- **Processeur:** [AMD Ryzen 7 5800X](https://www.amazon.fr/s?k=...)&#10;...">${escapeHtml(setup.text)}</textarea>
+          <textarea class="sa-text" id="sa-text" name="text" placeholder="## Ma configuration PC&#10;&#10;- **Processeur:** [AMD Ryzen 7 5800X](https://www.amazon.fr/s?k=...)&#10;...">${escapeHtml(setup.text)}</textarea>
         </label>
         <p class="sa-hint">${parsed.count ? `${parsed.count} composant${parsed.count > 1 ? "s" : ""} en ligne.` : "Rien en ligne pour l'instant."} Tu peux aussi retoucher le texte à la main : une ligne <code>- **Catégorie:** [Modèle](lien)</code> par composant, <code>## Titre</code> pour une nouvelle partie.</p>
         <div class="sa-row">
           <button type="submit" name="action" value="save">Enregistrer</button>
+          <button type="button" class="secondary" data-copy="sa-text">📋 Copier pour le panneau Twitch</button>
           ${setup.text ? `<button type="submit" name="action" value="clear" class="danger" onclick="return confirm('Effacer le setup de la page publique ?')">Effacer</button>` : ""}
         </div>
+        <p class="sa-hint">Panneau Twitch : sur ta chaîne, <strong>À propos</strong> &rarr; <strong>Modifier les panneaux</strong> &rarr; ajoute un panneau, colle le texte dans <strong>Description</strong> (titres, gras et liens s'affichent). <span id="sa-text-count"></span></p>
       </div>
     </form>
     ${
@@ -6986,7 +6990,16 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         ? `<p class="su-note" style="margin:0 0 20px;"><a href="/setup/verification" target="_blank" rel="noreferrer" style="color:inherit;">🔒 Liste générée par un script public et vérifiable sur GitHub</a></p>`
         : ""
     }
-    ${SETUP_COPY_SCRIPT}`;
+    ${SETUP_COPY_SCRIPT}
+    <script>
+      (function () {
+        var text = document.getElementById("sa-text");
+        var count = document.getElementById("sa-text-count");
+        var show = function () { var n = text.value.length; count.textContent = n ? n + " caractère" + (n > 1 ? "s" : "") + " (si Twitch refuse un texte trop long, répartis-le sur deux panneaux)." : ""; };
+        text.addEventListener("input", show);
+        show();
+      })();
+    </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(renderPage("Mon setup", content, { side: { who: "admin", active: "admin-setup" } }));
 }
