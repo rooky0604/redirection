@@ -48,7 +48,7 @@ Image sur Discord : dans `/admin/planning`, collez le webhook d'un salon. Le pro
 
 ## Mon setup (page publique)
 
-- `/admin/setup` : bouton pour telecharger le script PowerShell `setup/Mon-Setup-Twitch.ps1` (servi sur `/setup/Mon-Setup-Twitch.ps1`, l'adresse du site y est remplie a la volee), ou commande `irm <site>/setup/Mon-Setup-Twitch.ps1 | iex`.
+- `/admin/setup` : bouton pour telecharger le script PowerShell `setup/Mon-Setup-Twitch.ps1` (servi sur `/setup/Mon-Setup-Twitch.ps1`, l'adresse du site y est remplie a la volee), ou ligne a coller dans PowerShell `irm "<site>/setup/Mon-Setup-Twitch.ps1?run" | iex` (affichee juste sous le bouton ; `?run` sert le script en texte).
 - Le script detecte le materiel du PC et ouvre une page locale ; « Copier et ouvrir mon site » copie le texte Markdown (le meme que pour Twitch) a coller dans `/admin/setup`.
 - Le texte est garde tel quel dans `setup.json` (par espace) et affiche en cartes sur `/setup` ; un bouton « Mon setup » apparait sur la page d'accueil.
 

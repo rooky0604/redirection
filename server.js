@@ -1407,11 +1407,10 @@ const handleRequest = async (req, res) => {
       try { script = fs.readFileSync(SETUP_SCRIPT_FILE, "utf8"); } catch { return renderNotFound(res, requestHost, pathname); }
       // Fins de ligne Windows : le fichier s'ouvre proprement dans le Bloc-notes et PowerShell 5.1.
       const body = script.split("__SITE_URL__").join(requestOrigin(req)).replace(/\r?\n/g, "\r\n");
-      res.writeHead(200, {
-        "Content-Type": "application/octet-stream",
-        "Content-Disposition": 'attachment; filename="Mon-Setup-Twitch.ps1"',
-        "Cache-Control": "no-store"
-      });
+      // ?run (commande irm | iex) : texte brut ; sinon fichier a telecharger.
+      res.writeHead(200, url.searchParams.has("run")
+        ? { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+        : { "Content-Type": "application/octet-stream", "Content-Disposition": 'attachment; filename="Mon-Setup-Twitch.ps1"', "Cache-Control": "no-store" });
       res.end(body);
       return;
     }
@@ -6722,7 +6721,8 @@ function renderPublicSetup(res, setup) {
 function renderAdminSetup(res, setup, flash, origin) {
   const parsed = parseSetupText(setup.text);
   const scriptUrl = `${origin}/setup/Mon-Setup-Twitch.ps1`;
-  const command = `irm ${scriptUrl} | iex`;
+  // ?run : servi en texte (pas en piece jointe) pour que irm le rende tel quel a iex.
+  const command = `irm "${scriptUrl}?run" | iex`;
   const content = `
     <style>
       ${SETUP_CSS}
@@ -6733,6 +6733,9 @@ function renderAdminSetup(res, setup, flash, origin) {
       .sa-code input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
       .sa-text { width: 100%; min-height: 260px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
       .sa-hint { margin: 0; font-size: 13px; color: var(--muted); }
+      .sa-hint strong { color: var(--ink); }
+      .sa-run { margin-top: 12px; padding: 14px; border-radius: 14px; border: 1px solid rgba(109, 94, 247, 0.45); background: rgba(109, 94, 247, 0.08); }
+      .sa-run .sa-code { margin-top: 10px; }
       .sa-preview .su { margin: 0; max-width: none; }
     </style>
     <header class="topbar">
@@ -6751,12 +6754,16 @@ function renderAdminSetup(res, setup, flash, origin) {
       </ol>
       <div class="sa-row" style="margin-top:14px;">
         <a class="link-button" href="/setup/Mon-Setup-Twitch.ps1" download>⬇️ Télécharger le script</a>
-        <a class="link-button secondary" href="/setup" target="_blank" rel="noreferrer">Voir la page publique</a>
       </div>
-      <p class="sa-hint" style="margin-top:14px;">Windows bloque le script ? Ouvre PowerShell et colle cette commande, elle télécharge et lance le script directement :</p>
-      <div class="sa-code">
-        <input type="text" id="sa-command" value="${escapeHtml(command)}" readonly />
-        <button type="button" class="secondary" id="sa-copy">Copier</button>
+      <div class="sa-run">
+        <p class="sa-hint"><strong>▶️ Pour exécuter le script</strong> : ouvre <strong>PowerShell</strong> (touche Windows, tape « PowerShell », Entrée), colle cette ligne (clic droit) puis appuie sur <strong>Entrée</strong>. Elle télécharge et lance le script directement, même si Windows bloque le fichier téléchargé.</p>
+        <div class="sa-code">
+          <input type="text" id="sa-command" value="${escapeHtml(command)}" readonly />
+          <button type="button" id="sa-copy">Copier</button>
+        </div>
+      </div>
+      <div class="sa-row" style="margin-top:14px;">
+        <a class="link-button secondary" href="/setup" target="_blank" rel="noreferrer">Voir la page publique</a>
       </div>
     </section>
     <form method="post" action="/admin/setup" class="card">
