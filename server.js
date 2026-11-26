@@ -9,14 +9,61 @@ const ROOT_DIR = __dirname;
 const STORAGE_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(ROOT_DIR, "data");
-const REDIRECTS_FILE = path.join(STORAGE_DIR, "redirects.json");
-const SITE_CONFIG_FILE = path.join(STORAGE_DIR, "site-config.json");
-const MONITORS_FILE = path.join(STORAGE_DIR, "monitors.json");
-const PLANNING_DIR = path.join(STORAGE_DIR, "planning");
-// Espace modo : modos deja connectes par « Acces modo » et groupes locaux de visibilite des tickets.
-const MODO_USERS_FILE = path.join(STORAGE_DIR, "modo-users.json");
-const MODO_GROUPS_FILE = path.join(STORAGE_DIR, "modo-groups.json");
+// ESPACES : un meme site heberge plusieurs espaces, chacun sur son propre domaine (ex. lien.rooky.fr
+// = espace principal, streamerb.fr = espace d'un autre streamer). L'espace est choisi a chaque requete
+// d'apres le domaine (spaces.json) et garde pour toute la suite de la requete (AsyncLocalStorage).
+// Chaque espace a ses propres fichiers : liens, apparence, planning, equipe modo, monitoring, dans
+// data/spaces/<id>/. L'espace principal (aucun domaine d'espace) garde les fichiers de data/.
+// Restent communs : demandes de site (site-requests.json) et la liste des espaces (spaces.json).
+const { AsyncLocalStorage } = require("async_hooks");
+const spaceContext = new AsyncLocalStorage();
+const SPACES_FILE = path.join(STORAGE_DIR, "spaces.json");
 const SITE_REQUESTS_FILE = path.join(STORAGE_DIR, "site-requests.json");
+
+// Espace de la requete en cours (null = espace principal).
+function currentSpace() {
+  return spaceContext.getStore() || null;
+}
+function spaceDir() {
+  const space = currentSpace();
+  return space ? path.join(STORAGE_DIR, "spaces", space.id) : STORAGE_DIR;
+}
+const REDIRECTS_FILE = () => path.join(spaceDir(), "redirects.json");
+const SITE_CONFIG_FILE = () => path.join(spaceDir(), "site-config.json");
+const MONITORS_FILE = () => path.join(spaceDir(), "monitors.json");
+const PLANNING_DIR = () => path.join(spaceDir(), "planning");
+// Espace modo : modos deja connectes par « Acces modo » et groupes locaux de visibilite des tickets.
+const MODO_USERS_FILE = () => path.join(spaceDir(), "modo-users.json");
+const MODO_GROUPS_FILE = () => path.join(spaceDir(), "modo-groups.json");
+
+// Liste des espaces : [{ id, domains: ["streamerb.fr"], guildId, guildName, ownerId, ownerName, siteUrl, createdAt }]
+let spacesCache = { mtime: -1, list: [] };
+function readSpaces() {
+  let mtime = 0;
+  try { mtime = fs.statSync(SPACES_FILE).mtimeMs; } catch { return []; }
+  if (mtime !== spacesCache.mtime) {
+    let list = [];
+    try { list = JSON.parse(fs.readFileSync(SPACES_FILE, "utf8")); } catch { list = []; }
+    spacesCache = { mtime, list: (Array.isArray(list) ? list : []).filter((sp) => /^[a-z0-9-]{3,40}$/.test(String(sp?.id || ""))) };
+  }
+  return spacesCache.list;
+}
+function writeSpaces(list) {
+  fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  fs.writeFileSync(SPACES_FILE, JSON.stringify(list, null, 2) + "\n", "utf8");
+  spacesCache = { mtime: -1, list: [] };
+}
+const bareHost = (host) => String(host || "").toLowerCase().replace(/:\d+$/, "").replace(/^www\./, "");
+function spaceForHost(host) {
+  const wanted = bareHost(host);
+  if (!wanted) return null;
+  return readSpaces().find((sp) => (sp.domains || []).some((d) => bareHost(d) === wanted)) || null;
+}
+// Execute fn dans chaque espace (principal compris) : taches de fond (monitoring, image du planning).
+function forEachSpace(fn) {
+  fn();
+  for (const space of readSpaces()) spaceContext.run(space, fn);
+}
 
 loadEnv(path.join(ROOT_DIR, ".env"));
 
@@ -30,7 +77,13 @@ let useSecureCookies = false;
 
 ensureDataFile();
 
-const requestListener = async (req, res) => {
+// Chaque requete s'execute dans l'espace de son domaine (voir ESPACES en haut du fichier).
+const requestListener = (req, res) => {
+  const space = spaceForHost(req.headers.host || "");
+  return space ? spaceContext.run(space, () => handleRequest(req, res)) : handleRequest(req, res);
+};
+
+const handleRequest = async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const pathname = normalizePath(url.pathname);
@@ -64,27 +117,48 @@ const requestListener = async (req, res) => {
     if (pathname === "/logout") {
       clearCookie(res, "session");
       clearCookie(res, "modo");
+      clearCookie(res, "site_register");
       redirect(res, "/login");
       return;
+    }
+
+    // Domaine heberge comme espace ? (bot.rooky.fr verifie avant d'y envoyer un code de connexion.)
+    if (pathname === "/api/spaces/check" && method === "GET") {
+      const host = bareHost(url.searchParams.get("host") || "");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ hosted: Boolean(spaceForHost(host)) }));
+      return;
+    }
+
+    // Espace d'un autre domaine : son proprietaire se connecte par Discord via bot.rooky.fr, qui le
+    // renvoie sur /register?code=... de CE domaine (code lie au domaine, inutilisable ailleurs).
+    if (pathname === "/admin/discord" && method === "GET") {
+      if (!currentSpace()) return redirect(res, "/login");
+      return redirect(res, `${BOT_SITE_URL}/liens?site=${encodeURIComponent(bareHost(requestHost))}`);
     }
 
     if (pathname === "/register" && method === "GET") {
       const code = String(url.searchParams.get("code") || "");
       if (code) {
-        const verifyUrl = process.env.BOT_REGISTER_VERIFY_URL || "https://bot.rooky.fr/api/site-registration/verify";
-        const response = await fetch(verifyUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }), signal: AbortSignal.timeout(10000) }).catch(() => null);
+        const verifyUrl = process.env.BOT_REGISTER_VERIFY_URL || `${BOT_SITE_URL}/api/site-registration/verify`;
+        const response = await fetch(verifyUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, site: bareHost(requestHost) }), signal: AbortSignal.timeout(10000) }).catch(() => null);
         const identity = response ? await response.json().catch(() => ({})) : {};
         if (!response?.ok || !identity.userId || !identity.guildId) return renderRegister(res, null, null, { error: identity.error || "Liaison avec bot.rooky.fr impossible." });
         const payload = Buffer.from(JSON.stringify({ ...identity, e: Date.now() + 30 * 24 * 60 * 60_000 })).toString("base64url");
         setCookie(res, "site_register", signToken(payload), { httpOnly: true, secure: useSecureCookies, maxAge: 30 * 24 * 60 * 60 });
-        redirect(res, "/register");
+        redirect(res, currentSpace() ? "/register?retour=1" : "/register");
         return;
+      }
+      if (currentSpace()) {
+        if (isAuthenticated(req)) return redirect(res, "/admin");
+        return renderSpaceLogin(res, readRegisterIdentity(req) ? { error: "Ce compte Discord n'est pas propriétaire du serveur Discord de cet espace." } : getFlashMessage(url));
       }
       const identity = readRegisterIdentity(req);
       return renderRegister(res, identity, identity ? findSiteRequest(identity.guildId) : null, getFlashMessage(url));
     }
 
     if (pathname === "/register" && method === "POST") {
+      if (currentSpace()) return redirect(res, "/register");
       const identity = readRegisterIdentity(req);
       if (!identity) return redirect(res, "/register?error=" + encodeURIComponent("Relie d'abord ton compte avec bot.rooky.fr."));
       if (identity.role !== "owner") return redirect(res, "/register?error=" + encodeURIComponent("Seul le propriétaire Discord peut envoyer ou modifier la demande."));
@@ -97,12 +171,14 @@ const requestListener = async (req, res) => {
     }
 
     if (pathname === "/admin/requests" && method === "GET") {
-      if (!isAuthenticated(req)) return redirect(res, "/login");
+      if (currentSpace()) return redirect(res, "/admin");
+      if (!isSuperAdmin(req)) return redirect(res, "/login");
       return renderSiteRequests(res, readSiteRequests(), getFlashMessage(url));
     }
 
     if (pathname === "/admin/requests" && method === "POST") {
-      if (!isAuthenticated(req)) return redirect(res, "/login");
+      if (currentSpace()) return redirect(res, "/admin");
+      if (!isSuperAdmin(req)) return redirect(res, "/login");
       const form = await parseForm(req);
       const requests = readSiteRequests();
       const action = String(form.action || "");
@@ -121,6 +197,27 @@ const requestListener = async (req, res) => {
       }
       const item = requests.find((entry) => entry.id === String(form.id || ""));
       if (!item) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Demande introuvable."));
+      if (action === "host") {
+        const result = createHostedSpace(item, String(form.channel || ""));
+        if (result.error) return redirect(res, "/admin/requests?error=" + encodeURIComponent(result.error));
+        item.status = "accepted";
+        item.hosted = true;
+        item.spaceId = result.space.id;
+        item.linkCode = result.linkCode || "";
+        item.decidedAt = Date.now();
+        writeSiteRequests(requests);
+        return redirect(res, "/admin/requests?success=" + encodeURIComponent(`Espace créé pour ${result.space.domains[0]}. Ajoute ce domaine dans Dokploy (onglet Domains) ; le propriétaire règle son DNS vers ce serveur.`));
+      }
+      if (action === "unhost") {
+        const spaces = readSpaces().filter((sp) => sp.id !== item.spaceId);
+        writeSpaces(spaces);
+        item.status = "refused";
+        item.hosted = false;
+        item.linkCode = "";
+        item.decidedAt = Date.now();
+        writeSiteRequests(requests);
+        return redirect(res, "/admin/requests?success=" + encodeURIComponent("Espace retiré : son domaine affiche de nouveau l'espace principal. Ses fichiers sont gardés dans data/spaces/."));
+      }
       const linkCode = String(form.linkCode || "").trim();
       if (action === "accept" && !/^https?:\/\/.+#.{20,}$/.test(linkCode)) return redirect(res, "/admin/requests?error=" + encodeURIComponent("Colle le code de liaison complet du site déployé."));
       item.status = action === "accept" ? "accepted" : "refused";
@@ -1338,17 +1435,20 @@ function ensureDataFile() {
   if (!fs.existsSync(STORAGE_DIR)) {
     fs.mkdirSync(STORAGE_DIR, { recursive: true });
   }
-
-  if (!fs.existsSync(REDIRECTS_FILE)) {
-    fs.writeFileSync(REDIRECTS_FILE, "[]\n", "utf8");
+  if (!fs.existsSync(spaceDir())) {
+    fs.mkdirSync(spaceDir(), { recursive: true });
   }
 
-  if (!fs.existsSync(SITE_CONFIG_FILE)) {
-    fs.writeFileSync(SITE_CONFIG_FILE, "{}\n", "utf8");
+  if (!fs.existsSync(REDIRECTS_FILE())) {
+    fs.writeFileSync(REDIRECTS_FILE(), "[]\n", "utf8");
   }
 
-  if (!fs.existsSync(MONITORS_FILE)) {
-    fs.writeFileSync(MONITORS_FILE, JSON.stringify({ webhooks: [], bots: [] }, null, 2) + "\n", "utf8");
+  if (!fs.existsSync(SITE_CONFIG_FILE())) {
+    fs.writeFileSync(SITE_CONFIG_FILE(), "{}\n", "utf8");
+  }
+
+  if (!fs.existsSync(MONITORS_FILE())) {
+    fs.writeFileSync(MONITORS_FILE(), JSON.stringify({ webhooks: [], bots: [] }, null, 2) + "\n", "utf8");
   }
   if (!fs.existsSync(SITE_REQUESTS_FILE)) fs.writeFileSync(SITE_REQUESTS_FILE, "[]\n", "utf8");
 }
@@ -1370,6 +1470,65 @@ function upsertSiteRequest(identity, siteUrl) {
   writeSiteRequests(requests);
 }
 
+const BOT_SITE_URL = (process.env.BOT_SITE_URL || "https://bot.rooky.fr").replace(/\/+$/, "");
+
+// Demande acceptee « Héberger ici » : nouvel espace pour le domaine de la demande. Chaine Twitch
+// donnee : planning relie tout de suite, le code de liaison est deverrouille pour le proprietaire
+// sur /register (sinon il la regle lui-meme dans Admin > Planning de son espace).
+function createHostedSpace(request, channelInput) {
+  let host = "";
+  try { host = bareHost(new URL(request.siteUrl).host); } catch { host = ""; }
+  if (!host || !isDnsHostname(host)) return { error: "Le domaine de la demande est invalide." };
+  const spaces = readSpaces();
+  const taken = spaces.find((sp) => (sp.domains || []).some((d) => bareHost(d) === host) && sp.id !== request.spaceId);
+  if (taken) return { error: `Le domaine ${host} est déjà utilisé par un autre espace.` };
+  const id = request.spaceId || `${host.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28)}-${crypto.randomBytes(3).toString("hex")}`;
+  const space = {
+    id,
+    domains: [host],
+    guildId: String(request.guildId),
+    guildName: String(request.guildName || ""),
+    ownerId: String(request.ownerId),
+    ownerName: String(request.ownerName || ""),
+    siteUrl: `https://${host}`,
+    createdAt: Date.now()
+  };
+  writeSpaces([...spaces.filter((sp) => sp.id !== id), space]);
+  const channel = normalizePlanningChannel(channelInput);
+  let linkCode = "";
+  if (channel) {
+    spaceContext.run(space, () => {
+      ensureDataFile();
+      writeSiteConfig({ planningChannel: channel, title: String(request.guildName || "").slice(0, 60) || undefined });
+      const doc = readPlanning(channel);
+      const syncKey = doc.syncKey || crypto.randomBytes(24).toString("base64url");
+      writePlanning({ ...doc, syncKey });
+      linkCode = `https://${host}/api/planning/sync#${syncKey}`;
+    });
+  } else {
+    spaceContext.run(space, () => {
+      ensureDataFile();
+      if (request.guildName) writeSiteConfig({ title: String(request.guildName).slice(0, 60) });
+    });
+  }
+  return { space, linkCode };
+}
+
+// Connexion a l'administration d'un espace (autre domaine) : Discord via bot.rooky.fr.
+function renderSpaceLogin(res, flash = {}) {
+  const space = currentSpace();
+  const content = `<section class="card auth-card">
+    <h1>Administration</h1>
+    <p>Espace de <strong>${escapeHtml(space?.guildName || space?.domains?.[0] || "")}</strong>. Réservé au propriétaire du serveur Discord de l'espace.</p>
+    ${renderMessages(flash)}
+    <a href="/admin/discord" class="link-button" style="display:flex;justify-content:center;">Se connecter avec Discord (bot.rooky.fr)</a>
+    ${readPlanning(planningSiteChannel()).program?.modoUrl ? `<a href="/modo/login" class="link-button secondary" style="display:flex;justify-content:center;margin-top:12px;">\ud83d\udee1\ufe0f Accès modo</a>` : ""}
+    <a href="/" class="link-button secondary back-home-link">Retour à l'accueil</a>
+  </section>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Connexion", content));
+}
+
 function readRegisterIdentity(req) {
   const signed = parseCookies(req.headers.cookie || "").site_register || "";
   const payload = signed ? verifyToken(signed) : "";
@@ -1387,7 +1546,7 @@ const DEFAULT_SITE_CONFIG = {
 function readSiteConfig() {
   ensureDataFile();
   try {
-    const raw = fs.readFileSync(SITE_CONFIG_FILE, "utf8");
+    const raw = fs.readFileSync(SITE_CONFIG_FILE(), "utf8");
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
@@ -1398,7 +1557,7 @@ function readSiteConfig() {
 function writeSiteConfig(nextConfig) {
   const current = readSiteConfig();
   const merged = { ...current, ...nextConfig };
-  fs.writeFileSync(SITE_CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  fs.writeFileSync(SITE_CONFIG_FILE(), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
 function getSiteConfig() {
@@ -1415,7 +1574,7 @@ function getSiteConfig() {
 
 function logStorageStatus() {
   const storageExists = fs.existsSync(STORAGE_DIR);
-  const fileExists = fs.existsSync(REDIRECTS_FILE);
+  const fileExists = fs.existsSync(REDIRECTS_FILE());
   let writable = false;
 
   try {
@@ -1436,19 +1595,20 @@ async function startServer() {
     console.log(`Application disponible sur http://localhost:${PORT}`);
   });
 
-  runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
+  // Taches de fond : une fois par espace (chacun ses fichiers).
+  forEachSpace(() => runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`)));
   setInterval(() => {
-    runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`));
+    forEachSpace(() => runMonitorChecks().catch((error) => console.error(`[monitoring] ${error.message}`)));
   }, MONITOR_INTERVAL_MS);
 
   // Image Discord du programme : passe au jour suivant ("Aujourd'hui", jours passes) meme sans envoi.
   // (startServer tourne avant l'initialisation des constantes du bas du fichier : valeur ecrite ici.)
   setInterval(() => {
-    queuePlanningImage("auto").catch(() => {});
+    forEachSpace(() => queuePlanningImage("auto").catch(() => {}));
   }, 10 * 60 * 1000);
 
   // 08:00 (Paris) : l'image est republiee en nouveau message (en bas du salon), une fois par jour.
-  setInterval(planningDailyRepost, 60 * 1000);
+  setInterval(() => forEachSpace(planningDailyRepost), 60 * 1000);
 }
 
 // Republication quotidienne de l'image du programme a 08:00 (heure de Paris), sans mention. Une fois
@@ -1491,7 +1651,7 @@ function isDnsHostname(host) {
 function readRedirects() {
   ensureDataFile();
   try {
-    const raw = fs.readFileSync(REDIRECTS_FILE, "utf8");
+    const raw = fs.readFileSync(REDIRECTS_FILE(), "utf8");
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -1500,7 +1660,7 @@ function readRedirects() {
 }
 
 function writeRedirects(redirects) {
-  fs.writeFileSync(REDIRECTS_FILE, `${JSON.stringify(redirects, null, 2)}\n`, "utf8");
+  fs.writeFileSync(REDIRECTS_FILE(), `${JSON.stringify(redirects, null, 2)}\n`, "utf8");
 }
 
 function isPrefetchRequest(req) {
@@ -1737,15 +1897,34 @@ function resolveRedirectTarget(target, redirects, visited = new Set()) {
   return resolveRedirectTarget(nextRedirect.target, redirects, visited);
 }
 
-function isAuthenticated(req) {
+// Administrateur du site entier (tous les espaces) : mot de passe ADMIN_*, ou owner / admin de
+// rooky-tv connecte par Discord (« Acces modo »).
+function isSuperAdmin(req) {
   const cookies = parseCookies(req.headers.cookie || "");
   const signed = cookies.session;
   const token = signed ? verifyToken(signed) : "";
   if (token && sessions.has(token)) {
     return true;
   }
-  // Owner / admin de rooky-tv connecte par Discord (« Acces modo ») : administration aussi.
   return readModoSession(req, planningSiteChannel())?.a === true;
+}
+
+// Proprietaire de l'espace en cours (autre domaine que l'espace principal) : connecte par Discord
+// via bot.rooky.fr (/admin/discord -> /register?code=...), proprietaire du serveur Discord de
+// l'espace ; ou streamer de la chaine reliee, connecte par « Acces modo ».
+function isSpaceOwner(req) {
+  const space = currentSpace();
+  if (!space) return false;
+  const identity = readRegisterIdentity(req);
+  if (identity && identity.role === "owner") {
+    const guilds = [String(identity.guildId || ""), ...(Array.isArray(identity.ownedGuildIds) ? identity.ownedGuildIds.map(String) : [])];
+    if (guilds.includes(String(space.guildId || ""))) return true;
+  }
+  return readModoSession(req, planningSiteChannel())?.st === true;
+}
+
+function isAuthenticated(req) {
+  return isSuperAdmin(req) || isSpaceOwner(req);
 }
 
 function parseCookies(header) {
@@ -1927,7 +2106,7 @@ function readMonitorConfig() {
   ensureDataFile();
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(MONITORS_FILE, "utf8"));
+    parsed = JSON.parse(fs.readFileSync(MONITORS_FILE(), "utf8"));
   } catch {
     parsed = {};
   }
@@ -1957,7 +2136,7 @@ function readMonitorConfig() {
 }
 
 function writeMonitorConfig(config) {
-  fs.writeFileSync(MONITORS_FILE, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  fs.writeFileSync(MONITORS_FILE(), `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
 function getPrimaryWebhook(config) {
@@ -2304,6 +2483,7 @@ function buildAdminRedirectUrl({ success = "", error = "", tab = "" } = {}) {
 }
 
 function renderLogin(res, flash) {
+  if (currentSpace()) return renderSpaceLogin(res, flash || {});
   const messages = renderMessages(flash);
   const content = `
     <section class="card auth-card">
@@ -3029,7 +3209,7 @@ function planningSiteChannel() {
   return normalizePlanningChannel(readSiteConfig().planningChannel || "");
 }
 
-const planningFile = (channel) => path.join(PLANNING_DIR, `${channel}.json`);
+const planningFile = (channel) => path.join(PLANNING_DIR(), `${channel}.json`);
 
 function readPlanning(channel) {
   channel = normalizePlanningChannel(channel);
@@ -3069,7 +3249,7 @@ function writePlanning(doc) {
   if (!channel || channel !== planningSiteChannel()) {
     throw new Error("Planning sans chaine valide : rien n'est enregistre.");
   }
-  fs.mkdirSync(PLANNING_DIR, { recursive: true });
+  fs.mkdirSync(PLANNING_DIR(), { recursive: true });
   fs.writeFileSync(planningFile(channel), `${JSON.stringify({ ...doc, channel }, null, 2)}\n`, "utf8");
 }
 
@@ -5032,7 +5212,7 @@ function readJsonFile(file, fallback) {
 }
 
 function readModoGroups() {
-  const raw = readJsonFile(MODO_GROUPS_FILE, []);
+  const raw = readJsonFile(MODO_GROUPS_FILE(), []);
   return (Array.isArray(raw) ? raw : []).map((g) => ({
     id: String(g?.id || ""),
     name: String(g?.name || "Groupe"),
@@ -5045,12 +5225,12 @@ function readModoGroups() {
 }
 
 function writeModoGroups(groups) {
-  fs.mkdirSync(STORAGE_DIR, { recursive: true });
-  fs.writeFileSync(MODO_GROUPS_FILE, `${JSON.stringify(groups, null, 2)}\n`, "utf8");
+  fs.mkdirSync(spaceDir(), { recursive: true });
+  fs.writeFileSync(MODO_GROUPS_FILE(), `${JSON.stringify(groups, null, 2)}\n`, "utf8");
 }
 
 function readModoUsers() {
-  const raw = readJsonFile(MODO_USERS_FILE, []);
+  const raw = readJsonFile(MODO_USERS_FILE(), []);
   return Array.isArray(raw) ? raw.filter((u) => /^\d{5,25}$/.test(String(u?.id || ""))) : [];
 }
 
@@ -5059,8 +5239,8 @@ function rememberModoUser(claims) {
   const users = readModoUsers().filter((u) => u.id !== claims.u);
   users.unshift({ id: claims.u, name: String(claims.n || "").slice(0, 60), role: claims.a ? "admin" : claims.r || "modo", lastAt: Date.now() });
   try {
-    fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    fs.writeFileSync(MODO_USERS_FILE, `${JSON.stringify(users.slice(0, 300), null, 2)}\n`, "utf8");
+    fs.mkdirSync(spaceDir(), { recursive: true });
+    fs.writeFileSync(MODO_USERS_FILE(), `${JSON.stringify(users.slice(0, 300), null, 2)}\n`, "utf8");
   } catch {}
 }
 
@@ -6695,7 +6875,7 @@ function renderRegister(res, identity, request, flash = {}) {
     ${!identity ? `<p>La liaison est réservée au propriétaire du serveur Discord.</p><a class="link-button" href="https://bot.rooky.fr/liens">Lier avec bot.rooky.fr</a>` : `
       <p><strong>${escapeHtml(identity.guildName || identity.guildId)}</strong><br><span style="color:var(--muted)">${escapeHtml(identity.displayName || identity.userId)}</span></p>
       <div class="card" style="padding:16px">${steps.map(([done, label]) => `<p style="margin:8px 0;color:${done ? "var(--success)" : "var(--muted)"}">${done ? "✓" : "○"} ${escapeHtml(label)}</p>`).join("")}</div>
-      ${status === "accepted" ? isOwner ? `<div class="message success">Demande acceptée. Ton code de liaison est déverrouillé.</div><label><span>Code de liaison — à garder pour toi</span><input value="${escapeHtml(request.linkCode || "")}" readonly onclick="this.select()"></label><p>Sur <strong>bot.rooky.fr</strong> : Absences &amp; programme → Programme sur Discord → Sites redirection → colle ce code puis clique sur « Relier ».</p>` : `<div class="message success">Le site a été accepté. Le code reste réservé au propriétaire Discord.</div>` : status === "pending" ? `<div class="message">La demande est en cours, veuillez patienter.</div><p>Étapes déjà terminées affichées ci-dessus.</p>` : status === "refused" ? `<div class="message error">La demande a été refusée.${isOwner ? " Tu peux corriger l’URL et la renvoyer." : ""}</div>` : !isOwner ? `<div class="message">Le propriétaire Discord n’a pas encore envoyé de demande.</div>` : ""}
+      ${status === "accepted" ? isOwner ? `<div class="message success">Demande acceptée. Ton code de liaison est déverrouillé.</div>${request.hosted ? `<p>Ton espace : <a href="${escapeHtml(request.siteUrl)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(request.siteUrl)}</strong></a> — administration sur <a href="${escapeHtml(request.siteUrl)}/admin">${escapeHtml(request.siteUrl)}/admin</a> (connexion Discord).</p>` : ""}<label><span>Code de liaison — à garder pour toi</span><input value="${escapeHtml(request.linkCode || "")}" readonly onclick="this.select()"></label><p>Sur <strong>bot.rooky.fr</strong> : Absences &amp; programme → Programme sur Discord → Sites redirection → colle ce code puis clique sur « Relier ».</p>` : `<div class="message success">Le site a été accepté. Le code reste réservé au propriétaire Discord.</div>` : status === "pending" ? `<div class="message">La demande est en cours, veuillez patienter.</div><p>Étapes déjà terminées affichées ci-dessus.</p>` : status === "refused" ? `<div class="message error">La demande a été refusée.${isOwner ? " Tu peux corriger l’URL et la renvoyer." : ""}</div>` : !isOwner ? `<div class="message">Le propriétaire Discord n’a pas encore envoyé de demande.</div>` : ""}
       ${isOwner && status !== "accepted" ? `<form method="post" action="/register"><label><span>URL du site à déployer</span><input type="url" name="siteUrl" value="${escapeHtml(request?.siteUrl || "")}" placeholder="https://mon-site.fr" required></label><button type="submit">${request ? "Mettre à jour la demande" : "Envoyer la demande"}</button></form>` : ""}
     `}
   </section>`;
@@ -6709,7 +6889,14 @@ function renderSiteRequests(res, requests, flash = {}) {
     <p>Propriétaire : <strong>${escapeHtml(item.ownerName || item.ownerId)}</strong> · Discord ${escapeHtml(item.ownerId)}</p>
     <p>Site : <a href="${escapeHtml(item.siteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(item.siteUrl)}</a></p>
     <p>Statut : <strong>${item.status === "accepted" ? "Accepté" : item.status === "refused" ? "Refusé" : "En attente"}</strong></p>
-    <form method="post" action="/admin/requests" class="form-grid"><input type="hidden" name="id" value="${escapeHtml(item.id)}"><label><span>Code de liaison du site déployé</span><input type="password" name="linkCode" placeholder="https://…/api/planning/sync#…"></label><div><button name="action" value="accept">Accepter et déverrouiller</button> <button class="secondary" name="action" value="refuse">Refuser</button></div></form>
+    ${item.hosted ? `<p>Hébergé ici : <strong>${escapeHtml((readSpaces().find((sp) => sp.id === item.spaceId)?.domains || []).join(", ") || "espace retiré")}</strong> · administration sur ce domaine, connexion Discord du propriétaire.</p>
+    <form method="post" action="/admin/requests" onsubmit="return confirm('Retirer cet espace ? Son domaine affichera l\\'espace principal.')"><input type="hidden" name="id" value="${escapeHtml(item.id)}"><button class="secondary" name="action" value="unhost">Retirer l'espace</button></form>` : `
+    <form method="post" action="/admin/requests" class="form-grid"><input type="hidden" name="id" value="${escapeHtml(item.id)}">
+      <p style="margin:0;color:var(--muted)"><strong>Héberger ici</strong> : son domaine devient un espace de ce site (liens, planning, tickets, équipe séparés). Chaîne Twitch facultative : le planning est relié tout de suite et son code de liaison lui est donné.</p>
+      <label><span>Chaîne Twitch (facultatif)</span><input name="channel" placeholder="streamerb"></label>
+      <div><button name="action" value="host">Héberger ici</button></div>
+    </form>
+    <form method="post" action="/admin/requests" class="form-grid"><input type="hidden" name="id" value="${escapeHtml(item.id)}"><label><span>Ou : code de liaison de son propre déploiement</span><input type="password" name="linkCode" placeholder="https://…/api/planning/sync#…"></label><div><button name="action" value="accept">Accepter et déverrouiller</button> <button class="secondary" name="action" value="refuse">Refuser</button></div></form>`}
   </section>`).join("") : `<section class="card"><p>Aucune demande pour le moment.</p></section>`;
   const content = `<header class="topbar"><div><h1>Demandes de sites</h1><p>Validation des propriétaires Discord et déverrouillage des codes de liaison.</p></div></header>${renderMessages(flash)}
     <details class="card"><summary style="cursor:pointer;font-weight:700;font-size:1.05rem">＋ Créer une demande pour un autre Discord</summary>
@@ -6763,7 +6950,7 @@ function renderSideNav(side) {
   if (side.who === "admin") {
     parts.push(`<div class="side-label">Site</div>`);
     parts.push(link("redirects", "/admin", "\ud83d\udd17", "Redirections"));
-    parts.push(link("requests", "/admin/requests", "\ud83d\udce5", "Demandes de sites"));
+    if (!currentSpace()) parts.push(link("requests", "/admin/requests", "\ud83d\udce5", "Demandes de sites"));
     parts.push(link("preview", "/", "\ud83d\udc41\ufe0f", "Apercu", ` target="_blank" rel="noreferrer"`));
     parts.push(link("stats", "/admin/stats", "\ud83d\udcca", "Statistiques"));
     parts.push(link("site", "/admin/site", "\ud83c\udfa8", "Personnalisation"));

@@ -94,6 +94,40 @@ Points a verifier:
 - Dokploy doit router ces hosts vers cette application (onglet Domains, avec le bon port conteneur, `PORT` dans `.env`)
 - le certificat TLS de chaque domaine est gere automatiquement par Dokploy/Traefik, rien a faire cote application
 
+## Espaces : d'autres streamers sur leur propre domaine
+
+Le meme site peut heberger l'espace d'autres streamers, chacun sur son propre domaine (ex. `streamerb.fr`), a cote de l'espace principal (`lien.rooky.fr`). Chaque espace est completement separe :
+
+| Separe par espace | Commun a tout le site |
+|---|---|
+| Liens et page publique, apparence, statistiques | Demandes de sites (`/admin/requests`) |
+| Planning public et code de liaison avec rooky-tv | Liste des espaces (`data/spaces.json`) |
+| Espace modo, tickets, groupes locaux de l'equipe | |
+| Monitoring (webhooks, bots) | |
+| Administration (`/admin`) | |
+
+L'espace est choisi d'apres le domaine de chaque visite. Fichiers d'un espace : `data/spaces/<id>/` ; l'espace principal garde ceux de `data/`.
+
+### Creer un espace
+
+1. Le streamer fait sa demande sur `https://lien.rooky.fr/register` (connexion Discord via bot.rooky.fr, proprietaire du serveur Discord), avec l'adresse de son domaine (`https://streamerb.fr`).
+2. Dans **Admin > Demandes de sites**, sur sa demande : **Heberger ici**. La chaine Twitch est facultative ; si elle est donnee, le planning est relie tout de suite et son code de liaison lui est affiche sur `/register`.
+3. Dans **Dokploy > Domains** de cette application : ajouter son domaine (et `www.` si besoin), meme port que `lien.rooky.fr`, HTTPS active.
+4. Le streamer fait pointer son DNS vers le serveur (enregistrement A, ou CNAME vers `lien.rooky.fr`).
+
+### Administration d'un espace
+
+- Le proprietaire va sur `https://son-domaine/admin` -> **Se connecter avec Discord**. Seul le proprietaire du serveur Discord de l'espace est accepte (verifie par bot.rooky.fr). Le code de connexion est lie a son domaine : il ne sert pas sur un autre espace.
+- Une fois le planning relie, le streamer de la chaine peut aussi passer par **Acces modo**.
+- Il ne voit que son espace : pas les demandes de sites, ni les autres espaces.
+- Toi (mot de passe `ADMIN_*`, ou owner de rooky-tv par Acces modo) : administrateur de tous les espaces.
+
+### Retirer un espace
+
+**Admin > Demandes de sites** -> **Retirer l'espace** : son domaine affiche de nouveau l'espace principal. Ses fichiers restent dans `data/spaces/<id>/` (supprimables a la main). Penser a retirer aussi le domaine dans Dokploy.
+
+Variable facultative : `BOT_SITE_URL` (defaut `https://bot.rooky.fr`), adresse de rooky-tv pour la connexion Discord.
+
 ## Verification rapide apres deploiement
 
 1. Deployer l'application
