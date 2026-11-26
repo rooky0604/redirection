@@ -6714,7 +6714,6 @@ function renderPublicSetup(res, setup) {
       </header>
       ${parsed.count ? renderSetupSections(parsed) : `<section class="su-section su-empty">Le setup n'est pas encore en ligne.</section>`}
       ${parsed.note ? `<p class="su-note">${escapeHtml(parsed.note)}</p>` : ""}
-      <p class="su-note"><a href="/setup/verification" style="color:inherit;">🔒 Liste générée par un script public et vérifiable sur GitHub</a></p>
       <a href="/" class="link-button secondary back-home-link">Retour à l'accueil</a>
     </main>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -6980,6 +6979,11 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
       <h2>Aperçu</h2>
       <div class="su">${renderSetupSections(parsed)}${parsed.note ? `<p class="su-note">${escapeHtml(parsed.note)}</p>` : ""}</div>
     </section>`
+        : ""
+    }
+    ${
+      info.hash
+        ? `<p class="su-note" style="margin:0 0 20px;"><a href="/setup/verification" target="_blank" rel="noreferrer" style="color:inherit;">🔒 Liste générée par un script public et vérifiable sur GitHub</a></p>`
         : ""
     }
     ${SETUP_COPY_SCRIPT}`;
