@@ -7026,7 +7026,7 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         <input type="text" id="sa-cmd-link" value="${escapeHtml(`!commands add !config 🖥️ Ma config : ${origin}/config`)}" readonly />
         <button type="button" class="secondary" data-copy="sa-cmd-link">Copier</button>
       </div>
-      <p class="sa-hint" style="margin-top:6px;">Commande Nightbot (StreamElements : <code>!command add</code> au lieu de <code>!commands add</code>), ou colle juste <code>${escapeHtml(`${origin}/config`)}</code> comme réponse dans ton bot.</p>
+      <p class="sa-hint" style="margin-top:6px;"><strong>Bot rooky-tv</strong> : sur rooky-tv, <strong>Bandeau OBS &rarr; onglet Annonces chat &rarr; Commandes personnalisées</strong> &rarr; « + », déclencheur <code>!config</code>, réponse <code>${escapeHtml(`🖥️ Ma config : ${origin}/config`)}</code>, puis Enregistrer (la chaîne de cet onglet doit être la tienne, sinon le bot ne répond pas). <strong>Nightbot</strong> : tape la ligne ci-dessus dans ton chat (StreamElements : <code>!command add</code> au lieu de <code>!commands add</code>).</p>
       <p class="sa-hint" style="margin-top:16px;"><strong>Option : la config écrite dans le chat.</strong> Une adresse qui renvoie ta config sur une ligne de chat (500 caractères max sur Twitch), mise à jour toute seule dès que tu enregistres un nouveau résultat.</p>
       <div class="sa-code">
         <input type="text" id="sa-config-url" value="${escapeHtml(`${origin}/setup/config`)}" readonly />
