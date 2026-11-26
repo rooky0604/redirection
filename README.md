@@ -126,7 +126,9 @@ L'espace est choisi d'apres le domaine de chaque visite. Fichiers d'un espace : 
 
 **Admin > Demandes de sites** -> **Retirer l'espace** : son domaine affiche de nouveau l'espace principal. Ses fichiers restent dans `data/spaces/<id>/` (supprimables a la main). Penser a retirer aussi le domaine dans Dokploy.
 
-Variable facultative : `BOT_SITE_URL` (defaut `https://bot.rooky.fr`), adresse de rooky-tv pour la connexion Discord.
+`lien.rooky.fr` reste toujours l'espace principal, avec ses pages publiques : il ne peut jamais devenir un autre espace, ni aucun domaine deja utilise par ses redirections (`createur.rooky.fr`, `*.rooky.fr`...). "Heberger ici" refuse ces demandes.
+
+Variables facultatives : `MAIN_SITE_HOSTS` (defaut `lien.rooky.fr`, plusieurs separes par des virgules), domaines de l'espace principal ; `BOT_SITE_URL` (defaut `https://bot.rooky.fr`), adresse de rooky-tv pour la connexion Discord.
 
 ## Verification rapide apres deploiement
 

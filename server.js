@@ -54,9 +54,13 @@ function writeSpaces(list) {
   spacesCache = { mtime: -1, list: [] };
 }
 const bareHost = (host) => String(host || "").toLowerCase().replace(/:\d+$/, "").replace(/^www\./, "");
+// Domaines de l'espace principal (MAIN_SITE_HOSTS, defaut lien.rooky.fr) : jamais attribues a un
+// autre espace, meme si spaces.json le disait. Ses pages publiques restent les siennes.
+const MAIN_SITE_HOSTS = String(process.env.MAIN_SITE_HOSTS || "lien.rooky.fr")
+  .split(",").map((h) => bareHost(h.trim())).filter(Boolean);
 function spaceForHost(host) {
   const wanted = bareHost(host);
-  if (!wanted) return null;
+  if (!wanted || MAIN_SITE_HOSTS.includes(wanted)) return null;
   return readSpaces().find((sp) => (sp.domains || []).some((d) => bareHost(d) === wanted)) || null;
 }
 // Execute fn dans chaque espace (principal compris) : taches de fond (monitoring, image du planning).
@@ -1479,6 +1483,13 @@ function createHostedSpace(request, channelInput) {
   let host = "";
   try { host = bareHost(new URL(request.siteUrl).host); } catch { host = ""; }
   if (!host || !isDnsHostname(host)) return { error: "Le domaine de la demande est invalide." };
+  // Jamais un domaine de l'espace principal, ni un domaine deja utilise par ses redirections
+  // (source « domaine/chemin » ou « *.domaine ») : ses liens publics resteraient sinon introuvables.
+  if (MAIN_SITE_HOSTS.includes(host)) return { error: `${host} est le domaine de l'espace principal : il ne peut pas devenir un autre espace.` };
+  const mainHosts = readRedirects().map((r) => String(r.source || "")).filter((src) => !src.startsWith("/"))
+    .map((src) => bareHost(src.split("/")[0]));
+  const usedByMain = mainHosts.find((h) => h === host || (h.startsWith("*.") && host.endsWith(h.slice(1))));
+  if (usedByMain) return { error: `${host} est déjà utilisé par les redirections de l'espace principal (${usedByMain}).` };
   const spaces = readSpaces();
   const taken = spaces.find((sp) => (sp.domains || []).some((d) => bareHost(d) === host) && sp.id !== request.spaceId);
   if (taken) return { error: `Le domaine ${host} est déjà utilisé par un autre espace.` };
