@@ -35,6 +35,9 @@ const PLANNING_DIR = () => path.join(spaceDir(), "planning");
 // Espace modo : modos deja connectes par « Acces modo » et groupes locaux de visibilite des tickets.
 const MODO_USERS_FILE = () => path.join(spaceDir(), "modo-users.json");
 const MODO_GROUPS_FILE = () => path.join(spaceDir(), "modo-groups.json");
+// Mon setup : texte colle depuis le script PowerShell (setup/Mon-Setup-Twitch.ps1), affiche sur /setup.
+const SETUP_FILE = () => path.join(spaceDir(), "setup.json");
+const SETUP_SCRIPT_FILE = path.join(ROOT_DIR, "setup", "Mon-Setup-Twitch.ps1");
 
 // Liste des espaces : [{ id, domains: ["streamerb.fr"], guildId, guildName, ownerId, ownerName, siteUrl, createdAt }]
 let spacesCache = { mtime: -1, list: [] };
@@ -1392,6 +1395,50 @@ const handleRequest = async (req, res) => {
         back("success", form.action === "newkey" ? "Nouveau code cree : colle-le dans rooky-tv (l'ancien ne marche plus)" : "Enregistre")
       );
       return;
+    }
+
+    // Mon setup : page publique, script a telecharger (adresse du site remplie a la volee), admin.
+    if (pathname === "/setup" && method === "GET") {
+      return renderPublicSetup(res, readSetup());
+    }
+
+    if (pathname === "/setup/Mon-Setup-Twitch.ps1" && method === "GET") {
+      let script = "";
+      try { script = fs.readFileSync(SETUP_SCRIPT_FILE, "utf8"); } catch { return renderNotFound(res, requestHost, pathname); }
+      // Fins de ligne Windows : le fichier s'ouvre proprement dans le Bloc-notes et PowerShell 5.1.
+      const body = script.split("__SITE_URL__").join(requestOrigin(req)).replace(/\r?\n/g, "\r\n");
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": 'attachment; filename="Mon-Setup-Twitch.ps1"',
+        "Cache-Control": "no-store"
+      });
+      res.end(body);
+      return;
+    }
+
+    if (pathname === "/admin/setup" && method === "GET") {
+      if (!isAuthenticated(req)) return redirect(res, "/login");
+      return renderAdminSetup(res, readSetup(), getFlashMessage(url), requestOrigin(req));
+    }
+
+    if (pathname === "/admin/setup" && method === "POST") {
+      if (!isAuthenticated(req)) return redirect(res, "/login");
+      const form = await parseForm(req);
+      const back = (key, message) => redirect(res, `/admin/setup?${key}=${encodeURIComponent(message)}`);
+      if (form.action === "clear") {
+        writeSetup({ text: "", title: "", intro: "", updatedAt: Date.now() });
+        return back("success", "Setup efface : la page /setup est vide.");
+      }
+      const text = String(form.text || "").replace(/\r\n/g, "\n").trim().slice(0, 30000);
+      const parsed = parseSetupText(text);
+      if (text && !parsed.count) return back("error", "Aucun composant reconnu : colle le texte donne par le bouton « Copier le resultat » du script.");
+      writeSetup({
+        text,
+        title: String(form.title || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        intro: String(form.intro || "").trim().slice(0, 500),
+        updatedAt: Date.now()
+      });
+      return back("success", text ? `Setup enregistre : ${parsed.count} composant${parsed.count > 1 ? "s" : ""} sur /setup.` : "Enregistre.");
     }
 
     if (pathname === "/") {
@@ -5597,6 +5644,7 @@ function renderDocumentation(res, who, logout) {
           section("\u2699\ufe0f", "Administration du site", [
             "<strong>Redirections</strong>, <strong>Statistiques</strong>, <strong>Personnalisation</strong>, <strong>Monitoring</strong> : les liens et la page d'accueil du site.",
             "<strong>Planning</strong> : chaine du site, code de liaison a coller dans rooky-tv (Programme > Sites redirection) et image du programme sur Discord.",
+            "<strong>Mon setup</strong> : telecharge le script, lance-le sur ton PC, clique « Copier le resultat » et colle le texte : ton materiel s'affiche sur la page publique /setup.",
             "Le menu de chaine des tickets n'apparait que pour le proprietaire de rooky-tv."
           ])
         ]
@@ -6464,6 +6512,299 @@ function renderPlanning(res, doc, flash, origin) {
   res.end(renderPage("Planning", content, { side: { who: "admin", active: "admin-planning" } }));
 }
 
+/* ------------------------------ Mon setup ------------------------------ */
+// Le script PowerShell (setup/Mon-Setup-Twitch.ps1, telechargeable sur /setup/Mon-Setup-Twitch.ps1)
+// detecte le materiel et donne un texte Markdown (le meme que pour le panneau Twitch) :
+//   ## Ma configuration PC
+//   - **Processeur:** [AMD Ryzen 7 5800X](https://www.amazon.fr/s?k=...)
+// Ce texte est colle tel quel dans /admin/setup, garde brut dans setup.json et relu a l'affichage.
+
+function readSetup() {
+  const saved = readJsonFile(SETUP_FILE(), {});
+  return {
+    text: String(saved?.text || ""),
+    title: String(saved?.title || ""),
+    intro: String(saved?.intro || ""),
+    updatedAt: Number(saved?.updatedAt) || 0
+  };
+}
+
+function writeSetup(setup) {
+  fs.mkdirSync(spaceDir(), { recursive: true });
+  fs.writeFileSync(SETUP_FILE(), `${JSON.stringify(setup, null, 2)}\n`, "utf8");
+}
+
+const setupNorm = (value) => String(value || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]/g, "");
+
+// Le script ecrit sans accents : on remet ceux des intitules connus.
+const SETUP_LABELS = {
+  cartemere: "Carte mère",
+  ecran: "Écran",
+  entreeaudioaverifier: "Entrée audio",
+  sortieaudioaverifier: "Sortie audio",
+  boitier: "Boîtier",
+  maconfigurationpc: "Ma configuration PC",
+  mesperipheriquesstreaming: "Mes périphériques & streaming"
+};
+const setupLabel = (value) => SETUP_LABELS[setupNorm(value)] || value;
+
+const SETUP_ICONS = {
+  processeur: "🧠", cartegraphique: "🎮", cartemere: "🧩", ram: "⚡", stockage: "💾",
+  alimentation: "🔌", boitier: "📦", refroidissement: "❄️", ecran: "🖥️",
+  webcam: "📷", microphone: "🎙️", casque: "🎧", souris: "🖱️", clavier: "⌨️",
+  manette: "🕹️", streamdeck: "🎛️", cartecapture: "📼", entreeaudioaverifier: "🎚️",
+  sortieaudioaverifier: "🔊", enceintes: "🔊", lumiere: "💡", eclairage: "💡", chaise: "🪑", bureau: "🪑"
+};
+
+function setupLink(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function setupShop(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (/(^|\.)amazon\.|^amzn\./.test(host)) return "Amazon";
+    if (/(^|\.)ldlc\./.test(host)) return "LDLC";
+    return host;
+  } catch {
+    return "";
+  }
+}
+
+// Texte colle -> { sections: [{ title, items: [{ cat, name, qty, url }] }], note, count }.
+function parseSetupText(text) {
+  const sections = [];
+  let current = null;
+  let note = "";
+  let count = 0;
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) {
+      current = { title: heading[1].replace(/\*\*/g, "").trim().slice(0, 80), items: [] };
+      sections.push(current);
+      continue;
+    }
+    const bullet = line.match(/^[-*•]\s+(.+)$/);
+    if (!bullet) {
+      // Mention Amazon Partenaires (ajoutee par le script avec un identifiant) : affichee en bas.
+      if (/partenaire|affili/i.test(line)) note = line.slice(0, 300);
+      continue;
+    }
+    let rest = bullet[1].trim();
+    let cat = "";
+    const bold = rest.match(/^\*\*(.+?)\*\*\s*(.*)$/);
+    const plain = !bold && rest.match(/^([^:[\]]{1,40}):\s*(.+)$/);
+    if (bold) {
+      cat = bold[1].replace(/:\s*$/, "").trim();
+      rest = bold[2].replace(/^:\s*/, "").trim();
+    } else if (plain) {
+      cat = plain[1].trim();
+      rest = plain[2].trim();
+    }
+    let name = rest;
+    let url = "";
+    const link = rest.match(/^\[(.+)\]\((\S+)\)$/);
+    if (link) {
+      name = link[1];
+      url = setupLink(link[2]);
+    }
+    let qty = 1;
+    const times = name.match(/\s*\(x(\d{1,3})\)\s*$/i);
+    if (times) {
+      qty = Math.max(1, Number(times[1]));
+      name = name.slice(0, times.index);
+    }
+    name = name.trim().slice(0, 160);
+    if (!name) continue;
+    if (!current) {
+      current = { title: "Mon setup", items: [] };
+      sections.push(current);
+    }
+    current.items.push({ cat: cat.slice(0, 60), name, qty, url });
+    if (++count >= 200) break;
+  }
+  return { sections: sections.filter((s) => s.items.length), note, count };
+}
+
+function renderSetupItem(item) {
+  const icon = SETUP_ICONS[setupNorm(item.cat)] || "🔧";
+  const shop = item.url ? setupShop(item.url) : "";
+  return `
+    <article class="su-item">
+      <div class="su-ico" aria-hidden="true">${icon}</div>
+      <div class="su-body">
+        ${item.cat ? `<div class="su-cat">${escapeHtml(setupLabel(item.cat))}</div>` : ""}
+        <div class="su-name">${escapeHtml(item.name)}${item.qty > 1 ? ` <span class="su-qty">x${item.qty}</span>` : ""}</div>
+      </div>
+      ${
+        item.url
+          ? `<a class="su-shop" href="${escapeHtml(item.url)}" target="_blank" rel="sponsored noopener noreferrer">${escapeHtml(shop || "Voir")} <span aria-hidden="true">↗</span></a>`
+          : ""
+      }
+    </article>`;
+}
+
+const SETUP_CSS = `
+  .su { max-width: 880px; margin: 48px auto 24px; display: grid; gap: 22px; }
+  .su-hero { position: relative; overflow: hidden; text-align: center; padding: 36px 28px; border-radius: 28px; border: 1px solid var(--line); background: rgba(22, 25, 34, 0.92); box-shadow: 0 24px 50px rgba(0, 0, 0, 0.45); }
+  .su-hero h1 { position: relative; margin: 0 0 8px; font-size: clamp(1.6rem, 4vw, 2.2rem); }
+  .su-hero p { position: relative; margin: 0 auto; max-width: 560px; color: var(--muted); line-height: 1.5; white-space: pre-line; }
+  .su-stats { position: relative; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .su-stats span { padding: 6px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+  .su-section { padding: 22px; border-radius: 22px; border: 1px solid var(--line); background: rgba(22, 25, 34, 0.9); }
+  .su-section h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; font-size: 1.15rem; }
+  .su-section h2 small { margin-left: auto; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .su-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .su-item { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 16px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.025); transition: border-color .15s ease, transform .15s ease; }
+  .su-item:hover { border-color: rgba(109, 94, 247, 0.55); transform: translateY(-2px); }
+  .su-ico { flex: 0 0 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; background: rgba(109, 94, 247, 0.16); font-size: 22px; }
+  .su-body { min-width: 0; flex: 1; }
+  .su-cat { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #b6acff; }
+  .su-name { margin-top: 2px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  .su-qty { display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: rgba(61, 220, 132, 0.15); color: var(--success); font-size: 12px; }
+  .su-shop { flex: 0 0 auto; padding: 8px 12px; border-radius: 10px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; text-decoration: none; }
+  .su-shop:hover { background: var(--accent-dark); }
+  .su-note { text-align: center; font-size: 12px; color: var(--muted); margin: 0; }
+  .su-empty { text-align: center; color: var(--muted); }
+  @media (max-width: 560px) { .su { margin-top: 24px; } .su-section { padding: 16px; } .su-grid { grid-template-columns: 1fr; } }
+`;
+
+function renderSetupSections(parsed) {
+  return parsed.sections
+    .map((section) => {
+      const icon = /configuration|pc|config/i.test(section.title) ? "🖥️" : /peripher|stream/i.test(section.title) ? "🎙️" : "🧰";
+      return `
+      <section class="su-section">
+        <h2><span aria-hidden="true">${icon}</span>${escapeHtml(setupLabel(section.title))}<small>${section.items.length} élément${section.items.length > 1 ? "s" : ""}</small></h2>
+        <div class="su-grid">${section.items.map(renderSetupItem).join("")}</div>
+      </section>`;
+    })
+    .join("");
+}
+
+function renderPublicSetup(res, setup) {
+  const siteConfig = getSiteConfig();
+  const parsed = parseSetupText(setup.text);
+  const updated = setup.updatedAt
+    ? new Date(setup.updatedAt).toLocaleDateString("fr-FR", { dateStyle: "long", timeZone: PLANNING_PARIS })
+    : "";
+  const title = setup.title || `Le setup de ${siteConfig.title}`;
+  const content = `
+    <style>${SETUP_CSS}</style>
+    <main class="su">
+      <header class="su-hero">
+        <div class="hero-glow" aria-hidden="true"></div>
+        ${siteConfig.logoUrl ? `<img class="profile-logo" src="${escapeHtml(siteConfig.logoUrl)}" alt="" />` : ""}
+        <span class="hero-badge">Mon setup</span>
+        <h1>${escapeHtml(title)}</h1>
+        <p>${escapeHtml(setup.intro || "Le matériel que j'utilise pour jouer et streamer.")}</p>
+        ${
+          parsed.count
+            ? `<div class="su-stats"><span>${parsed.count} élément${parsed.count > 1 ? "s" : ""}</span>${updated ? `<span>Mis à jour le ${escapeHtml(updated)}</span>` : ""}</div>`
+            : ""
+        }
+      </header>
+      ${parsed.count ? renderSetupSections(parsed) : `<section class="su-section su-empty">Le setup n'est pas encore en ligne.</section>`}
+      ${parsed.note ? `<p class="su-note">${escapeHtml(parsed.note)}</p>` : ""}
+      <a href="/" class="link-button secondary back-home-link">Retour à l'accueil</a>
+    </main>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage(`${title}`, content));
+}
+
+function renderAdminSetup(res, setup, flash, origin) {
+  const parsed = parseSetupText(setup.text);
+  const scriptUrl = `${origin}/setup/Mon-Setup-Twitch.ps1`;
+  const command = `irm ${scriptUrl} | iex`;
+  const content = `
+    <style>
+      ${SETUP_CSS}
+      .sa-steps { margin: 0; padding-left: 20px; color: var(--muted); line-height: 1.9; }
+      .sa-steps strong { color: var(--ink); }
+      .sa-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      .sa-code { display: flex; gap: 8px; margin-top: 12px; }
+      .sa-code input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+      .sa-text { width: 100%; min-height: 260px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
+      .sa-hint { margin: 0; font-size: 13px; color: var(--muted); }
+      .sa-preview .su { margin: 0; max-width: none; }
+    </style>
+    <header class="topbar">
+      <div>
+        <h1>Mon setup</h1>
+        <p>Ton matériel détecté par le script, affiché sur la page publique <a href="/setup" target="_blank" rel="noreferrer">/setup</a>.</p>
+      </div>
+    </header>
+    ${renderMessages(flash)}
+    <section class="card">
+      <h2>1. Détecter ton matériel</h2>
+      <ol class="sa-steps">
+        <li><strong>Télécharge le script</strong> et lance-le sur ton PC de stream (clic droit &rarr; <strong>Exécuter avec PowerShell</strong>).</li>
+        <li>Une page s'ouvre avec ton matériel : décoche ce qui ne sert pas, choisis Amazon ou LDLC, ajoute ton identifiant Amazon Partenaires si tu en as un.</li>
+        <li>Clique <strong>« Copier et ouvrir mon site »</strong> (ou « Copier le résultat ») puis colle le texte ci-dessous.</li>
+      </ol>
+      <div class="sa-row" style="margin-top:14px;">
+        <a class="link-button" href="/setup/Mon-Setup-Twitch.ps1" download>⬇️ Télécharger le script</a>
+        <a class="link-button secondary" href="/setup" target="_blank" rel="noreferrer">Voir la page publique</a>
+      </div>
+      <p class="sa-hint" style="margin-top:14px;">Windows bloque le script ? Ouvre PowerShell et colle cette commande, elle télécharge et lance le script directement :</p>
+      <div class="sa-code">
+        <input type="text" id="sa-command" value="${escapeHtml(command)}" readonly />
+        <button type="button" class="secondary" id="sa-copy">Copier</button>
+      </div>
+    </section>
+    <form method="post" action="/admin/setup" class="card">
+      <h2>2. Coller le résultat</h2>
+      <div class="form-grid">
+        <label>
+          <span>Titre de la page (vide = « Le setup de ${escapeHtml(getSiteConfig().title)} »)</span>
+          <input type="text" name="title" value="${escapeHtml(setup.title)}" maxlength="80" />
+        </label>
+        <label>
+          <span>Petit texte sous le titre (facultatif)</span>
+          <input type="text" name="intro" value="${escapeHtml(setup.intro)}" maxlength="500" placeholder="Le matériel que j'utilise pour jouer et streamer." />
+        </label>
+        <label>
+          <span>Résultat du script</span>
+          <textarea class="sa-text" name="text" placeholder="## Ma configuration PC&#10;&#10;- **Processeur:** [AMD Ryzen 7 5800X](https://www.amazon.fr/s?k=...)&#10;...">${escapeHtml(setup.text)}</textarea>
+        </label>
+        <p class="sa-hint">${parsed.count ? `${parsed.count} composant${parsed.count > 1 ? "s" : ""} en ligne.` : "Rien en ligne pour l'instant."} Tu peux aussi retoucher le texte à la main : une ligne <code>- **Catégorie:** [Modèle](lien)</code> par composant, <code>## Titre</code> pour une nouvelle partie.</p>
+        <div class="sa-row">
+          <button type="submit" name="action" value="save">Enregistrer</button>
+          ${setup.text ? `<button type="submit" name="action" value="clear" class="danger" onclick="return confirm('Effacer le setup de la page publique ?')">Effacer</button>` : ""}
+        </div>
+      </div>
+    </form>
+    ${
+      parsed.count
+        ? `<section class="card sa-preview">
+      <h2>Aperçu</h2>
+      <div class="su">${renderSetupSections(parsed)}${parsed.note ? `<p class="su-note">${escapeHtml(parsed.note)}</p>` : ""}</div>
+    </section>`
+        : ""
+    }
+    <script>
+      (function () {
+        var button = document.getElementById("sa-copy");
+        button.addEventListener("click", function () {
+          var input = document.getElementById("sa-command");
+          input.select();
+          var done = function () { button.textContent = "Copié !"; setTimeout(function () { button.textContent = "Copier"; }, 1500); };
+          if (navigator.clipboard) navigator.clipboard.writeText(input.value).then(done, function () { document.execCommand("copy"); done(); });
+          else { document.execCommand("copy"); done(); }
+        });
+      })();
+    </script>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(renderPage("Mon setup", content, { side: { who: "admin", active: "admin-setup" } }));
+}
+
 const ICON_LINK =
   '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 14.5l5-5"/><path d="M8 16.5l-1.5 1.5a3 3 0 0 1-4.2-4.2L4 12"/><path d="M16 7.5l1.5-1.5a3 3 0 0 1 4.2 4.2L20 12"/></svg>';
 
@@ -6844,6 +7185,12 @@ function renderHome(res, redirects) {
           ? `<a href="/planning" class="link-button" style="position:relative;display:flex;width:100%;margin:18px 0 6px;padding:14px 18px;font-weight:700;gap:8px;">📅 Programme de la semaine</a>`
           : ""
       }
+      ${
+        // Bouton vers la page publique du setup, des qu'un setup a ete colle (page Mon setup).
+        parseSetupText(readSetup().text).count
+          ? `<a href="/setup" class="link-button secondary" style="position:relative;display:flex;width:100%;margin:10px 0 6px;padding:14px 18px;font-weight:700;gap:8px;">🖥️ Mon setup</a>`
+          : ""
+      }
       ${linksList}
     </section>
     <footer class="site-footer">
@@ -6967,6 +7314,7 @@ function renderSideNav(side) {
     parts.push(link("site", "/admin/site", "\ud83c\udfa8", "Personnalisation"));
     parts.push(link("monitoring", "/admin/monitoring", "\ud83d\udce1", "Monitoring"));
     parts.push(link("admin-planning", "/admin/planning", "\ud83d\uddd3\ufe0f", "Planning"));
+    parts.push(link("admin-setup", "/admin/setup", "\ud83d\udda5\ufe0f", "Mon setup"));
     parts.push(`<div class="side-sep"></div><div class="side-label">Equipe</div>`);
   }
   if (side.who === "admin" || side.who === "streamer") {

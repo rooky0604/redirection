@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY server.js ./
+COPY setup ./setup
 COPY .env.example ./
 COPY data ./data
 
