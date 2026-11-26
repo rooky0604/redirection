@@ -52,13 +52,14 @@ Image sur Discord : dans `/admin/planning`, collez le webhook d'un salon. Le pro
 - Le script detecte le materiel du PC et ouvre une page locale ; "Copier et ouvrir mon site" copie le texte Markdown (le meme que pour Twitch) a coller dans `/admin/setup`.
 - Le texte est garde tel quel dans `setup.json` (par espace) et affiche en cartes sur `/setup` ; un bouton "Mon setup" apparait sur la page d'accueil.
 
-### Securite du script (empreinte GitHub)
+### Securite du script (depot public et empreinte)
 
-- Le script est le meme, octet pour octet, sur tous les sites (fins de ligne LF imposees par `.gitattributes`, l'adresse du site n'est pas ecrite dedans : la ligne PowerShell la passe en `$SiteUrl`, sinon le script la lit dans la marque de telechargement de Windows).
-- Son empreinte SHA-256 est dans `setup/Mon-Setup-Twitch.ps1.sha256`. La GitHub Action `verify-setup-script.yml` verifie a chaque push que ce fichier correspond au script (et que le script reste ASCII, LF, sans erreur de syntaxe).
-- **Apres toute modification du script**, mettre a jour l'empreinte : `cd setup && sha256sum Mon-Setup-Twitch.ps1 > Mon-Setup-Twitch.ps1.sha256`, sinon l'Action echoue et le script refuse de se lancer.
-- La ligne PowerShell lit l'empreinte directement sur GitHub (raw.githubusercontent.com) et ne lance le script que si elle est identique ; lance depuis un fichier, le script compare lui-meme son empreinte a GitHub. Dans les deux cas il affiche ce qu'il va faire et demande de valider l'operation (O).
-- `/admin/setup` affiche l'empreinte du script servi et si elle est identique a celle de GitHub.
+- **Reference : le depot public [rooky0604/mon-setup-twitch](https://github.com/rooky0604/mon-setup-twitch)** (script, `Mon-Setup-Twitch.ps1.sha256`, une release + un tag `vX.Y.Z` par version, tableau de tracabilite dans son README, GitHub Action `verify.yml`).
+- `setup/Mon-Setup-Twitch.ps1` est une copie exacte (octet pour octet, LF impose par `.gitattributes`) : le meme fichier sur tous les sites, l'adresse du site n'est pas ecrite dedans (la ligne PowerShell la passe en `$SiteUrl`, sinon le script la lit dans la marque de telechargement de Windows).
+- La GitHub Action `verify-setup-script.yml` de ce depot verifie que `setup/Mon-Setup-Twitch.ps1.sha256` correspond a la copie **et** que la copie a la meme empreinte que le depot public (et que le script reste ASCII, LF, sans erreur de syntaxe).
+- La ligne PowerShell lit l'empreinte dans le depot public (raw.githubusercontent.com) et ne lance le script que si elle est identique ; lance depuis un fichier, le script compare lui-meme son empreinte au depot. Dans les deux cas il affiche sa version, le lien du depot et `/setup/verification`, ce qu'il va faire, et demande de valider l'operation (O).
+- Page publique **`/setup/verification`** : ce que fait le script, empreinte du fichier servi comparee au depot public, liens (depot, code, .sha256, versions, historique, verifications), ligne PowerShell et commande `Get-FileHash`. Lien en bas de `/setup` et sur `/admin/setup`.
+- **Publier une nouvelle version** : dans `mon-setup-twitch`, modifier le script et `$SetupVersion`, `sha256sum Mon-Setup-Twitch.ps1 > Mon-Setup-Twitch.ps1.sha256`, ajouter la ligne au tableau du README, commit + tag `vX.Y.Z` + release ; puis copier les deux fichiers dans `setup/` ici et pousser.
 
 ## Persistance Dokploy
 

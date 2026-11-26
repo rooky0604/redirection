@@ -1,12 +1,15 @@
 # Mon Setup Twitch - detecte le materiel du PC et prepare la liste a coller sur Twitch et sur le site.
-# Securite : ce fichier est le meme sur tous les sites. Son empreinte SHA-256 est publiee sur GitHub et
-# verifiee par GitHub Actions a chaque modification :
-#   https://github.com/rooky0604/redirection/blob/main/setup/Mon-Setup-Twitch.ps1.sha256
-# Avant de faire quoi que ce soit, le script compare son empreinte a celle de GitHub et demande de
-# valider l'operation. Il ne fait que lire les informations du materiel et creer une page sur le Bureau.
-# Lancer : la ligne a coller dans PowerShell donnee sur la page "Mon setup" du site, ou
+# Code source, empreinte SHA-256 et historique de chaque version (depot public) :
+#   https://github.com/rooky0604/mon-setup-twitch
+# Securite : ce fichier est le meme sur tous les sites. Son empreinte est publiee dans le depot public
+# (Mon-Setup-Twitch.ps1.sha256) et verifiee par GitHub Actions a chaque modification. Avant de faire quoi
+# que ce soit, le script compare son empreinte a celle du depot et demande de valider l'operation. Il ne
+# fait que lire les informations du materiel et creer une page sur le Bureau.
+# Lancer : la ligne a coller dans PowerShell donnee sur le site (page /setup/verification), ou
 #   powershell -ExecutionPolicy Bypass -File .\Mon-Setup-Twitch.ps1
-$SetupHashUrl = 'https://raw.githubusercontent.com/rooky0604/redirection/main/setup/Mon-Setup-Twitch.ps1.sha256'
+$SetupVersion = '1.0.0'
+$SetupRepoUrl = 'https://github.com/rooky0604/mon-setup-twitch'
+$SetupHashUrl = 'https://raw.githubusercontent.com/rooky0604/mon-setup-twitch/main/Mon-Setup-Twitch.ps1.sha256'
 # Adresse du site : donnee par la ligne PowerShell du site ($SiteUrl), sinon lue dans la marque de
 # telechargement de Windows (Zone.Identifier du fichier), sinon le site principal.
 if (!$SiteUrl -and $PSCommandPath) {
@@ -19,7 +22,7 @@ if ("$SiteUrl" -notmatch '^https?://[^/\s]+') { $SiteUrl = 'https://lien.rooky.f
 $SiteUrl = "$SiteUrl".TrimEnd('/')
 
 Write-Host ''
-Write-Host '=== Mon Setup Twitch ===' -ForegroundColor Magenta
+Write-Host "=== Mon Setup Twitch v$SetupVersion ===" -ForegroundColor Magenta
 # Verification GitHub : deja faite par la ligne du site ($SetupVerified), sinon sur ce fichier.
 $verif = ''
 if ($SetupVerified) { $verif = "$SetupVerified" }
@@ -28,7 +31,7 @@ elseif ($PSCommandPath) {
         $ref = ("$(Invoke-RestMethod -Uri $SetupHashUrl -TimeoutSec 15)".Trim() -split '\s+')[0]
         $mine = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
         if ($ref -and $mine -eq $ref) { $verif = 'OK : empreinte identique a GitHub' }
-        else { $verif = "DIFFERENTE de GitHub (ce fichier : $mine / GitHub : $ref)" }
+        else { $verif = "DIFFERENTE du depot GitHub (ce fichier : $mine / depot : $ref)" }
     } catch { $verif = "impossible de joindre GitHub ($($_.Exception.Message))" }
 } else { $verif = 'non verifiee (script lance sans fichier ni ligne du site)' }
 if ($verif -like 'OK*') { Write-Host "Verification GitHub : $verif" -ForegroundColor Green }
@@ -36,7 +39,8 @@ else {
     Write-Host "Verification GitHub : $verif" -ForegroundColor Red
     Write-Host "ATTENTION : ne continue que si tu sais d'ou vient ce fichier." -ForegroundColor Red
 }
-Write-Host "Site : $SiteUrl"
+Write-Host "Code source et empreinte : $SetupRepoUrl"
+Write-Host "Verifier toi-meme : $SiteUrl/setup/verification"
 Write-Host 'Ce script va :'
 Write-Host ' - lire les informations de ton materiel sur ce PC (processeur, carte graphique, carte mere, RAM, disques,'
 Write-Host '   ecrans, peripheriques USB, et VoiceMeeter s''il est installe)'

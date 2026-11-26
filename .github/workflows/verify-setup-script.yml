@@ -30,6 +30,18 @@ jobs:
           echo "### Script Mon setup verifie" >> "$GITHUB_STEP_SUMMARY"
           echo "SHA-256 : \`$(sha256sum Mon-Setup-Twitch.ps1 | cut -d' ' -f1)\`" >> "$GITHUB_STEP_SUMMARY"
 
+      # Le depot public rooky0604/mon-setup-twitch est la reference : la copie servie par les sites doit
+      # avoir exactement la meme empreinte que lui.
+      - name: Copie identique au depot public mon-setup-twitch
+        working-directory: setup
+        run: |
+          ref=$(curl -fsSL https://raw.githubusercontent.com/rooky0604/mon-setup-twitch/main/Mon-Setup-Twitch.ps1.sha256 | cut -d' ' -f1)
+          mine=$(sha256sum Mon-Setup-Twitch.ps1 | cut -d' ' -f1)
+          echo "Depot public : $ref"
+          echo "Ce depot     : $mine"
+          [ -n "$ref" ] && [ "$ref" = "$mine" ] || { echo "La copie differe du depot public : publier d'abord la nouvelle version dans rooky0604/mon-setup-twitch."; exit 1; }
+          echo "Identique au depot public : https://github.com/rooky0604/mon-setup-twitch" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Script lisible par Windows PowerShell (ASCII, fins de ligne LF, syntaxe)
         shell: pwsh
         run: |
