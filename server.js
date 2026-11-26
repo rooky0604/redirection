@@ -1403,7 +1403,7 @@ const handleRequest = async (req, res) => {
     }
 
     if (pathname === "/setup/Mon-Setup-Twitch.ps1" && method === "GET") {
-      const body = setupScriptBody(requestOrigin(req));
+      const body = setupScriptBody();
       if (!body) return renderNotFound(res, requestHost, pathname);
       // ?run (commande irm | iex) : texte brut ; sinon fichier a telecharger.
       res.writeHead(200, url.searchParams.has("run")
@@ -1415,7 +1415,7 @@ const handleRequest = async (req, res) => {
 
     if (pathname === "/admin/setup" && method === "GET") {
       if (!isAuthenticated(req)) return redirect(res, "/login");
-      return renderAdminSetup(res, readSetup(), getFlashMessage(url), requestOrigin(req));
+      return renderAdminSetup(res, readSetup(), getFlashMessage(url), requestOrigin(req), await setupGithubHash());
     }
 
     if (pathname === "/admin/setup" && method === "POST") {
@@ -6716,25 +6716,56 @@ function renderPublicSetup(res, setup) {
   res.end(renderPage(`${title}`, content));
 }
 
-// Script tel que servi par ce site : adresse du site remplie, fins de ligne Windows (Bloc-notes,
-// PowerShell 5.1). Son empreinte SHA-256 (comme Get-FileHash) est calculee sur ces octets exacts.
-function setupScriptBody(origin) {
-  let script = "";
-  try { script = fs.readFileSync(SETUP_SCRIPT_FILE, "utf8"); } catch { return ""; }
-  return script.split("__SITE_URL__").join(origin).replace(/\r?\n/g, "\r\n");
+// Script servi : le fichier du depot tel quel, octet pour octet (le meme sur tous les sites, fins de
+// ligne LF imposees par .gitattributes). Son empreinte SHA-256 est donc celle publiee sur GitHub dans
+// setup/Mon-Setup-Twitch.ps1.sha256, verifiee par GitHub Actions (.github/workflows/verify-setup-script.yml).
+// L'adresse du site n'est plus ecrite dans le fichier : la ligne PowerShell la donne ($SiteUrl), sinon le
+// script la lit dans la marque de telechargement de Windows.
+const SETUP_GITHUB_REPO = process.env.SETUP_GITHUB_REPO || "rooky0604/redirection";
+const SETUP_GITHUB_HASH_URL = `https://raw.githubusercontent.com/${SETUP_GITHUB_REPO}/main/setup/Mon-Setup-Twitch.ps1.sha256`;
+const SETUP_GITHUB_PAGE_URL = `https://github.com/${SETUP_GITHUB_REPO}/blob/main/setup/Mon-Setup-Twitch.ps1.sha256`;
+const SETUP_GITHUB_ACTIONS_URL = `https://github.com/${SETUP_GITHUB_REPO}/actions/workflows/verify-setup-script.yml`;
+
+function setupScriptBody() {
+  try { return fs.readFileSync(SETUP_SCRIPT_FILE); } catch { return null; }
 }
 
-function renderAdminSetup(res, setup, flash, origin) {
+// Empreinte publiee sur GitHub (gardee 10 min ; un echec est retente au bout d'1 min).
+let setupGithubHashCache = { at: 0, hash: "", error: "" };
+async function setupGithubHash() {
+  const age = Date.now() - setupGithubHashCache.at;
+  if (age < (setupGithubHashCache.hash ? 10 * 60_000 : 60_000)) return setupGithubHashCache;
+  try {
+    const response = await fetch(SETUP_GITHUB_HASH_URL, { signal: AbortSignal.timeout(8000), headers: { "Cache-Control": "no-cache" } });
+    if (!response.ok) throw new Error(`GitHub a repondu ${response.status}`);
+    const hash = (String(await response.text()).trim().split(/\s+/)[0] || "").toUpperCase();
+    if (!/^[0-9A-F]{64}$/.test(hash)) throw new Error("fichier .sha256 illisible");
+    setupGithubHashCache = { at: Date.now(), hash, error: "" };
+  } catch (error) {
+    setupGithubHashCache = { at: Date.now(), hash: "", error: error.message };
+  }
+  return setupGithubHashCache;
+}
+
+function renderAdminSetup(res, setup, flash, origin, github = {}) {
   const parsed = parseSetupText(setup.text);
   const scriptUrl = `${origin}/setup/Mon-Setup-Twitch.ps1`;
-  const body = setupScriptBody(origin);
-  const hash = body ? crypto.createHash("sha256").update(body, "utf8").digest("hex").toUpperCase() : "";
-  // ?run : servi en texte (pas en piece jointe) pour que irm le rende tel quel. La ligne compare
-  // l'empreinte du script recu a celle affichee ici et ne le lance que si elles sont identiques.
-  const command = hash
-    ? `$s = irm "${scriptUrl}?run"; if ((Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($s)))).Hash -eq '${hash}') { Write-Host 'Hash OK' -ForegroundColor Green; iex $s } else { Write-Host 'Hash different : script NON lance.' -ForegroundColor Red }`
-    : `irm "${scriptUrl}?run" | iex`;
+  const body = setupScriptBody();
+  const hash = body ? crypto.createHash("sha256").update(body).digest("hex").toUpperCase() : "";
+  const same = Boolean(hash && github.hash && hash === github.hash);
+  // ?run : servi en texte (pas en piece jointe) pour que irm le rende tel quel. La ligne lit l'empreinte
+  // directement sur GitHub (pas sur ce site), la compare au script recu et ne le lance que si elles sont
+  // identiques ; le script demande ensuite de valider l'operation.
+  const command =
+    `$SiteUrl = '${origin}'; $s = irm "${scriptUrl}?run"; $ref = ("$(irm '${SETUP_GITHUB_HASH_URL}')".Trim() -split '\\s+')[0]; ` +
+    `if ($ref -and (Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($s)))).Hash -eq $ref) { $SetupVerified = 'OK : empreinte identique a GitHub'; iex $s } ` +
+    `else { Write-Host 'Empreinte differente de GitHub : script NON lance.' -ForegroundColor Red }`;
   const checkCommand = `Get-FileHash "$env:USERPROFILE\\Downloads\\Mon-Setup-Twitch.ps1" -Algorithm SHA256`;
+  const githubState = same
+    ? `<p class="sa-state ok">✅ <strong>Identique à GitHub</strong> : le script de ce site est exactement celui publié et vérifié sur GitHub.</p>`
+    : github.hash
+      ? `<p class="sa-state ko">⚠️ <strong>Différent de GitHub</strong> (GitHub : <code>${escapeHtml(github.hash)}</code>). Juste après une mise à jour, GitHub peut mettre quelques minutes à suivre ; sinon, ne lance pas le script.</p>`
+      : `<p class="sa-state ko">⚠️ GitHub injoignable pour l'instant (${escapeHtml(github.error || "inconnu")}) : compare toi-même avec le fichier sur GitHub.</p>`;
   const content = `
     <style>
       ${SETUP_CSS}
@@ -6744,10 +6775,16 @@ function renderAdminSetup(res, setup, flash, origin) {
       .sa-code { display: flex; gap: 8px; margin-top: 12px; }
       .sa-code input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
       .sa-text { width: 100%; min-height: 260px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
-      .sa-hint { margin: 0; font-size: 13px; color: var(--muted); }
+      .sa-hint { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.55; }
       .sa-hint strong { color: var(--ink); }
       .sa-run { margin-top: 12px; padding: 14px; border-radius: 14px; border: 1px solid rgba(109, 94, 247, 0.45); background: rgba(109, 94, 247, 0.08); }
       .sa-run .sa-code { margin-top: 10px; }
+      .sa-list { margin: 8px 0 0; padding-left: 20px; font-size: 13px; color: var(--muted); line-height: 1.7; }
+      .sa-list strong { color: var(--ink); }
+      .sa-state { margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
+      .sa-state.ok { background: rgba(61, 220, 132, 0.12); color: var(--success); }
+      .sa-state.ko { background: rgba(240, 85, 95, 0.12); color: #ff8a92; }
+      .sa-state code { overflow-wrap: anywhere; }
       .sa-preview .su { margin: 0; max-width: none; }
     </style>
     <header class="topbar">
@@ -6760,7 +6797,8 @@ function renderAdminSetup(res, setup, flash, origin) {
     <section class="card">
       <h2>1. Détecter ton matériel</h2>
       <ol class="sa-steps">
-        <li><strong>Télécharge le script</strong> et lance-le sur ton PC de stream (clic droit &rarr; <strong>Exécuter avec PowerShell</strong>).</li>
+        <li><strong>Lance le script</strong> sur ton PC de stream avec la ligne PowerShell ci-dessous (ou télécharge-le puis clic droit &rarr; <strong>Exécuter avec PowerShell</strong>).</li>
+        <li>Le script vérifie son empreinte sur GitHub, t'explique ce qu'il va faire et te demande de <strong>valider l'opération</strong> : tape <strong>O</strong> puis Entrée.</li>
         <li>Une page s'ouvre avec ton matériel : décoche ce qui ne sert pas, choisis Amazon ou LDLC, ajoute ton identifiant Amazon Partenaires si tu en as un.</li>
         <li>Clique <strong>« Copier et ouvrir mon site »</strong> (ou « Copier le résultat ») puis colle le texte ci-dessous.</li>
       </ol>
@@ -6768,21 +6806,29 @@ function renderAdminSetup(res, setup, flash, origin) {
         <a class="link-button" href="/setup/Mon-Setup-Twitch.ps1" download>⬇️ Télécharger le script</a>
       </div>
       <div class="sa-run">
-        <p class="sa-hint"><strong>▶️ Pour exécuter le script</strong> : ouvre <strong>PowerShell</strong> (touche Windows, tape « PowerShell », Entrée), colle cette ligne (clic droit) puis appuie sur <strong>Entrée</strong>. Elle télécharge le script, <strong>vérifie son empreinte</strong> (« Hash OK ») et ne le lance que si elle est identique à celle ci-dessous, même si Windows bloque le fichier téléchargé.</p>
+        <p class="sa-hint"><strong>▶️ Pour exécuter le script</strong> : ouvre <strong>PowerShell</strong> (touche Windows, tape « PowerShell », Entrée), colle cette ligne (clic droit) puis appuie sur <strong>Entrée</strong>.</p>
         <div class="sa-code">
           <input type="text" id="sa-command" value="${escapeHtml(command)}" readonly />
           <button type="button" data-copy="sa-command">Copier</button>
         </div>
+        <ul class="sa-list">
+          <li>Elle télécharge le script et lit son empreinte SHA-256 <strong>directement sur GitHub</strong> (pas sur ce site).</li>
+          <li>Empreintes identiques : le script démarre. Différentes : <strong>« script NON lancé »</strong>, rien n'est exécuté.</li>
+          <li>Le script affiche ensuite « Vérification GitHub : OK », la liste de ce qu'il va faire, et attend ta validation (<strong>O</strong>) ; toute autre réponse annule sans rien faire.</li>
+          <li>Il lit seulement les infos du matériel et crée une page sur ton Bureau : il n'envoie rien, n'installe rien et ne change aucun réglage.</li>
+        </ul>
       </div>
       ${
         hash
           ? `<div class="sa-run sa-hash">
-        <p class="sa-hint"><strong>🔒 Empreinte SHA-256 du script</strong> (le fichier exact servi par ce site) :</p>
+        <p class="sa-hint"><strong>🔒 Sécurité GitHub</strong> : le script est le même sur tous les sites. Son empreinte est publiée dans <a href="${SETUP_GITHUB_PAGE_URL}" target="_blank" rel="noreferrer">le dépôt GitHub</a> et une <a href="${SETUP_GITHUB_ACTIONS_URL}" target="_blank" rel="noreferrer">vérification GitHub Actions</a> contrôle à chaque modification qu'elle correspond bien au script.</p>
+        <p class="sa-hint" style="margin-top:10px;">Empreinte SHA-256 du script servi par ce site :</p>
         <div class="sa-code">
           <input type="text" id="sa-hash" value="${hash}" readonly />
           <button type="button" class="secondary" data-copy="sa-hash">Copier</button>
         </div>
-        <p class="sa-hint" style="margin-top:10px;">Pour comparer le fichier téléchargé : dans PowerShell, colle cette ligne ; la valeur <strong>Hash</strong> affichée doit être identique à celle ci-dessus.</p>
+        ${githubState}
+        <p class="sa-hint" style="margin-top:10px;">Script téléchargé à la main ? Il compare lui-même son empreinte à GitHub au lancement. Pour vérifier toi-même, colle cette ligne dans PowerShell : la valeur <strong>Hash</strong> doit être identique à celle de GitHub.</p>
         <div class="sa-code">
           <input type="text" id="sa-check" value="${escapeHtml(checkCommand)}" readonly />
           <button type="button" class="secondary" data-copy="sa-check">Copier</button>

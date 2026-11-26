@@ -48,9 +48,17 @@ Image sur Discord : dans `/admin/planning`, collez le webhook d'un salon. Le pro
 
 ## Mon setup (page publique)
 
-- `/admin/setup` : bouton pour telecharger le script PowerShell `setup/Mon-Setup-Twitch.ps1` (servi sur `/setup/Mon-Setup-Twitch.ps1`, l'adresse du site y est remplie a la volee), ou ligne a coller dans PowerShell `irm "<site>/setup/Mon-Setup-Twitch.ps1?run" | iex` (affichee juste sous le bouton ; `?run` sert le script en texte). La page affiche l'empreinte SHA-256 du fichier exact servi (adresse du site remplie, fins de ligne CRLF) et la commande `Get-FileHash` pour comparer ; la ligne PowerShell verifie cette empreinte et ne lance le script que si elle est identique.
-- Le script detecte le materiel du PC et ouvre une page locale ; « Copier et ouvrir mon site » copie le texte Markdown (le meme que pour Twitch) a coller dans `/admin/setup`.
-- Le texte est garde tel quel dans `setup.json` (par espace) et affiche en cartes sur `/setup` ; un bouton « Mon setup » apparait sur la page d'accueil.
+- `/admin/setup` : bouton pour telecharger le script PowerShell `setup/Mon-Setup-Twitch.ps1` (servi tel quel sur `/setup/Mon-Setup-Twitch.ps1`), et juste dessous la ligne a coller dans PowerShell pour l'executer.
+- Le script detecte le materiel du PC et ouvre une page locale ; "Copier et ouvrir mon site" copie le texte Markdown (le meme que pour Twitch) a coller dans `/admin/setup`.
+- Le texte est garde tel quel dans `setup.json` (par espace) et affiche en cartes sur `/setup` ; un bouton "Mon setup" apparait sur la page d'accueil.
+
+### Securite du script (empreinte GitHub)
+
+- Le script est le meme, octet pour octet, sur tous les sites (fins de ligne LF imposees par `.gitattributes`, l'adresse du site n'est pas ecrite dedans : la ligne PowerShell la passe en `$SiteUrl`, sinon le script la lit dans la marque de telechargement de Windows).
+- Son empreinte SHA-256 est dans `setup/Mon-Setup-Twitch.ps1.sha256`. La GitHub Action `verify-setup-script.yml` verifie a chaque push que ce fichier correspond au script (et que le script reste ASCII, LF, sans erreur de syntaxe).
+- **Apres toute modification du script**, mettre a jour l'empreinte : `cd setup && sha256sum Mon-Setup-Twitch.ps1 > Mon-Setup-Twitch.ps1.sha256`, sinon l'Action echoue et le script refuse de se lancer.
+- La ligne PowerShell lit l'empreinte directement sur GitHub (raw.githubusercontent.com) et ne lance le script que si elle est identique ; lance depuis un fichier, le script compare lui-meme son empreinte a GitHub. Dans les deux cas il affiche ce qu'il va faire et demande de valider l'operation (O).
+- `/admin/setup` affiche l'empreinte du script servi et si elle est identique a celle de GitHub.
 
 ## Persistance Dokploy
 

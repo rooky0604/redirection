@@ -1,0 +1,2 @@
+setup/*.ps1 text eol=lf
+setup/*.sha256 text eol=lf

@@ -1,0 +1,43 @@
+# Securite du script "Mon setup" : a chaque modification, GitHub verifie que l'empreinte SHA-256
+# publiee (setup/Mon-Setup-Twitch.ps1.sha256) est bien celle du script, et que le script reste lisible
+# par Windows PowerShell 5.1 (ASCII seulement, aucune erreur de syntaxe). Le script, la ligne
+# PowerShell du site et la page admin comparent leur empreinte a ce fichier .sha256.
+name: Verification du script Mon setup
+
+on:
+  push:
+    paths:
+      - "setup/**"
+      - ".github/workflows/verify-setup-script.yml"
+  pull_request:
+    paths:
+      - "setup/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Empreinte SHA-256 identique a celle publiee
+        working-directory: setup
+        run: |
+          sha256sum -c Mon-Setup-Twitch.ps1.sha256
+          echo "### Script Mon setup verifie" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-256 : \`$(sha256sum Mon-Setup-Twitch.ps1 | cut -d' ' -f1)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Script lisible par Windows PowerShell (ASCII, fins de ligne LF, syntaxe)
+        shell: pwsh
+        run: |
+          $file = Join-Path $PWD 'setup/Mon-Setup-Twitch.ps1'
+          $bytes = [IO.File]::ReadAllBytes($file)
+          if ([Linq.Enumerable]::Any([byte[]]$bytes, [Func[byte,bool]]{ param($b) $b -gt 127 })) { throw 'Caractere non ASCII dans le script (mal lu par Windows PowerShell 5.1).' }
+          if ([Array]::IndexOf($bytes, [byte]13) -ge 0) { throw 'Fin de ligne CRLF dans le script : l''empreinte ne correspondrait plus au fichier servi.' }
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors)
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          Write-Host 'Script OK'
