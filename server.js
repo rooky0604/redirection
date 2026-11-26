@@ -1402,6 +1402,15 @@ const handleRequest = async (req, res) => {
       return renderPublicSetup(res, readSetup());
     }
 
+    // Commande Twitch !config : la config sur une ligne de chat, a jour avec le setup enregistre.
+    // Pour les bots qui lisent une adresse : Nightbot $(urlfetch ...), StreamElements ${customapi....}.
+    if (pathname === "/setup/config" && method === "GET") {
+      const max = Math.min(500, Math.max(100, Number(url.searchParams.get("max")) || 450));
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+      res.end(setupChatLine(readSetup(), requestOrigin(req), max));
+      return;
+    }
+
     if (pathname === "/setup/verification" && method === "GET") {
       return renderSetupVerification(res, requestOrigin(req), await setupGithubHash());
     }
@@ -6677,6 +6686,35 @@ const SETUP_CSS = `
   @media (max-width: 560px) { .su { margin-top: 24px; } .su-section { padding: 16px; } .su-grid { grid-template-columns: 1fr; } }
 `;
 
+// Une ligne de chat (Twitch : 500 caracteres max) : "🖥️ Ma configuration PC : Processeur X · RAM Y | 🎙️ ... → site/setup".
+// Trop long : les derniers elements sont retires (« … ») ; le lien vers /setup reste toujours.
+function setupChatLine(setup, origin, max = 450) {
+  const parsed = parseSetupText(setup.text);
+  const link = `${origin.replace(/^https?:\/\//, "")}/setup`;
+  if (!parsed.count) return `Le setup n'est pas encore en ligne.`;
+  const sectionIcon = (title) => (/configuration|pc|config/i.test(title) ? "🖥️" : /peripher|stream/i.test(title) ? "🎙️" : "🧰");
+  const clean = (value) => String(value).replace(/\s+/g, " ").trim();
+  const sections = parsed.sections.map((section) => ({
+    head: `${sectionIcon(section.title)} ${clean(setupLabel(section.title))} : `,
+    items: section.items.map((item) => clean(`${item.cat ? `${setupLabel(item.cat)} ` : ""}${item.name}${item.qty > 1 ? ` x${item.qty}` : ""}`))
+  }));
+  const tail = ` → ${link}`;
+  const build = (cut) => {
+    const parts = sections.filter((s) => s.items.length).map((s) => s.head + s.items.join(" · "));
+    return parts.join(" | ") + (cut ? " …" : "") + tail;
+  };
+  let line = build(false);
+  let cut = false;
+  // Retire un element a la fois, en partant de la fin, jusqu'a tenir dans la limite.
+  while (line.length > max && sections.some((s) => s.items.length)) {
+    const last = [...sections].reverse().find((s) => s.items.length);
+    last.items.pop();
+    cut = true;
+    line = build(cut);
+  }
+  return line.length > max ? `Mon setup complet : ${link}` : line;
+}
+
 function renderSetupSections(parsed) {
   return parsed.sections
     .map((section) => {
@@ -6980,6 +7018,27 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         <p class="sa-hint">Panneau Twitch : sur ta chaîne, <strong>À propos</strong> &rarr; <strong>Modifier les panneaux</strong> &rarr; ajoute un panneau, colle le texte dans <strong>Description</strong> (titres, gras et liens s'affichent). <span id="sa-text-count"></span></p>
       </div>
     </form>
+    <section class="card">
+      <h2>3. Commande Twitch !config</h2>
+      <p class="sa-hint">Une adresse qui renvoie ta config sur une ligne de chat (500 caractères max sur Twitch). Elle se met à jour toute seule dès que tu enregistres un nouveau résultat : la commande n'est à créer qu'une fois.</p>
+      <div class="sa-code">
+        <input type="text" id="sa-config-url" value="${escapeHtml(`${origin}/setup/config`)}" readonly />
+        <button type="button" class="secondary" data-copy="sa-config-url">Copier</button>
+      </div>
+      <p class="sa-hint" style="margin-top:12px;"><strong>Ce que verra le chat :</strong></p>
+      <p class="sa-state ok" style="color:var(--ink);overflow-wrap:anywhere;">${escapeHtml(setupChatLine(setup, origin))}</p>
+      <p class="sa-hint" style="margin-top:12px;"><strong>Nightbot</strong> : tape dans ton chat</p>
+      <div class="sa-code">
+        <input type="text" id="sa-cmd-nightbot" value="${escapeHtml(`!commands add !config $(urlfetch ${origin}/setup/config)`)}" readonly />
+        <button type="button" class="secondary" data-copy="sa-cmd-nightbot">Copier</button>
+      </div>
+      <p class="sa-hint" style="margin-top:12px;"><strong>StreamElements</strong> : tape dans ton chat</p>
+      <div class="sa-code">
+        <input type="text" id="sa-cmd-se" value="${escapeHtml(`!command add !config \${customapi.${origin}/setup/config}`)}" readonly />
+        <button type="button" class="secondary" data-copy="sa-cmd-se">Copier</button>
+      </div>
+      <p class="sa-hint" style="margin-top:12px;">Autre bot : utilise sa variable « lire une URL / API personnalisée » avec l'adresse ci-dessus. Pour une ligne plus courte, ajoute <code>?max=300</code> à l'adresse (de 100 à 500 caractères ; 450 par défaut, pour garder une marge).</p>
+    </section>
     ${
       parsed.count
         ? `<section class="card sa-preview">
