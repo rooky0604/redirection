@@ -1403,10 +1403,8 @@ const handleRequest = async (req, res) => {
     }
 
     if (pathname === "/setup/Mon-Setup-Twitch.ps1" && method === "GET") {
-      let script = "";
-      try { script = fs.readFileSync(SETUP_SCRIPT_FILE, "utf8"); } catch { return renderNotFound(res, requestHost, pathname); }
-      // Fins de ligne Windows : le fichier s'ouvre proprement dans le Bloc-notes et PowerShell 5.1.
-      const body = script.split("__SITE_URL__").join(requestOrigin(req)).replace(/\r?\n/g, "\r\n");
+      const body = setupScriptBody(requestOrigin(req));
+      if (!body) return renderNotFound(res, requestHost, pathname);
       // ?run (commande irm | iex) : texte brut ; sinon fichier a telecharger.
       res.writeHead(200, url.searchParams.has("run")
         ? { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
@@ -6718,11 +6716,25 @@ function renderPublicSetup(res, setup) {
   res.end(renderPage(`${title}`, content));
 }
 
+// Script tel que servi par ce site : adresse du site remplie, fins de ligne Windows (Bloc-notes,
+// PowerShell 5.1). Son empreinte SHA-256 (comme Get-FileHash) est calculee sur ces octets exacts.
+function setupScriptBody(origin) {
+  let script = "";
+  try { script = fs.readFileSync(SETUP_SCRIPT_FILE, "utf8"); } catch { return ""; }
+  return script.split("__SITE_URL__").join(origin).replace(/\r?\n/g, "\r\n");
+}
+
 function renderAdminSetup(res, setup, flash, origin) {
   const parsed = parseSetupText(setup.text);
   const scriptUrl = `${origin}/setup/Mon-Setup-Twitch.ps1`;
-  // ?run : servi en texte (pas en piece jointe) pour que irm le rende tel quel a iex.
-  const command = `irm "${scriptUrl}?run" | iex`;
+  const body = setupScriptBody(origin);
+  const hash = body ? crypto.createHash("sha256").update(body, "utf8").digest("hex").toUpperCase() : "";
+  // ?run : servi en texte (pas en piece jointe) pour que irm le rende tel quel. La ligne compare
+  // l'empreinte du script recu a celle affichee ici et ne le lance que si elles sont identiques.
+  const command = hash
+    ? `$s = irm "${scriptUrl}?run"; if ((Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($s)))).Hash -eq '${hash}') { Write-Host 'Hash OK' -ForegroundColor Green; iex $s } else { Write-Host 'Hash different : script NON lance.' -ForegroundColor Red }`
+    : `irm "${scriptUrl}?run" | iex`;
+  const checkCommand = `Get-FileHash "$env:USERPROFILE\\Downloads\\Mon-Setup-Twitch.ps1" -Algorithm SHA256`;
   const content = `
     <style>
       ${SETUP_CSS}
@@ -6756,12 +6768,28 @@ function renderAdminSetup(res, setup, flash, origin) {
         <a class="link-button" href="/setup/Mon-Setup-Twitch.ps1" download>⬇️ Télécharger le script</a>
       </div>
       <div class="sa-run">
-        <p class="sa-hint"><strong>▶️ Pour exécuter le script</strong> : ouvre <strong>PowerShell</strong> (touche Windows, tape « PowerShell », Entrée), colle cette ligne (clic droit) puis appuie sur <strong>Entrée</strong>. Elle télécharge et lance le script directement, même si Windows bloque le fichier téléchargé.</p>
+        <p class="sa-hint"><strong>▶️ Pour exécuter le script</strong> : ouvre <strong>PowerShell</strong> (touche Windows, tape « PowerShell », Entrée), colle cette ligne (clic droit) puis appuie sur <strong>Entrée</strong>. Elle télécharge le script, <strong>vérifie son empreinte</strong> (« Hash OK ») et ne le lance que si elle est identique à celle ci-dessous, même si Windows bloque le fichier téléchargé.</p>
         <div class="sa-code">
           <input type="text" id="sa-command" value="${escapeHtml(command)}" readonly />
-          <button type="button" id="sa-copy">Copier</button>
+          <button type="button" data-copy="sa-command">Copier</button>
         </div>
       </div>
+      ${
+        hash
+          ? `<div class="sa-run sa-hash">
+        <p class="sa-hint"><strong>🔒 Empreinte SHA-256 du script</strong> (le fichier exact servi par ce site) :</p>
+        <div class="sa-code">
+          <input type="text" id="sa-hash" value="${hash}" readonly />
+          <button type="button" class="secondary" data-copy="sa-hash">Copier</button>
+        </div>
+        <p class="sa-hint" style="margin-top:10px;">Pour comparer le fichier téléchargé : dans PowerShell, colle cette ligne ; la valeur <strong>Hash</strong> affichée doit être identique à celle ci-dessus.</p>
+        <div class="sa-code">
+          <input type="text" id="sa-check" value="${escapeHtml(checkCommand)}" readonly />
+          <button type="button" class="secondary" data-copy="sa-check">Copier</button>
+        </div>
+      </div>`
+          : ""
+      }
       <div class="sa-row" style="margin-top:14px;">
         <a class="link-button secondary" href="/setup" target="_blank" rel="noreferrer">Voir la page publique</a>
       </div>
@@ -6798,13 +6826,14 @@ function renderAdminSetup(res, setup, flash, origin) {
     }
     <script>
       (function () {
-        var button = document.getElementById("sa-copy");
-        button.addEventListener("click", function () {
-          var input = document.getElementById("sa-command");
-          input.select();
-          var done = function () { button.textContent = "Copié !"; setTimeout(function () { button.textContent = "Copier"; }, 1500); };
-          if (navigator.clipboard) navigator.clipboard.writeText(input.value).then(done, function () { document.execCommand("copy"); done(); });
-          else { document.execCommand("copy"); done(); }
+        document.querySelectorAll("[data-copy]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var input = document.getElementById(button.getAttribute("data-copy"));
+            input.select();
+            var done = function () { button.textContent = "Copié !"; setTimeout(function () { button.textContent = "Copier"; }, 1500); };
+            if (navigator.clipboard) navigator.clipboard.writeText(input.value).then(done, function () { document.execCommand("copy"); done(); });
+            else { document.execCommand("copy"); done(); }
+          });
         });
       })();
     </script>`;
