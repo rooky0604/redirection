@@ -6927,6 +6927,8 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
       .sa-steps strong { color: var(--ink); }
       .sa-text { width: 100%; min-height: 260px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
       .sa-preview .su { margin: 0; max-width: none; }
+      .sa-check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); cursor: pointer; }
+      .sa-check input { width: auto; accent-color: var(--accent); }
     </style>
     <header class="topbar">
       <div>
@@ -6971,7 +6973,8 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         <p class="sa-hint">${parsed.count ? `${parsed.count} composant${parsed.count > 1 ? "s" : ""} en ligne.` : "Rien en ligne pour l'instant."} Tu peux aussi retoucher le texte à la main : une ligne <code>- **Catégorie:** [Modèle](lien)</code> par composant, <code>## Titre</code> pour une nouvelle partie.</p>
         <div class="sa-row">
           <button type="submit" name="action" value="save">Enregistrer</button>
-          <button type="button" class="secondary" data-copy="sa-text">📋 Copier pour le panneau Twitch</button>
+          <button type="button" class="secondary" id="sa-panel-copy">📋 Copier pour le panneau Twitch</button>
+          <label class="sa-check"><input type="checkbox" id="sa-panel-links" checked /> Avec les liens</label>
           ${setup.text ? `<button type="submit" name="action" value="clear" class="danger" onclick="return confirm('Effacer le setup de la page publique ?')">Effacer</button>` : ""}
         </div>
         <p class="sa-hint">Panneau Twitch : sur ta chaîne, <strong>À propos</strong> &rarr; <strong>Modifier les panneaux</strong> &rarr; ajoute un panneau, colle le texte dans <strong>Description</strong> (titres, gras et liens s'affichent). <span id="sa-text-count"></span></p>
@@ -6998,6 +7001,25 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
         var show = function () { var n = text.value.length; count.textContent = n ? n + " caractère" + (n > 1 ? "s" : "") + " (si Twitch refuse un texte trop long, répartis-le sur deux panneaux)." : ""; };
         text.addEventListener("input", show);
         show();
+        // Panneau Twitch : avec ou sans les liens. Sans : [Modele](lien) -> Modele, et la mention Amazon
+        // Partenaires (qui n'a plus lieu d'etre sans lien) est retiree.
+        var button = document.getElementById("sa-panel-copy");
+        var links = document.getElementById("sa-panel-links");
+        var label = button.textContent;
+        var panelText = function () {
+          if (links.checked) return text.value;
+          return text.value
+            .replace(/\\[([^\\]]+)\\]\\((?:[^()\\s]|\\([^()\\s]*\\))+\\)/g, "$1")
+            .split("\\n").filter(function (line) { return !/partenaire|affili/i.test(line); }).join("\\n")
+            .replace(/\\n{3,}/g, "\\n\\n").trim();
+        };
+        button.addEventListener("click", function () {
+          var value = panelText();
+          var done = function () { button.textContent = links.checked ? "Copié avec les liens !" : "Copié sans les liens !"; setTimeout(function () { button.textContent = label; }, 1500); };
+          var fallback = function () { var area = document.createElement("textarea"); area.value = value; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove(); done(); };
+          if (navigator.clipboard) navigator.clipboard.writeText(value).then(done, fallback);
+          else fallback();
+        });
       })();
     </script>`;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
