@@ -52,6 +52,7 @@ Image sur Discord : dans `/admin/planning`, collez le webhook d'un salon. Le pro
 - Le script detecte le materiel du PC et ouvre une page locale ; "Copier et ouvrir mon site" copie le texte Markdown (le meme que pour Twitch) a coller dans `/admin/setup`.
 - Le texte est garde tel quel dans `setup.json` (par espace) et affiche en cartes sur `/setup` ; un bouton "Mon setup" apparait sur la page d'accueil.
 
+- `/config` : adresse courte de la page `/setup`, a mettre telle quelle dans une commande `!config` (n'importe quel bot, texte fixe).
 - `/setup/config` : la config sur une ligne de chat (texte brut, 450 caracteres par defaut, `?max=100..500`), toujours a jour avec le setup enregistre ; les derniers elements sont retires (…) si c'est trop long, le lien `/setup` reste. Pour une commande Twitch `!config` : Nightbot `!commands add !config $(urlfetch <site>/setup/config)`, StreamElements `!command add !config ${customapi.<site>/setup/config}` (donnees sur `/admin/setup`).
 
 ### Securite du script (depot public et empreinte)

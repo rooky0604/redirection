@@ -1398,7 +1398,8 @@ const handleRequest = async (req, res) => {
     }
 
     // Mon setup : page publique, script a telecharger (adresse du site remplie a la volee), admin.
-    if (pathname === "/setup" && method === "GET") {
+    // /config : adresse courte de la page setup, a mettre telle quelle dans une commande !config.
+    if ((pathname === "/setup" || pathname === "/config") && method === "GET") {
       return renderPublicSetup(res, readSetup());
     }
 
@@ -7020,7 +7021,13 @@ function renderAdminSetup(res, setup, flash, origin, github = {}) {
     </form>
     <section class="card">
       <h2>3. Commande Twitch !config</h2>
-      <p class="sa-hint">Une adresse qui renvoie ta config sur une ligne de chat (500 caractères max sur Twitch). Elle se met à jour toute seule dès que tu enregistres un nouveau résultat : la commande n'est à créer qu'une fois.</p>
+      <p class="sa-hint"><strong>Le plus simple : la commande envoie juste le lien.</strong> <a href="/config" target="_blank" rel="noreferrer">${escapeHtml(`${origin.replace(/^https?:\/\//, "")}/config`)}</a> ouvre ta page setup, toujours à jour. Marche avec n'importe quel bot (texte fixe).</p>
+      <div class="sa-code">
+        <input type="text" id="sa-cmd-link" value="${escapeHtml(`!commands add !config 🖥️ Ma config : ${origin}/config`)}" readonly />
+        <button type="button" class="secondary" data-copy="sa-cmd-link">Copier</button>
+      </div>
+      <p class="sa-hint" style="margin-top:6px;">Commande Nightbot (StreamElements : <code>!command add</code> au lieu de <code>!commands add</code>), ou colle juste <code>${escapeHtml(`${origin}/config`)}</code> comme réponse dans ton bot.</p>
+      <p class="sa-hint" style="margin-top:16px;"><strong>Option : la config écrite dans le chat.</strong> Une adresse qui renvoie ta config sur une ligne de chat (500 caractères max sur Twitch), mise à jour toute seule dès que tu enregistres un nouveau résultat.</p>
       <div class="sa-code">
         <input type="text" id="sa-config-url" value="${escapeHtml(`${origin}/setup/config`)}" readonly />
         <button type="button" class="secondary" data-copy="sa-config-url">Copier</button>
